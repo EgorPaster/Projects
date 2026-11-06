@@ -7,7 +7,7 @@ window.App = window.App || {};
   const STORAGE_KEY = 'custplay-v1';
   const LEGACY_KEY = 'dnd-tracker-v1';
   const CARD_TYPES = ['counter', 'skill', 'stat', 'formula', 'spell', 'currency', 'perk', 'inventory', 'note'];
-  const MIN_W = 180, MIN_H = 80;
+  const MIN_W = 220, MIN_H = 110;   // минимальный размер карточки: чтобы влезали кнопки/содержимое
 
   // ===== Helpers =====
   function uid() { return Date.now().toString(36) + Math.random().toString(36).slice(2, 8); }
@@ -72,7 +72,6 @@ window.App = window.App || {};
   let redoStack = [];
   const MAX_UNDO = 50;
   let editMode = false;
-  let lastRoll = {};            // cardId -> {die, bonus, total}
   let editScratch = { units: null, items: null, tokens: null, formulaCard: null, uiAlign: '' };
 
   let formulaMemo = {};
@@ -288,10 +287,36 @@ window.App = window.App || {};
     switch (type) {
       case 'note': return { w: 300, h: 220 };
       case 'inventory': return { w: 300, h: 200 };
-      case 'currency': return { w: 300, h: 160 };
-      case 'spell': case 'perk': return { w: 300, h: 180 };
-      default: return { w: 300, h: 150 };
+      case 'currency': return { w: 300, h: 170 };
+      case 'spell': return { w: 300, h: 175 };       // описание 2 строки + заряды
+      case 'perk': return { w: 300, h: 200 };
+      case 'skill': return { w: 300, h: 90 };        // тело пустое: только шапка с кубиком
+      case 'stat': return { w: 300, h: 105 };        // шапка + строка значения
+      case 'formula': return { w: 300, h: 120 };     // шапка + выражение + значение
+      default: return { w: 300, h: 120 };            // counter: шапка + строка счётчика
     }
+  }
+  // жёсткий минимум: чтобы содержимое карточки не обрезалось при сжатии.
+  // Зависит от содержимого: валюты растут от числа единиц, инвентарь — от числа предметов.
+  // Вариант F: бросок переехал в шапку, зоны результата нет — высоты заметно ниже, минимум 220.
+  function minSize(card) {
+    const type = card.type;
+    let w = MIN_W, h = MIN_H;
+    if (type === 'counter') h = 100;            // шапка + строка счётчика
+    if (type === 'stat') h = 95;                // шапка + значение
+    if (type === 'skill') h = 75;               // тело пустое: только шапка
+    if (type === 'formula') h = 120;            // шапка + выражение (может перенестись) + значение
+    if (type === 'spell') h = 125;              // описание 2 строки + заряды
+    if (type === 'perk') h = 120;               // описание 2 строки + заряды
+    if (type === 'inventory') {                 // предметы + строка итога веса
+      const n = (card.items || []).length;
+      h = Math.max(h, 62 + n * 30 + 22);        // 2 строки описания в предмете тоже учтены сверху (30/строка может не хватить — проверяется тестом)
+    }
+    if (type === 'currency') {                  // каждая валюта — строка ~28px
+      const n = Math.max(2, (card.units || []).length);
+      h = Math.max(h, 64 + n * 28);
+    }
+    return { w: w, h: h };
   }
 
   function autoPlace(ch, card) {
@@ -320,8 +345,9 @@ window.App = window.App || {};
     ensurePages(ch);
     ch.cards.forEach(function (card) {
       if (card.x == null || card.y == null) autoPlace(ch, card);
-      if (card.w == null) card.w = defaultSize(card.type).w;
-      if (card.h == null) card.h = defaultSize(card.type).h;
+      const mn = minSize(card);
+      card.w = card.w == null ? defaultSize(card.type).w : Math.max(mn.w, card.w);
+      card.h = card.h == null ? defaultSize(card.type).h : Math.max(mn.h, card.h);
     });
   }
 
@@ -472,12 +498,28 @@ window.App = window.App || {};
     state.log.unshift({ ts: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' }), text: text });
     if (state.log.length > 100) state.log.length = 100;
   }
-  function rollResultHtml(cardId) {
-    const r = lastRoll[cardId];
-    if (!r) return '';
-    const bonus = r.bonus ? '<span class="roll-bonus">' + (r.bonus > 0 ? '+' : '−') + Math.abs(r.bonus) + '</span>' : '';
-    const total = r.bonus ? '<span class="roll-total"> = ' + r.total + '</span>' : '';
-    return '<span class="roll-result">' + r.die + bonus + total + '</span>';
+  // ===== Вариант F: результат броска — тост по центру экрана =====
+  // Последний бросок перезаписывает предыдущий (очереди нет: серия бросков видна последним итогом).
+  // История остаётся в журнале бросков, на карточке результата нет.
+  let rollToastTimer = null;
+  let rollToastHideTimer = null;
+  function showRollToast(rolled, bonus, total) {
+    let host = document.getElementById('rollToast');
+    if (!host) {
+      host = document.createElement('div');
+      host.id = 'rollToast';
+      document.body.appendChild(host);
+    }
+    clearInterval(rollToastTimer);
+    clearTimeout(rollToastHideTimer);
+    // перезапись с анимацией только при реальном броске (и если анимации включены)
+    host.innerHTML = bonus
+      ? '<div class="rt-row"><span class="rt-die">' + rolled + '</span><span class="rt-bonus">' + (bonus > 0 ? '+' : '−') + Math.abs(bonus) + '</span><span class="rt-eq">=</span><span class="rt-total">' + total + '</span></div>'
+      : '<div class="rt-row"><span class="rt-total">' + total + '</span></div>';
+    host.classList.remove('rt-hide');
+    if (animOn()) popOnce(host, 'rt-pop');
+    rollToastTimer = setTimeout(function () { host.classList.add('rt-hide'); }, 1800);
+    rollToastHideTimer = setTimeout(function () { host.innerHTML = ''; }, 2200);
   }
   function rollCard(card) {
     if (!card.die) return;
@@ -486,13 +528,9 @@ window.App = window.App || {};
     const total = dieRoll + bonus;
     const detail = dieLabel(card.die) + bonusStr(bonus);
     const text = card.name + ' (' + detail + '): ' + dieRoll + (bonus ? (bonus > 0 ? ' + ' : ' − ') + Math.abs(bonus) + ' = ' + total : '');
-    lastRoll[card.id] = { die: dieRoll, bonus: bonus, total: total };
     logRoll(text);
     commit();
-    if (animOn()) {
-      const rel = document.querySelector('.card[data-id="' + card.id + '"] .roll-result');
-      if (rel) popOnce(rel, 'roll-pop');
-    }
+    showRollToast(dieRoll, bonus, total);
   }
 
   // ===== Card actions =====
@@ -510,67 +548,110 @@ window.App = window.App || {};
     mutate(function () { ch.current = num(ch.current) - 1; });
   }
 
-  function handleAction(cardId, ds) {
+  function handleAction(cardId, ds, e) {
     const card = findCard(cardId);
     if (!card) return;
     const act = ds.act;
     if (act === 'inc') mutate(function () { card.current = num(card.current) + 1; });
     else if (act === 'dec') mutate(function () { card.current = num(card.current) - 1; });
-    else if (act === 'custom-inc') openQuickDelta(card, 1);
-    else if (act === 'custom-dec') openQuickDelta(card, -1);
+    else if (act === 'custom-inc') openQuickDelta(card, 1, e && e.currentTarget);
+    else if (act === 'custom-dec') openQuickDelta(card, -1, e && e.currentTarget);
     else if (act === 'roll') rollCard(card);
     else if (act === 'use') useCharge(card);
     else if (act === 'curr-inc') mutate(function () { card.amounts[ds.unit] = num(card.amounts[ds.unit]) + 1; normalizeCurrency(card); });
     else if (act === 'curr-dec') mutate(function () { card.amounts[ds.unit] = num(card.amounts[ds.unit]) - 1; });
-    else if (act === 'curr-custom-inc') openCurrencyDelta(card, ds.unit, 1);
-    else if (act === 'curr-custom-dec') openCurrencyDelta(card, ds.unit, -1);
+    else if (act === 'curr-custom-inc') openCurrencyDelta(card, ds.unit, 1, e && e.currentTarget);
+    else if (act === 'curr-custom-dec') openCurrencyDelta(card, ds.unit, -1, e && e.currentTarget);
     else if (act === 'item-del') mutate(function () { card.items = card.items.filter(function (i) { return i.id !== ds.item; }); });
   }
 
-  function openQuickDelta(card, sign) {
+  // ===== Ввод своего значения (маленькие ++/−−) =====
+  // Плавающее окно возле нажатой кнопки: ничего на карточке не сдвигается.
+  // (Замена значения полем обсуждалась и отвергнута — остаётся только поповер.)
+  let deltaActive = null;   // функция принудительного закрытия открытого окна
+  function closeDeltaInput() {
+    if (!deltaActive) return;
+    const fn = deltaActive;
+    deltaActive = null;
+    fn();
+  }
+  // Плавающее окно: позиционируется под нажатой кнопкой, зажимается в границах карточки
+  function deltaPop(anchor, sign, applyFn) {
+    if (!anchor) return;
+    closeDeltaInput();
+    const cardEl = anchor.closest('.card');
+    if (!cardEl) return;
+    const pop = document.createElement('div');
+    pop.className = 'delta-pop';
+    pop.innerHTML =
+      '<span class="dp-sign">' + (sign > 0 ? '+' : '−') + '</span>' +
+      '<input type="number" class="delta-pop-in" placeholder="0">' +
+      '<button type="button" class="small primary dp-ok" title="OK">✓</button>' +
+      '<button type="button" class="small dp-no" title="' + esc(App.t('cancel')) + '">✕</button>';
+    cardEl.appendChild(pop);
+    const inp = pop.querySelector('input');
+    let done = false;
+    const detach = function () {
+      document.removeEventListener('pointerdown', onDoc, true);
+      pop.remove();
+      deltaActive = null;
+    };
+    const apply = function () {
+      if (done) return;
+      done = true;
+      const v = num(inp.value);
+      detach();
+      if (v) mutate(function () { applyFn(v); });
+    };
+    const onDoc = function (e) {          // клик мимо окна = отмена (без записи)
+      if (pop.contains(e.target)) return;
+      done = true;
+      detach();
+    };
+    deltaActive = function () { done = true; detach(); };
+    pop.querySelector('.dp-ok').addEventListener('click', apply);
+    pop.querySelector('.dp-no').addEventListener('click', function () { done = true; detach(); });
+    document.addEventListener('pointerdown', onDoc, true);
+    inp.addEventListener('click', function (e) { e.stopPropagation(); });
+    inp.addEventListener('keydown', function (e) {
+      e.stopPropagation();
+      if (e.key === 'Enter') apply();
+      else if (e.key === 'Escape') { done = true; detach(); }
+    });
+    // позиция: считаем после вставки в DOM
+    const cr = cardEl.getBoundingClientRect();
+    const ar = anchor.getBoundingClientRect();
+    pop.style.visibility = 'hidden';
+    requestAnimationFrame(function () {
+      if (done) return;
+      const pr = pop.getBoundingClientRect();
+      let left = (ar.left - cr.left) + ar.width / 2 - pr.width / 2;
+      left = Math.max(4, Math.min(cardEl.clientWidth - pr.width - 4, left));
+      let top = (ar.bottom - cr.top) + 6;
+      if (top + pr.height > cr.height) top = (ar.top - cr.top) - pr.height - 6;
+      if (top < 4) top = 4;
+      pop.style.left = Math.round(left) + 'px';
+      pop.style.top = Math.round(top) + 'px';
+      pop.style.visibility = '';
+      inp.focus();
+    });
+  }
+  function openQuickDelta(card, sign, anchor) {
     const row = document.querySelector('.card[data-id="' + card.id + '"] .counter-row');
     if (!row) return;
-    row.querySelectorAll('.quick-delta').forEach(function (el) { el.remove(); });
-    const input = document.createElement('input');
-    input.type = 'number';
-    input.className = 'quick-delta';
-    input.placeholder = sign > 0 ? '+' : '−';
-    row.appendChild(input);
-    input.focus();
-    let applied = false;
-    const apply = function () {
-      if (applied) return;
-      applied = true;
-      const v = num(input.value);
-      if (v) mutate(function () { card.current = num(card.current) + sign * v; });
-      else input.remove();
-    };
-    input.addEventListener('keydown', function (e) { if (e.key === 'Enter') apply(); });
-    input.addEventListener('blur', apply);
-    input.addEventListener('click', function (e) { e.stopPropagation(); });
+    anchor = anchor || row.querySelector(sign > 0 ? '.counter-more.plus' : '.counter-more.minus');
+    if (!anchor) return;
+    deltaPop(anchor, sign, function (v) { card.current = num(card.current) + v; });
   }
-
-  function openCurrencyDelta(card, unitId, sign) {
+  function openCurrencyDelta(card, unitId, sign, anchor) {
     const row = document.querySelector('.card[data-id="' + card.id + '"] .currency-row[data-unit="' + unitId + '"]');
     if (!row) return;
-    row.querySelectorAll('.quick-delta').forEach(function (el) { el.remove(); });
-    const input = document.createElement('input');
-    input.type = 'number';
-    input.className = 'quick-delta';
-    input.placeholder = sign > 0 ? '+' : '−';
-    row.appendChild(input);
-    input.focus();
-    let applied = false;
-    const apply = function () {
-      if (applied) return;
-      applied = true;
-      const v = num(input.value);
-      if (v) mutate(function () { card.amounts[unitId] = num(card.amounts[unitId]) + sign * v; normalizeCurrency(card); });
-      else input.remove();
-    };
-    input.addEventListener('keydown', function (e) { if (e.key === 'Enter') apply(); });
-    input.addEventListener('blur', apply);
-    input.addEventListener('click', function (e) { e.stopPropagation(); });
+    anchor = anchor || row.querySelector(sign > 0 ? '.counter-more.plus' : '.counter-more.minus');
+    if (!anchor) return;
+    deltaPop(anchor, sign, function (v) {
+      card.amounts[unitId] = num(card.amounts[unitId]) + v;
+      normalizeCurrency(card);
+    });
   }
 
   function moveCard(cardId, dir) {
@@ -755,7 +836,15 @@ window.App = window.App || {};
         '<button class="card-del" title="' + esc(App.t('delete')) + '">✕</button>' +
       '</div>' : '';
     const handle = (editMode && desktop) ? '<span class="handle" title="⋮⋮">⋮⋮</span>' : '';
-    return '<div class="card-head">' + handle + '<span class="card-name">' + esc(card.name) + '</span>' + tools + '</div>';
+    // вариант F: кубик в шапке + тег бонуса. В режиме правки НЕ показываем (в правке не бросают) —
+    // иначе тулзы (✎⧉✕) не влезают на минимальной ширине
+    let roller = '';
+    if (card.die && !editMode) {
+      const b = cardBonus(card);
+      roller = '<button class="headroll" data-act="roll" title="' + esc(App.t('roll')) + ' ' + esc(dieLabel(card.die)) + '">' + esc(dieLabel(card.die)) + '</button>' +
+        (b ? '<span class="inc">' + (b > 0 ? '+' : '−') + Math.abs(b) + '</span>' : '');
+    }
+    return '<div class="card-head">' + handle + '<span class="card-name">' + (card.restores ? '<span class="restore-ic">☾</span>' : '') + esc(card.name) + '</span>' + roller + tools + '</div>';
   }
 
   function cardBody(card) {
@@ -773,20 +862,12 @@ window.App = window.App || {};
     return '';
   }
 
-  function rollArea(card) {
-    const bonus = cardBonus(card);
-    const label = dieLabel(card.die) + bonusStr(bonus);
-    const res = rollResultHtml(card.id);
-    return '<div class="roll-area"><button class="roll-btn" data-act="roll">' + esc(App.t('roll')) + ' ' + esc(label) + '</button>' + res + '</div>';
-  }
-
   function counterBody(card) {
     const cur = num(card.current);
     const max = card.max == null ? null : num(card.max);
     const over = (max != null && cur > max);
-    const val = '<span class="counter-val' + (over ? ' over' : '') + '">' + cur + (max != null ? '<small> / ' + max + '</small>' : '') + '</span>' + (card.restores ? ' <span class="restore-ic">☾</span>' : '');
-    let meta = '';
-    if (cardBonus(card)) meta = '<div class="meta">' + esc(App.t('bonus')) + ': ' + bonusStr(cardBonus(card)) + (card.die ? ' · ' + dieLabel(card.die) : '') + '</div>';
+    const under = cur < 0;
+    const val = '<span class="counter-val' + (over ? ' over' : '') + (under ? ' under' : '') + '">' + cur + (max != null ? '<small> / ' + max + '</small>' : '') + '</span>';
     return '<div class="card-body">' +
       '<div class="counter-row">' +
         '<div class="cbtn-wrap">' +
@@ -799,36 +880,26 @@ window.App = window.App || {};
           '<button class="counter-more plus" data-act="custom-inc" title="' + esc(App.t('customValue')) + '">++</button>' +
         '</div>' +
       '</div>' +
-      meta +
-      (card.die ? rollArea(card) : '') +
       '</div>';
   }
 
   function skillBody(card) {
-    const bonus = cardBonus(card);
-    const label = dieLabel(card.die || 20) + bonusStr(bonus);
-    const res = rollResultHtml(card.id);
-    return '<div class="card-body"><div class="roll-area"><button class="roll-btn" data-act="roll">' + esc(App.t('roll')) + ' ' + esc(label) + '</button>' + res + '</div></div>';
+    // тело навыка пустое: бросок уехал в шапку (карточка = название + кубик)
+    return '';
   }
 
   function statBody(card) {
     const val = num(card.value);
     const bonus = cardBonus(card);
-    const res = rollResultHtml(card.id);
-    let rollHtml = '';
-    if (card.die) rollHtml = '<div class="roll-area"><button class="roll-btn" data-act="roll">' + esc(App.t('roll')) + ' ' + esc(dieLabel(card.die) + bonusStr(bonus)) + '</button>' + res + '</div>';
-    return '<div class="card-body"><div class="stat-line"><span class="stat-value">' + fmt(val) + '</span>' +
-      (bonus ? '<span class="stat-bonus">(' + (bonus > 0 ? '+' : '') + bonus + ')</span>' : '') + '</div>' + rollHtml + '</div>';
+    return '<div class="card-body"><div class="stat-line"><span class="stat-value' + (val < 0 ? ' under' : '') + '">' + fmt(val) + '</span>' +
+      (bonus ? '<span class="stat-bonus">(' + (bonus > 0 ? '+' : '') + bonus + ')</span>' : '') + '</div></div>';
   }
 
   function formulaBody(card) {
-    const res = rollResultHtml(card.id);
-    let rollHtml = '';
-    if (card.die) rollHtml = '<div class="roll-area"><button class="roll-btn" data-act="roll">' + esc(App.t('roll')) + ' ' + esc(dieLabel(card.die) + bonusStr(cardBonus(card))) + '</button>' + res + '</div>';
     let valueHtml;
     if (card._error) valueHtml = '<div class="err">' + esc(card._error) + '</div>';
     else valueHtml = '<div class="stat-line"><span class="stat-value">' + fmt(card._value) + '</span></div>';
-    return '<div class="card-body"><div class="meta">' + esc(card.expression || '—') + '</div>' + valueHtml + rollHtml + '</div>';
+    return '<div class="card-body"><div class="meta">' + esc(card.expression || '—') + '</div>' + valueHtml + '</div>';
   }
 
   function pipsString(cur, max) {
@@ -851,19 +922,15 @@ window.App = window.App || {};
     const cur = num(ch.current);
     const max = ch.max == null ? null : num(ch.max);
     const pips = pipsString(cur, max);
-    const restoreIcon = card.restores ? ' ☾' : '';
     return '<div class="charges-row"><span class="charges-pips">' + pips + '</span>' +
-      '<span class="meta">' + cur + (max != null ? ' / ' + max : '') + restoreIcon + '</span>' +
+      '<span class="meta">' + cur + (max != null ? ' / ' + max : '') + '</span>' +
       '<button class="small primary use-btn" data-act="use">' + esc(App.t('use')) + '</button></div>';
   }
 
   function spellBody(card) {
-    const res = rollResultHtml(card.id);
-    let rollHtml = '';
-    if (card.die) rollHtml = '<div class="roll-area"><button class="roll-btn" data-act="roll">' + esc(App.t('roll')) + ' ' + esc(dieLabel(card.die) + bonusStr(cardBonus(card))) + '</button>' + res + '</div>';
     return '<div class="card-body">' +
       (card.description ? '<div class="desc-text">' + esc(card.description) + '</div>' : '') +
-      chargesInfo(card) + rollHtml + '</div>';
+      chargesInfo(card) + '</div>';
   }
 
   function perkBody(card) {
@@ -895,17 +962,21 @@ window.App = window.App || {};
   function inventoryBody(card) {
     const items = card.items || [];
     let totalW = 0;
+    let hasWeight = false;                      // есть ли хоть у одного предмета указанный вес
     const rows = items.map(function (it) {
-      const w = num(it.weight);
+      const w = (it.weight == null) ? 0 : num(it.weight);
       totalW += w * num(it.qty);
-      return '<div class="item-row">' +
-        '<span class="iname">' + esc(it.name) + '</span>' +
+      if (it.weight != null) hasWeight = true;
+      const desc = it.description || '';
+  return '<div class="item-row' + (desc ? ' has-desc' : '') + '"' + (desc ? ' data-item="' + it.id + '" title="' + esc(desc) + '"' : '') + '>' +
+        '<span class="iname">' + esc(it.name) + (desc ? '<small class="idesc">' + esc(desc) + '</small>' : '') + '</span>' +
         '<span class="iqty">×' + num(it.qty) + '</span>' +
-        (card.showWeight ? '<span class="iwgt">' + (it.weight == null ? '—' : fmt(w)) + '</span>' : '') +
+        (card.showWeight && it.weight != null ? '<span class="iwgt">' + fmt(w) + '</span>' : '') +
         (editMode ? '<button class="small" data-act="item-del" data-item="' + it.id + '">✕</button>' : '') +
         '</div>';
     }).join('');
-    const total = card.showWeight ? '<div class="inv-total">' + esc(App.t('totalWeight')) + ': ' + fmt(totalW) + '</div>' : '';
+    // итог веса показываем только если вес реально указан (иначе «Вес: 0» только занимал место)
+    const total = (card.showWeight && hasWeight) ? '<div class="inv-total">' + esc(App.t('totalWeight')) + ': ' + fmt(totalW) + '</div>' : '';
     return '<div class="card-body">' + (rows || '<div class="meta">—</div>') + total + '</div>';
   }
 
@@ -918,6 +989,21 @@ window.App = window.App || {};
     if (!el) return;
     el.querySelectorAll('[data-act]').forEach(function (btn) {
       btn.addEventListener('click', function (e) { handleAction(card.id, btn.dataset, e); });
+    });
+    // описание целиком: клик по тексту — модалка «просмотр полностью»
+    const desc = el.querySelector('.desc-text');
+    if (desc && (card.description || '').trim()) {
+      desc.classList.add('readable');
+      desc.addEventListener('click', function () { openTextModal(card.name, card.description); });
+    }
+    // то же для описаний предметов инвентаря
+    el.querySelectorAll('.item-row.has-desc').forEach(function (row) {
+      const it = (card.items || []).find(function (x) { return x.id === row.dataset.item; });
+      if (!it || !(it.description || '').trim()) return;
+      const descEl = row.querySelector('.idesc');
+      if (!descEl) return;
+      descEl.classList.add('readable');
+      descEl.addEventListener('click', function (e) { e.stopPropagation(); openTextModal(it.name, it.description); });
     });
     const edit = el.querySelector('.card-edit');
     const dup = el.querySelector('.card-dup');
@@ -933,23 +1019,29 @@ window.App = window.App || {};
 
   // ===== Free placement (move & resize) =====
   let dragState = null;
+  let cardZ = 1;   // счётчик «поднятий» карточки: клик в правке выводит её на передний план
   function initFreePlacement() {
     const canvas = document.getElementById('canvas');
     canvas.addEventListener('pointerdown', function (e) {
       if (!editMode || !isDesktop()) return;
+      const cardEl = e.target.closest ? e.target.closest('.card') : null;
+      // перекрытия: любой клик по карточке в режиме правки поднимает её наверх (до следующей перерисовки);
+      // z растёт ТОЛЬКО до 99, чтобы модалка (z 100/101) всегда была выше - см. fix перекрытия
+      if (cardEl) { cardZ = cardZ >= 98 ? 3 : ++cardZ; cardEl.style.zIndex = cardZ; }
       const handle = e.target.closest ? e.target.closest('.handle') : null;
       const resize = e.target.closest ? e.target.closest('.resize-handle') : null;
       if (!handle && !resize) return;
-      const cardEl = e.target.closest('.card');
       if (!cardEl) return;
       const card = findCard(cardEl.dataset.id);
       if (!card) return;
       e.preventDefault();
+      const mn = minSize(card);
       dragState = {
-        id: card.id, el: cardEl, kind: resize ? 'resize' : 'move',
+        id: card.id, type: card.type, el: cardEl, kind: resize ? 'resize' : 'move',
         startX: e.clientX, startY: e.clientY,
         origX: card.x || 0, origY: card.y || 0,
-        origW: card.w || 300, origH: card.h || 150
+        origW: card.w || 300, origH: card.h || 150,
+        minW: mn.w, minH: mn.h
       };
       cardEl.classList.add('dragging');
       document.body.style.userSelect = 'none';
@@ -962,8 +1054,8 @@ window.App = window.App || {};
         dragState.el.style.left = Math.round(dragState.origX + dx) + 'px';
         dragState.el.style.top = Math.round(dragState.origY + dy) + 'px';
       } else {
-        dragState.el.style.width = Math.max(MIN_W, Math.round(dragState.origW + dx)) + 'px';
-        dragState.el.style.height = Math.max(MIN_H, Math.round(dragState.origH + dy)) + 'px';
+        dragState.el.style.width = Math.max(dragState.minW, Math.round(dragState.origW + dx)) + 'px';
+        dragState.el.style.height = Math.max(dragState.minH, Math.round(dragState.origH + dy)) + 'px';
       }
     });
     window.addEventListener('pointerup', function () {
@@ -980,8 +1072,8 @@ window.App = window.App || {};
           if (!Number.isNaN(nx)) card.x = Math.round(nx);
           if (!Number.isNaN(ny)) card.y = Math.round(ny);
         } else {
-          if (!Number.isNaN(nw)) card.w = Math.max(MIN_W, Math.round(nw));
-          if (!Number.isNaN(nh)) card.h = Math.max(MIN_H, Math.round(nh));
+          if (!Number.isNaN(nw)) card.w = Math.max(dragState.minW, Math.round(nw));
+          if (!Number.isNaN(nh)) card.h = Math.max(dragState.minH, Math.round(nh));
         }
         commit();
       }
@@ -1022,12 +1114,26 @@ window.App = window.App || {};
     ]);
   }
 
+  // Полный текст (описание перка/заклинания) отдельным окном
+  function openTextModal(title, text) {
+    openModal(title || App.t('description'), '<div class="full-text">' + esc(text) + '</div>',
+      [{ label: App.t('close'), cls: 'primary' }]);
+  }
+
   // ===== Form helpers =====
   function numField(id, label, value, placeholder) {
     return '<div class="field"><label>' + esc(label) + '</label><input id="' + id + '" type="number" step="1" value="' + (value == null ? '' : value) + '" placeholder="' + esc(placeholder || '0') + '"></div>';
   }
   function bonusField(id, val) {
     return '<div class="field"><label>' + esc(App.t('bonus')) + '</label><input id="' + id + '" type="text" value="' + esc(val == null ? '' : val) + '" placeholder="+2, -3, 2*2, 1/2"></div>';
+  }
+  // Бонус как галочка: поставил галочку — появилось поле выражения; снял — бонус обнулился
+  function bonusToggleFields(val) {
+    const has = val != null && String(val).trim() !== '';
+    return checkField('f-usebonus', App.t('addBonus'), has) +
+      '<div class="field" id="f-bonuswrap"' + (has ? '' : ' style="display:none"') + '">' +
+      '<label>' + esc(App.t('bonus')) + '</label>' +
+      '<input id="f-bonus" type="text" value="' + esc(val == null ? '' : val) + '" placeholder="+2, -3, 2*2, 1/2"></div>';
   }
   function dieField(id, val) {
     let opts = '<option value=""' + (!val ? ' selected' : '') + '>' + esc(App.t('noDie')) + '</option>';
@@ -1044,19 +1150,26 @@ window.App = window.App || {};
   function readCheck(id) { const el = document.getElementById(id); return el ? el.checked : false; }
   function readText(id) { const el = document.getElementById(id); return el ? el.value : ''; }
   function readNumOrNull(id) { const el = document.getElementById(id); const v = el ? el.value : ''; return v === '' ? null : num(v); }
+  // бонус-выражение: читается только если стоит галочка «Добавить бонус» (иначе пусто)
+  function readBonus() {
+    const cb = document.getElementById('f-usebonus');
+    if (cb && !cb.checked) return '';
+    return readText('f-bonus').trim();
+  }
 
   function typeFields(card) {
     switch (card.type) {
       case 'counter':
         return numField('f-current', App.t('current'), card.current) +
           numField('f-max', App.t('max'), card.max == null ? '' : card.max, '—') +
-          bonusField('f-bonus', card.bonus) +
           dieField('f-die', card.die) +
+          bonusToggleFields(card.bonus) +
           checkField('f-restores', App.t('restores'), !!card.restores);
       case 'skill':
-        return dieField('f-die', card.die || 20) + bonusField('f-bonus', card.bonus);
+        return dieField('f-die', card.die || 20) + bonusToggleFields(card.bonus);
       case 'stat':
-        return numField('f-value', App.t('value'), card.value) + bonusField('f-bonus', card.bonus) + dieField('f-die', card.die);
+        return numField('f-value', App.t('value'), card.value) + dieField('f-die', card.die) +
+          bonusToggleFields(card.bonus);
       case 'formula': return formulaFields(card);
       case 'spell': return spellFields(card);
       case 'currency': return currencyFields(card);
@@ -1111,15 +1224,15 @@ window.App = window.App || {};
       '<div class="f-preview" id="f-preview">= —</div>' +
       '<div class="formula-help">' + esc(App.t('formulaTip')) + '</div>' +
       '</div>' +
-      bonusField('f-bonus', card.bonus) +
-      dieField('f-die', card.die);
+      dieField('f-die', card.die) +
+      bonusToggleFields(card.bonus);
   }
 
   function spellFields(card) {
     return '<div class="field"><label>' + esc(App.t('description')) + '</label><textarea id="f-desc" placeholder="' + esc(App.t('description')) + '…">' + esc(card.description || '') + '</textarea></div>' +
       chargesFields(card, true) +
       dieField('f-die', card.die) +
-      bonusField('f-bonus', card.bonus);
+      bonusToggleFields(card.bonus);
   }
 
   function perkFields(card) {
@@ -1200,6 +1313,7 @@ window.App = window.App || {};
       container.innerHTML = items.map(function (it, i) {
         return '<div class="srow" data-i="' + i + '">' +
           '<input type="text" data-k="name" value="' + esc(it.name) + '" placeholder="' + esc(App.t('itemName')) + '">' +
+          '<input type="text" data-k="description" value="' + esc(it.description || '') + '" placeholder="' + esc(App.t('itemDescription')) + '">' +
           '<input type="number" data-k="qty" value="' + num(it.qty) + '" title="' + esc(App.t('qty')) + '" placeholder="1" class="small">' +
           '<input type="number" data-k="weight" value="' + (it.weight == null ? '' : it.weight) + '" title="' + esc(App.t('weight')) + '" placeholder="0" class="small">' +
           '<button type="button" class="small danger" data-del="' + i + '">✕</button>' +
@@ -1208,6 +1322,7 @@ window.App = window.App || {};
       container.querySelectorAll('.srow').forEach(function (row) {
         const i = Number(row.dataset.i);
         row.querySelector('input[data-k="name"]').addEventListener('input', function (e) { items[i].name = e.target.value; });
+        row.querySelector('input[data-k="description"]').addEventListener('input', function (e) { items[i].description = e.target.value; });
         row.querySelector('input[data-k="qty"]').addEventListener('input', function (e) { items[i].qty = num(e.target.value); });
         row.querySelector('input[data-k="weight"]').addEventListener('input', function (e) { const v = e.target.value; items[i].weight = v === '' ? null : num(v); });
         row.querySelector('[data-del]').addEventListener('click', function () { items.splice(i, 1); renderItems(); });
@@ -1215,7 +1330,7 @@ window.App = window.App || {};
     }
     renderItems();
     document.getElementById('f-additem').addEventListener('click', function () {
-      items.push({ id: uid(), name: '', qty: 1, weight: null });
+      items.push({ id: uid(), name: '', description: '', qty: 1, weight: null });
       renderItems();
     });
   }
@@ -1228,6 +1343,22 @@ window.App = window.App || {};
       ['f-chlinkwrap', 'f-chcostwrap'].forEach(function (id) { const el = document.getElementById(id); if (el) el.style.display = isOwn ? 'none' : ''; });
     }
     mode.addEventListener('change', upd);
+    upd();
+  }
+
+  // Бонус как галочка: галочка снята — поле скрыто, бонус считается пустым
+  function bindBonusToggle() {
+    const cb = document.getElementById('f-usebonus');
+    const wrap = document.getElementById('f-bonuswrap');
+    if (!cb || !wrap) return;
+    const upd = function () {
+      wrap.style.display = cb.checked ? '' : 'none';
+      if (cb.checked) {
+        const inp = wrap.querySelector('input');
+        if (inp && !inp.value) inp.focus();
+      }
+    };
+    cb.addEventListener('change', upd);
     upd();
   }
 
@@ -1245,6 +1376,7 @@ window.App = window.App || {};
     if (card.type === 'inventory') bindInventoryEditor();
     if (card.type === 'formula') bindFormulaEditor();
     if (card.type === 'spell' || card.type === 'perk') bindChargesToggle();
+    bindBonusToggle();
     bindAppearance();
   }
 
@@ -1397,34 +1529,37 @@ window.App = window.App || {};
     return charges;
   }
 
+  // ОФОРМЛЕНИЕ: временно скрыто из редактора (по просьбе пользователя, «пока рано»).
+  // Чтобы вернуть: в openCardEditor снова добавить body += appearanceFields(card);
+  // и в applyFields снять guard вокруг назначения card.ui.
   function applyFields(card) {
     switch (card.type) {
       case 'counter':
         card.current = num(readNum('f-current'));
         card.max = readNumOrNull('f-max');
-        card.bonus = readText('f-bonus').trim();
+        card.bonus = readBonus();
         card.die = readDie('f-die');
         card.restores = readCheck('f-restores');
         break;
       case 'skill':
         card.die = readDie('f-die') || 20;
-        card.bonus = readText('f-bonus').trim();
+        card.bonus = readBonus();
         break;
       case 'stat':
         card.value = num(readNum('f-value'));
-        card.bonus = readText('f-bonus').trim();
+        card.bonus = readBonus();
         card.die = readDie('f-die');
         break;
       case 'formula':
         card.expression = serializeFormula(editScratch.tokens || []).trim();
-        card.bonus = readText('f-bonus').trim();
+        card.bonus = readBonus();
         card.die = readDie('f-die');
         break;
       case 'spell':
         card.description = readText('f-desc');
         card.charges = readCharges(card);
         card.die = readDie('f-die');
-        card.bonus = readText('f-bonus').trim();
+        card.bonus = readBonus();
         card.restores = readCheck('f-restores');
         break;
       case 'perk':
@@ -1441,20 +1576,23 @@ window.App = window.App || {};
         break;
       }
       case 'inventory':
-        card.items = (editScratch.items || card.items).map(function (it) { return { id: it.id, name: it.name, qty: num(it.qty), weight: it.weight }; });
+        card.items = (editScratch.items || card.items).map(function (it) { return { id: it.id, name: it.name, description: it.description || '', qty: num(it.qty), weight: it.weight }; });
         card.showWeight = readCheck('f-showweight');
         break;
       case 'note':
         card.text = readText('f-text');
         break;
     }
-    card.ui = {
-      bg: readText('ui-bg'),
-      color: readText('ui-color'),
-      align: editScratch.uiAlign || '',
-      bold: readCheck('ui-bold'),
-      italic: readCheck('ui-italic')
-    };
+    const uiBg = document.getElementById('ui-bg');
+    if (uiBg) {   // ОФОРМЛЕНИЕ: поля скрыты — существующие настройки карточки сохраняем как есть
+      card.ui = {
+        bg: readText('ui-bg'),
+        color: readText('ui-color'),
+        align: editScratch.uiAlign || '',
+        bold: readCheck('ui-bold'),
+        italic: readCheck('ui-italic')
+      };
+    }
   }
 
   function openCardEditor(cardId) {
@@ -1463,7 +1601,7 @@ window.App = window.App || {};
     editScratch.uiAlign = (card.ui && card.ui.align) || '';
     let body = '<div class="field"><label>' + esc(App.t('name')) + '</label><input id="f-name" type="text" value="' + esc(card.name) + '" placeholder="' + esc(nameExample(card.type)) + '"></div>';
     body += typeFields(card);
-    body += appearanceFields(card);
+    // body += appearanceFields(card);   // ОФОРМЛЕНИЕ: временно скрыто (см. комментарий в applyFields)
     openModal(typeLabel(card.type), body, [
       { label: App.t('cancel') },
       { label: App.t('save'), cls: 'primary', onClick: function () { return saveCardEdit(card); } }
@@ -1486,6 +1624,11 @@ window.App = window.App || {};
       }
       card.name = name;
       applyFields(card);
+      // содержимое могло вырасти (добавили валюты/предметы) — не даём карточке остаться
+      // меньше минимума, иначе строки уйдут за границы
+      const mn = minSize(card);
+      card.w = Math.max(mn.w, card.w || mn.w);
+      card.h = Math.max(mn.h, card.h || mn.h);
     });
     return true;
   }

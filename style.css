@@ -117,6 +117,10 @@ button.active { border-color: var(--accent); color: var(--accent); }
   gap: 12px;
   align-content: flex-start;
   min-height: calc(100vh - 60px);
+  /* свой контекст наложения: inline z-index карточек (поднятие кликом в правке) не могут
+     подняться над модалкой/топбаром — важна и в колоночном (узком окне) режиме */
+  position: relative;
+  z-index: 0;
 }
 .empty-hint {
   width: 100%;
@@ -135,11 +139,13 @@ button.active { border-color: var(--accent); color: var(--accent); }
   padding: 10px 12px;
   display: flex;
   flex-direction: column;
-  gap: 8px;
+  gap: 10px;
   position: relative;
 }
 .card.dragging { opacity: .5; border-style: dashed; }
 .card.broken { border-color: var(--danger); }
+/* содержимое обязано оставаться внутри карточки */
+.canvas.free .card { overflow: hidden; }
 
 .card-head {
   display: flex;
@@ -165,7 +171,7 @@ button.active { border-color: var(--accent); color: var(--accent); }
 .card-head .tools button { padding: 2px 6px; font-size: 12px; background: transparent; border-color: transparent; color: var(--muted); }
 .card-head .tools button:hover { color: var(--text); background: var(--panel2); }
 
-.card-body { display: flex; flex-direction: column; gap: 6px; }
+.card-body { display: flex; flex-direction: column; gap: 6px; padding-top: 2px; }
 
 .type-badge {
   font-size: 10px;
@@ -203,22 +209,93 @@ button.active { border-color: var(--accent); color: var(--accent); }
 
 .meta { color: var(--muted); font-size: 13px; }
 
-/* Roll button / result */
-.roll-area { display: flex; align-items: center; gap: 8px; }
-.roll-result {
-  font-weight: 700;
+/* ===== Вариант F: бросок в шапке + тост-результат ===== */
+/* headroll — фиолетовая таблетка ⚄ d20 справа от названия; inc — тег бонуса */
+.headroll {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  flex: none;
+  padding: 2px 8px 2px 6px;
+  border: none;
+  border-radius: 7px;
+  background: var(--accent2);
+  color: #fff;
+  font-family: inherit;
+  font-size: 13px;
+  font-weight: 600;
+  line-height: 1.4;
+  cursor: pointer;
+}
+.headroll::before { content: '⚄'; font-size: 14px; color: #fff; }
+.headroll:hover { background: #8b7dff; }
+.headroll:active { transform: translateY(1px); }
+.inc {
+  flex: none;
   color: var(--accent);
-  font-size: 16px;
+  background: rgba(212, 169, 60, .12);
+  border: 1px solid rgba(212, 169, 60, .35);
+  border-radius: 7px;
+  padding: 1px 7px;
+  font-size: 13px;
+  font-weight: 700;
+}
+/* тост результата по центру экрана: сам бросок фиолетовым, бонус приглушённо, итог крупно золотым */
+#rollToast {
+  position: fixed;
+  left: 50%;
+  top: 44%;
+  transform: translate(-50%, -50%);
+  z-index: 130;
+  pointer-events: none;
+  background: var(--panel);
+  border: 1px solid var(--accent);
+  border-radius: 12px;
+  padding: 12px 24px;
+  box-shadow: 0 8px 28px rgba(0, 0, 0, .5);
+}
+/* видим всегда, когда внутри есть строка результата; пустой хост скрывает :empty */
+#rollToast:empty { display: none; }
+#rollToast .rt-row { display: flex; align-items: center; gap: 10px; font-variant-numeric: tabular-nums; white-space: nowrap; }
+#rollToast .rt-die   { color: var(--accent2); font-size: 22px; font-weight: 700; }
+#rollToast .rt-bonus {
+  color: var(--accent);
+  background: rgba(212, 169, 60, .12);
+  border: 1px solid rgba(212, 169, 60, .35);
+  border-radius: 7px;
+  padding: 1px 9px;
+  font-size: 19px;
+  font-weight: 700;
+}
+#rollToast .rt-eq    { color: var(--muted); font-size: 20px; }
+#rollToast .rt-total { color: var(--accent); font-size: 34px; font-weight: 700; }
+#rollToast.rt-hide { opacity: 0; transform: translate(-50%, calc(-50% + 6px)); transition: opacity .35s, transform .35s; }
+@keyframes rtPop {
+  0% { opacity: .25; text-shadow: 0 0 14px rgba(212, 169, 60, .7); }
+  100% { opacity: 1; text-shadow: 0 0 0 rgba(212, 169, 60, 0); }
+}
+#rollToast.rt-pop { animation: rtPop .35s ease-out; }
+@media (prefers-reduced-motion: reduce) {
+  #rollToast.rt-hide { transition: none; }
+  #rollToast.rt-pop { animation: none; }
 }
 
 /* Currency */
 .currency-row { display: flex; align-items: center; gap: 6px; }
 .currency-row .cname { flex: 1; color: var(--muted); }
-.currency-row .amt { min-width: 44px; text-align: right; font-weight: 600; }
+.currency-row .amt { min-width: 44px; text-align: center; font-weight: 600; }
 
 /* Inventory */
 .item-row { display: flex; align-items: center; gap: 6px; font-size: 14px; }
-.item-row .iname { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.item-row .iname { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* предмет с описанием: имя и описание в две строки */
+.item-row.has-desc { align-items: flex-start; }
+.item-row.has-desc .iname { white-space: normal; overflow: visible; }
+/* описание предмета: максимум 2 строки + многоточие; полный текст — по клику */
+.item-row .idesc {
+  display: block; color: var(--muted); font-size: 12px; white-space: pre-wrap; word-break: break-word;
+  display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; overflow: hidden;
+}
 .item-row .iqty { min-width: 36px; text-align: right; }
 .item-row .iwgt { min-width: 44px; text-align: right; color: var(--muted); }
 .inv-total { color: var(--muted); font-size: 13px; border-top: 1px solid var(--border); padding-top: 6px; }
@@ -232,6 +309,20 @@ button.active { border-color: var(--accent); color: var(--accent); }
   font-size: 14px;
 }
 .desc-text { white-space: pre-wrap; color: var(--muted); font-size: 13px; }
+/* описание: клик — просмотр полностью */
+.desc-text.readable { cursor: pointer; }
+.desc-text.readable:hover { color: var(--text); }
+/* длинные строки/слова не вылезают и не обрезаются по бокам;
+   видимых строк максимум 2 + многоточие (не оканчивающийся текст), полный текст — по клику */
+.desc-text {
+  width: 100%;
+  overflow-wrap: anywhere;
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  overflow: hidden;
+}
+.full-text { white-space: pre-wrap; line-height: 1.5; max-height: calc(100vh - 200px); overflow-y: auto; overflow-wrap: anywhere; }
 
 /* Charges */
 .charges-row { display: flex; align-items: center; gap: 6px; }
@@ -370,17 +461,10 @@ button.active { border-color: var(--accent); color: var(--accent); }
   font-size: 13px;
 }
 .counter-set:focus { outline: none; border-color: var(--accent2); }
-.restore-ic { color: var(--accent); font-size: 13px; }
+.restore-ic { color: var(--accent); margin-right: 4px; }
+.counter-val.under, .stat-value.under { color: #ff7168; text-shadow: 0 0 10px rgba(224, 92, 92, .75); }
 
 .dice-row { display: flex; align-items: center; gap: 6px; }
-
-.roll-btn {
-  background: var(--accent2);
-  border-color: var(--accent2);
-  color: #fff;
-  font-weight: 600;
-}
-.roll-btn:hover { background: #8b7dff; }
 
 /* ---------- Responsive ---------- */
 @media (max-width: 720px) {
@@ -395,10 +479,13 @@ button.active { border-color: var(--accent); color: var(--accent); }
 }
 
 /* ---------- Free placement (desktop) ---------- */
+/* контекст наложения уже задан .canvas (z-index: 0) — карточки с inline z-index
+   не могут перебить модалку (z 100/101) ни в колоночном, ни в свободном режиме */
 .canvas.free { display: block; position: relative; }
 .canvas.free .card { position: absolute; }
 .canvas.free .card-body { flex: 1 1 auto; min-height: 0; }
-.desc-text { max-height: 220px; overflow-y: auto; }
+/* описание — всегда ровно 2 строки с многоточием, без прокрутки; полный текст по клику */
+.canvas.free .card .desc-text { max-height: none; flex: 0 0 auto; }
 .card.type-inventory .card-body { overflow-y: auto; }
 .resize-handle {
   position: absolute;
@@ -460,29 +547,45 @@ button.active { border-color: var(--accent); color: var(--accent); }
 .counter-more.plus { top: -3px; right: -3px; }
 .counter-more.minus { bottom: -3px; left: -3px; }
 .counter-val.over { color: #ffcf5c; text-shadow: 0 0 10px rgba(255, 180, 40, .7); }
-.quick-delta {
-  width: 56px;
+
+/* ---------- Ввод своего значения ---------- */
+/* Поповер возле нажатой кнопки (режим «плавающее окно») */
+.delta-pop {
+  position: absolute;
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  z-index: 70;
   background: var(--panel2);
   border: 1px solid var(--accent2);
+  border-radius: 8px;
+  padding: 6px 7px;
+  box-shadow: var(--shadow);
+}
+.delta-pop .dp-sign { color: var(--muted); font-weight: 700; }
+.delta-pop .delta-pop-in {
+  width: 74px;
+  background: var(--panel);
+  border: 1px solid var(--border);
   border-radius: 6px;
   color: var(--text);
-  padding: 3px 6px;
+  padding: 4px 6px;
   font: inherit;
-  font-size: 13px;
+  text-align: center;
 }
-.quick-delta:focus { outline: none; }
+.delta-pop .delta-pop-in:focus { outline: none; border-color: var(--accent2); }
+.delta-pop .dp-no { padding: 4px 7px; }
 
 /* ---------- Roll breakdown ---------- */
-.roll-bonus { color: var(--muted); }
-.roll-total { color: var(--accent); font-weight: 700; margin-left: 2px; }
 
-/* ---------- Roll animation (level 1) ---------- */
+/* ---------- Roll animation ---------- */
+/* Виджет кубиков: масштаб-подскок итога */
 @keyframes rollPop {
   0% { transform: scale(1.55); opacity: .35; }
   60% { transform: scale(.94); opacity: 1; }
   100% { transform: scale(1); }
 }
-.roll-pop, .dw-pop { display: inline-block; animation: rollPop .3s ease-out; }
+.dw-pop { display: inline-block; animation: rollPop .3s ease-out; }
 
 /* ---------- Charges / use button ---------- */
 .use-btn { margin-left: auto; flex: 0 0 auto; }
