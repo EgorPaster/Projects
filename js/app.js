@@ -6,7 +6,7 @@ window.App = window.App || {};
   // ===== Constants =====
   const STORAGE_KEY = 'custplay-v1';
   const LEGACY_KEY = 'dnd-tracker-v1';
-  const CARD_TYPES = ['counter', 'skill', 'stat', 'formula', 'spell', 'currency', 'perk', 'inventory', 'note'];
+  const CARD_TYPES = ['counter', 'skill', 'formula', 'spell', 'currency', 'perk', 'inventory', 'note'];
   const MIN_W = 220, MIN_H = 110;   // минимальный размер карточки: чтобы влезали кнопки/содержимое
 
   // ===== Helpers =====
@@ -33,7 +33,7 @@ window.App = window.App || {};
     return window.matchMedia('(min-width: 721px)').matches;
   }
   function nameExample(type) {
-    return ({ counter: 'Здоровье', skill: 'Акробатика', stat: 'Сила', formula: 'КБ', spell: 'Огненный шар', currency: 'Деньги', perk: 'Вдохновение', inventory: 'Снаряжение', note: 'Заметка' })[type] || '';
+    return ({ counter: 'Здоровье', skill: 'Акробатика', formula: 'КБ', spell: 'Огненный шар', currency: 'Деньги', perk: 'Вдохновение', inventory: 'Снаряжение', note: 'Заметка' })[type] || '';
   }
 
   // ===== State =====
@@ -253,8 +253,7 @@ window.App = window.App || {};
   function defaultsFor(type) {
     switch (type) {
       case 'counter': return { current: 0, max: 0, bonus: '', die: null, restores: false };
-      case 'skill': return { die: 20, bonus: '' };
-      case 'stat': return { value: 0, bonus: '', die: null };
+      case 'skill': return { value: null, die: 20, bonus: '' };
       case 'formula': return { expression: '', bonus: '', die: null };
       case 'spell': return { description: '', charges: { mode: 'own', current: 0, max: 0, linkId: null, cost: 1, blockEmpty: false }, die: null, bonus: '', restores: false };
       case 'currency': return {
@@ -290,8 +289,7 @@ window.App = window.App || {};
       case 'currency': return { w: 300, h: 170 };
       case 'spell': return { w: 300, h: 175 };       // описание 2 строки + заряды
       case 'perk': return { w: 300, h: 200 };
-      case 'skill': return { w: 300, h: 90 };        // тело пустое: только шапка с кубиком
-      case 'stat': return { w: 300, h: 105 };        // шапка + строка значения
+      case 'skill': return { w: 300, h: 95 };        // шапка с кубиком (значение — опционально, лезет в 95)
       case 'formula': return { w: 300, h: 120 };     // шапка + выражение + значение
       default: return { w: 300, h: 120 };            // counter: шапка + строка счётчика
     }
@@ -303,8 +301,7 @@ window.App = window.App || {};
     const type = card.type;
     let w = MIN_W, h = MIN_H;
     if (type === 'counter') h = 100;            // шапка + строка счётчика
-    if (type === 'stat') h = 95;                // шапка + значение
-    if (type === 'skill') h = 75;               // тело пустое: только шапка
+    if (type === 'skill') h = card.value != null ? 95 : 75;   // шапка (+ строка значения, если есть)
     if (type === 'formula') h = 120;            // шапка + выражение (может перенестись) + значение
     if (type === 'spell') h = 125;              // описание 2 строки + заряды
     if (type === 'perk') h = 120;               // описание 2 строки + заряды
@@ -344,6 +341,9 @@ window.App = window.App || {};
     if (!ch) return;
     ensurePages(ch);
     ch.cards.forEach(function (card) {
+      // v8: «Стат» и «Навык» объединены в один тип — данные старых статов (value/bonus/die)
+      // сохраняются как есть, карточка просто становится навыком со значением
+      if (card.type === 'stat') card.type = 'skill';
       if (card.x == null || card.y == null) autoPlace(ch, card);
       const mn = minSize(card);
       card.w = card.w == null ? defaultSize(card.type).w : Math.max(mn.w, card.w);
@@ -354,20 +354,19 @@ window.App = window.App || {};
   function sizeCanvas() {
     const canvas = document.getElementById('canvas');
     if (!canvas) return;
-    let maxX = 0, maxY = 0;
+    let maxY = 0;
     const ch = activeChar();
     if (ch) {
       const pageId = curPageId(ch);
       ch.cards.forEach(function (c) {
         if (c.x == null || c.page !== pageId) return;
-        maxX = Math.max(maxX, c.x + c.w + 16);
         maxY = Math.max(maxY, c.y + c.h + 16);
       });
     }
-    const vw = window.innerWidth - 28;
-    const vh = window.innerHeight - 60;
-    canvas.style.width = Math.max(maxX, vw) + 'px';
-    canvas.style.height = Math.max(maxY, vh) + 'px';
+    // полотно ровно по ширине окна (карточку за правый край не увести),
+    // высота — от содержимого, но не меньше окна
+    canvas.style.width = window.innerWidth + 'px';
+    canvas.style.height = Math.max(maxY, window.innerHeight - 60) + 'px';
   }
 
   function defaultCards() {
@@ -408,7 +407,7 @@ window.App = window.App || {};
   function cardValue(card) {
     switch (card.type) {
       case 'counter': return num(card.current);
-      case 'stat': return num(card.value);
+      case 'skill': return card.value == null ? 0 : num(card.value);
       case 'formula': return evalFormula(card.id);
       case 'spell': case 'perk': return chargesCurrent(card);
       default: return 0;
@@ -779,6 +778,7 @@ window.App = window.App || {};
 
   function toggleEditMode() {
     editMode = !editMode;
+    setSelection([]);   // выделение групп существует только в режиме правки
     render();
   }
 
@@ -787,6 +787,8 @@ window.App = window.App || {};
     const ch = activeChar();
     const desktop = isDesktop();
     canvas.classList.toggle('free', desktop);
+    // сетка видна, пока правишь раскладку: на неё магнитятся карточки
+    canvas.classList.toggle('grid-on', desktop && editMode);
     if (!ch) {
       canvas.innerHTML = '<div class="empty-hint">' + esc(App.t('noChars')) + '</div>';
       canvas.style.width = ''; canvas.style.height = '';
@@ -818,13 +820,18 @@ window.App = window.App || {};
 
   function cardView(card, desktop) {
     const broken = (card.type === 'formula' && card._error) ? ' broken' : '';
+    const sel = (desktop && editMode && selIds.has(card.id)) ? ' selected' : '';
     let style = '';
     if (desktop && card.x != null) {
-      style += 'left:' + Math.round(card.x) + 'px;top:' + Math.round(card.y) + 'px;width:' + Math.round(card.w) + 'px;height:' + Math.round(card.h) + 'px;';
+      // при сужении окна карточки визуально поджимаются внутрь, но сохранённые координаты
+      // НЕ перезаписываются: расширил окно — карточки восстановили положение
+      const dx = Math.max(0, Math.min(card.x, canvasRight() - card.w));
+      const dy = Math.max(0, card.y);
+      style += 'left:' + Math.round(dx) + 'px;top:' + Math.round(dy) + 'px;width:' + Math.round(card.w) + 'px;height:' + Math.round(card.h) + 'px;';
     }
     style += cardUIStyle(card);
     const resize = (editMode && desktop) ? '<span class="resize-handle" title="↘"></span>' : '';
-    return '<div class="card type-' + card.type + broken + '" data-id="' + card.id + '" style="' + style + '">' + cardHead(card, desktop) + cardBody(card) + resize + '</div>';
+    return '<div class="card type-' + card.type + broken + sel + '" data-id="' + card.id + '" style="' + style + '">' + cardHead(card, desktop) + cardBody(card) + resize + '</div>';
   }
 
   function cardHead(card, desktop) {
@@ -851,7 +858,6 @@ window.App = window.App || {};
     switch (card.type) {
       case 'counter': return counterBody(card);
       case 'skill': return skillBody(card);
-      case 'stat': return statBody(card);
       case 'formula': return formulaBody(card);
       case 'spell': return spellBody(card);
       case 'currency': return currencyBody(card);
@@ -883,12 +889,10 @@ window.App = window.App || {};
       '</div>';
   }
 
+  // Навык: тело пустое (только шапка с кубиком), но если задано значение —
+  // показывает строку значения как у бывшего «стата»
   function skillBody(card) {
-    // тело навыка пустое: бросок уехал в шапку (карточка = название + кубик)
-    return '';
-  }
-
-  function statBody(card) {
+    if (card.value == null) return '';
     const val = num(card.value);
     const bonus = cardBonus(card);
     return '<div class="card-body"><div class="stat-line"><span class="stat-value' + (val < 0 ? ' under' : '') + '">' + fmt(val) + '</span>' +
@@ -1005,6 +1009,12 @@ window.App = window.App || {};
       descEl.classList.add('readable');
       descEl.addEventListener('click', function (e) { e.stopPropagation(); openTextModal(it.name, it.description); });
     });
+    // заметка: прокрутка внутри карточки + клик — просмотр полного текста
+    const note = el.querySelector('.note-text');
+    if (note && (card.text || '').trim()) {
+      note.classList.add('readable');
+      note.addEventListener('click', function () { openTextModal(card.name, card.text); });
+    }
     const edit = el.querySelector('.card-edit');
     const dup = el.querySelector('.card-dup');
     const del = el.querySelector('.card-del');
@@ -1017,69 +1027,232 @@ window.App = window.App || {};
     if (down) down.addEventListener('click', function () { moveCard(card.id, 1); });
   }
 
-  // ===== Free placement (move & resize) =====
+  // ===== Free placement: сетка, границы, выделение групп =====
+  const GRID = 20;              // шаг магнитной сетки
+  const BAND_MIN = 5;           // мёртвая зона рамки выделения, px
   let dragState = null;
-  let cardZ = 1;   // счётчик «поднятий» карточки: клик в правке выводит её на передний план
+  let bandState = null;         // рамка выделения по пустому месту
+  let selIds = new Set();       // выделенные карточки (id)
+  let cardZ = 1;                // счётчик «поднятий» карточки: клик в правке выводит её на передний план
+
+  function snap(v) { return Math.round(v / GRID) * GRID; }
+
+  // правый край, за который карточку нельзя увести (полотно = ширина окна)
+  function canvasRight() {
+    const c = document.getElementById('canvas');
+    return Math.max(MIN_W, (c && c.clientWidth ? c.clientWidth : window.innerWidth) - 8);
+  }
+
+  function cardElOf(id) {
+    return document.querySelector('.canvas .card[data-id="' + id + '"]');
+  }
+  function setSelection(ids) {
+    selIds = new Set(ids || []);
+    document.querySelectorAll('.canvas .card').forEach(function (el) {
+      el.classList.toggle('selected', selIds.has(el.dataset.id));
+    });
+  }
+  function toggleSelectedCard(id) {
+    const on = !selIds.has(id);
+    if (on) selIds.add(id); else selIds.delete(id);
+    const el = cardElOf(id);
+    if (el) el.classList.toggle('selected', on);
+  }
+  function raiseZ(els) {
+    els.forEach(function (el) {
+      cardZ = cardZ >= 98 ? 1 : cardZ;   // z выше 100 занято модалкой
+      cardZ += 1;
+      el.style.zIndex = cardZ;
+    });
+  }
+
+  // ---- рамка выделения по пустому месту ----
+  function startBand(e) {
+    const canvas = document.getElementById('canvas');
+    const el = document.createElement('div');
+    el.className = 'select-band';
+    canvas.appendChild(el);
+    bandState = { el: el, x0: e.clientX, y0: e.clientY, x1: e.clientX, y1: e.clientY, add: e.ctrlKey || e.metaKey };
+    document.body.style.userSelect = 'none';
+    updateBand(e.clientX, e.clientY);
+  }
+  function updateBand(x, y) {
+    if (!bandState) return;
+    bandState.x1 = x; bandState.y1 = y;
+    const cr = document.getElementById('canvas').getBoundingClientRect();
+    bandState.el.classList.toggle('active', Math.abs(x - bandState.x0) > BAND_MIN || Math.abs(y - bandState.y0) > BAND_MIN);
+    bandState.el.style.left = (Math.min(bandState.x0, x) - cr.left) + 'px';
+    bandState.el.style.top = (Math.min(bandState.y0, y) - cr.top) + 'px';
+    bandState.el.style.width = Math.abs(x - bandState.x0) + 'px';
+    bandState.el.style.height = Math.abs(y - bandState.y0) + 'px';
+  }
+  function finishBand() {
+    const b = bandState;
+    bandState = null;
+    b.el.remove();
+    document.body.style.userSelect = '';
+    const left = Math.min(b.x0, b.x1), right = Math.max(b.x0, b.x1);
+    const top = Math.min(b.y0, b.y1), bottom = Math.max(b.y0, b.y1);
+    if (!(right - left < BAND_MIN && bottom - top < BAND_MIN)) {
+      // рамка реально тянулась: выделяем попавшие карточки (с Ctrl — поверх старого выделения)
+      const next = new Set();
+      document.querySelectorAll('.canvas .card').forEach(function (el) {
+        const r = el.getBoundingClientRect();
+        if (r.right > left && r.left < right && r.bottom > top && r.top < bottom) next.add(el.dataset.id);
+      });
+      if (b.add) selIds.forEach(function (id) { next.add(id); });
+      setSelection(Array.from(next));
+    } else if (!b.add) {
+      setSelection([]);   // простой клик по пустому месту — снять выделение
+    }
+  }
+
   function initFreePlacement() {
     const canvas = document.getElementById('canvas');
     canvas.addEventListener('pointerdown', function (e) {
-      if (!editMode || !isDesktop()) return;
+      if (!editMode || !isDesktop() || e.button !== 0) return;
+      if (!activeChar()) return;
       const cardEl = e.target.closest ? e.target.closest('.card') : null;
-      // перекрытия: любой клик по карточке в режиме правки поднимает её наверх (до следующей перерисовки);
-      // z растёт ТОЛЬКО до 99, чтобы модалка (z 100/101) всегда была выше - см. fix перекрытия
-      if (cardEl) { cardZ = cardZ >= 98 ? 3 : ++cardZ; cardEl.style.zIndex = cardZ; }
+
+      // пустое место — рамка выделения
+      if (!cardEl) { startBand(e); return; }
+      if (e.target.closest('button')) return;   // кнопки на карточке работают как обычно
+
+      // Ctrl-клик — добавить/убрать карточку из выделения
+      if (e.ctrlKey || e.metaKey) {
+        e.preventDefault();
+        toggleSelectedCard(cardEl.dataset.id);
+        return;
+      }
+
+      // перекрытия: клик по карточке в правке поднимает её (или всю выделенную группу) наверх
+      const raiseIds = selIds.has(cardEl.dataset.id) ? Array.from(selIds) : [cardEl.dataset.id];
+      raiseZ(raiseIds.map(cardElOf).filter(Boolean));
+
       const handle = e.target.closest ? e.target.closest('.handle') : null;
       const resize = e.target.closest ? e.target.closest('.resize-handle') : null;
-      if (!handle && !resize) return;
-      if (!cardEl) return;
+      if (!handle && !resize) return;   // клик по телу — только подъём (как раньше)
       const card = findCard(cardEl.dataset.id);
       if (!card) return;
       e.preventDefault();
+
+      // двигаем выделенную карточку — едет вся выделенная группа; иначе группа = одна карточка
+      if (!selIds.has(card.id)) setSelection([card.id]);
+      const group = Array.from(selIds).map(findCard).filter(Boolean);
+      group.forEach(function (c) { const gEl = cardElOf(c.id); if (gEl) gEl.classList.add('dragging'); });
       const mn = minSize(card);
       dragState = {
-        id: card.id, type: card.type, el: cardEl, kind: resize ? 'resize' : 'move',
+        kind: resize ? 'resize' : 'move',
         startX: e.clientX, startY: e.clientY,
-        origX: card.x || 0, origY: card.y || 0,
-        origW: card.w || 300, origH: card.h || 150,
-        minW: mn.w, minH: mn.h
+        moved: false,
+        minW: mn.w, minH: mn.h,
+        group: group.map(function (c) {
+          return { card: c, el: cardElOf(c.id), ox: c.x || 0, oy: c.y || 0, ow: c.w || 300, oh: c.h || 150 };
+        })
       };
-      cardEl.classList.add('dragging');
       document.body.style.userSelect = 'none';
     });
     window.addEventListener('pointermove', function (e) {
+      if (bandState) { updateBand(e.clientX, e.clientY); return; }
       if (!dragState) return;
       const dx = e.clientX - dragState.startX;
       const dy = e.clientY - dragState.startY;
-      if (dragState.kind === 'move') {
-        dragState.el.style.left = Math.round(dragState.origX + dx) + 'px';
-        dragState.el.style.top = Math.round(dragState.origY + dy) + 'px';
+      if (dragState.kind === 'resize') {
+        const g = dragState.group[0];
+        let nw = Math.max(dragState.minW, Math.round(g.ow + dx));
+        let nh = Math.max(dragState.minH, Math.round(g.oh + dy));
+        nw = Math.max(dragState.minW, snap(nw));   // магнитная сетка
+        nh = Math.max(dragState.minH, snap(nh));
+        nw = Math.min(nw, Math.max(dragState.minW, canvasRight() - g.card.x));  // за правый край нельзя
+        if (nw !== g.ow || nh !== g.oh) dragState.moved = true;
+        g.el.style.width = nw + 'px';
+        g.el.style.height = nh + 'px';
       } else {
-        dragState.el.style.width = Math.max(dragState.minW, Math.round(dragState.origW + dx)) + 'px';
-        dragState.el.style.height = Math.max(dragState.minH, Math.round(dragState.origH + dy)) + 'px';
+        // двигаем от «самой левой верхней» карточки группы, чтобы границы соблюдались всей группой
+        const minX = Math.min.apply(null, dragState.group.map(function (g) { return g.ox; }));
+        const minY = Math.min.apply(null, dragState.group.map(function (g) { return g.oy; }));
+        const boxW = Math.max.apply(null, dragState.group.map(function (g) { return g.ox + g.card.w; })) - minX;
+        let ldx = snap(minX + dx) - minX;   // примагничивание к сетке
+        let ldy = snap(minY + dy) - minY;
+        ldx = Math.max(-minX, Math.min(ldx, canvasRight() - (minX + boxW)));   // левая/правая границы
+        ldy = Math.max(-minY, ldy);                                            // верхняя граница — табы страниц
+        if (ldx || ldy) dragState.moved = true;
+        dragState.group.forEach(function (g) {
+          if (!g.el) return;
+          g.el.style.left = (g.ox + ldx) + 'px';
+          g.el.style.top = (g.oy + ldy) + 'px';
+        });
       }
     });
     window.addEventListener('pointerup', function () {
+      if (bandState) { finishBand(); return; }
       if (!dragState) return;
-      const card = findCard(dragState.id);
-      if (card) {
-        const el = dragState.el;
-        const nx = parseFloat(el.style.left);
-        const ny = parseFloat(el.style.top);
-        const nw = parseFloat(el.style.width);
-        const nh = parseFloat(el.style.height);
-        pushUndo();
-        if (dragState.kind === 'move') {
-          if (!Number.isNaN(nx)) card.x = Math.round(nx);
-          if (!Number.isNaN(ny)) card.y = Math.round(ny);
-        } else {
-          if (!Number.isNaN(nw)) card.w = Math.max(dragState.minW, Math.round(nw));
-          if (!Number.isNaN(nh)) card.h = Math.max(dragState.minH, Math.round(nh));
-        }
-        commit();
-      }
-      if (dragState.el) dragState.el.classList.remove('dragging');
-      document.body.style.userSelect = '';
+      const ds = dragState;
       dragState = null;
+      ds.group.forEach(function (g) { if (g.el) g.el.classList.remove('dragging'); });
+      document.body.style.userSelect = '';
+      if (!ds.moved) return;      // просто клик по ручке — ничего не перемещали
+
+      // 1) вычисляем, куда карточки попали бы — ещё НЕ сохраняя
+      const page = ds.group[0].card.page;
+      const others = activeChar().cards.filter(function (c) {
+        return c.page === page && !ds.group.some(function (g) { return g.card === c; });
+      });
+      const place = [];   // прямоугольники куда бы легли карточки группы
+      if (ds.kind === 'move') {
+        ds.group.forEach(function (g) {
+          if (!g.el) return;
+          const nx = parseFloat(g.el.style.left), ny = parseFloat(g.el.style.top);
+          place.push({
+            x: Number.isNaN(nx) ? (g.card.x || 0) : Math.max(0, Math.min(snap(Math.round(nx)), canvasRight() - g.card.w)),
+            y: Number.isNaN(ny) ? (g.card.y || 0) : Math.max(0, snap(Math.round(ny))),
+            w: g.card.w || 300, h: g.card.h || 150
+          });
+        });
+      } else {
+        const g = ds.group[0];
+        let nw = parseFloat(g.el.style.width), nh = parseFloat(g.el.style.height);
+        if (Number.isNaN(nw)) nw = g.ow;
+        if (Number.isNaN(nh)) nh = g.oh;
+        place.push({
+          x: g.card.x || 0, y: g.card.y || 0,
+          w: Math.max(ds.minW, Math.min(snap(Math.round(nw)), Math.max(ds.minW, canvasRight() - g.card.x))),
+          h: Math.max(ds.minH, snap(Math.round(nh)))
+        });
+      }
+
+      // 2) пересечение с любой другой карточкой страницы — откат и подсказка
+      const hit = place.some(function (r) {
+        return others.some(function (c) {
+          const cx = c.x || 0, cy = c.y || 0, cw = c.w || 300, chh = c.h || 150;
+          return r.x < cx + cw && cx < r.x + r.w && r.y < cy + chh && cy < r.y + r.h;
+        });
+      });
+      if (hit) {
+        ds.group.forEach(function (g) {
+          if (!g.el) return;
+          g.el.style.left = g.ox + 'px';
+          g.el.style.top = g.oy + 'px';
+          g.el.style.width = g.ow + 'px';
+          g.el.style.height = g.oh + 'px';
+        });
+        toast(App.t('noOverlap'));
+        return;
+      }
+
+      // 3) всё свободно — сохраняем
+      pushUndo();
+      if (ds.kind === 'move') {
+        ds.group.forEach(function (g, i) {
+          g.card.x = place[i].x;
+          g.card.y = place[i].y;
+        });
+      } else {
+        const g = ds.group[0];
+        g.card.w = place[0].w;
+        g.card.h = place[0].h;
+      }
+      commit();
     });
   }
 
@@ -1135,6 +1308,20 @@ window.App = window.App || {};
       '<label>' + esc(App.t('bonus')) + '</label>' +
       '<input id="f-bonus" type="text" value="' + esc(val == null ? '' : val) + '" placeholder="+2, -3, 2*2, 1/2"></div>';
   }
+  // Галочка «Кубик»: поставил — появился выбор кубика (d20 по умолчанию), снял — скрылся
+  function dieToggleFields(die) {
+    return checkField('f-usedie', App.t('die'), !!die) +
+      '<div id="f-diewrap"' + (die ? '' : ' style="display:none"') + '>' +
+      dieField('f-die', die || 20) + '</div>';
+  }
+  // Значение как галочка (у навыка): то же поведение — включил, появилось поле
+  function valueToggleFields(val) {
+    const has = val != null;
+    return checkField('f-usevalue', App.t('addValue'), has) +
+      '<div class="field" id="f-valuewrap"' + (has ? '' : ' style="display:none"') + '">' +
+      '<label>' + esc(App.t('value')) + '</label>' +
+      '<input id="f-value" type="number" step="1" value="' + (val == null ? '' : val) + '"></div>';
+  }
   function dieField(id, val) {
     let opts = '<option value=""' + (!val ? ' selected' : '') + '>' + esc(App.t('noDie')) + '</option>';
     App.dice.TYPES.forEach(function (s) {
@@ -1163,13 +1350,12 @@ window.App = window.App || {};
         return numField('f-current', App.t('current'), card.current) +
           numField('f-max', App.t('max'), card.max == null ? '' : card.max, '—') +
           dieField('f-die', card.die) +
-          bonusToggleFields(card.bonus) +
+          // галочка бонуса и само поле — только пока выбран кубик (f-diegate скрывается без кубика)
+          '<div id="f-diegate">' + bonusToggleFields(card.bonus) + '</div>' +
           checkField('f-restores', App.t('restores'), !!card.restores);
       case 'skill':
-        return dieField('f-die', card.die || 20) + bonusToggleFields(card.bonus);
-      case 'stat':
-        return numField('f-value', App.t('value'), card.value) + dieField('f-die', card.die) +
-          bonusToggleFields(card.bonus);
+        // три независимые галочки: Кубик / Значение / Бонус — каждая сама за себя
+        return dieToggleFields(card.die) + valueToggleFields(card.value) + bonusToggleFields(card.bonus);
       case 'formula': return formulaFields(card);
       case 'spell': return spellFields(card);
       case 'currency': return currencyFields(card);
@@ -1225,14 +1411,14 @@ window.App = window.App || {};
       '<div class="formula-help">' + esc(App.t('formulaTip')) + '</div>' +
       '</div>' +
       dieField('f-die', card.die) +
-      bonusToggleFields(card.bonus);
+      '<div id="f-diegate">' + bonusToggleFields(card.bonus) + '</div>';
   }
 
   function spellFields(card) {
     return '<div class="field"><label>' + esc(App.t('description')) + '</label><textarea id="f-desc" placeholder="' + esc(App.t('description')) + '…">' + esc(card.description || '') + '</textarea></div>' +
       chargesFields(card, true) +
       dieField('f-die', card.die) +
-      bonusToggleFields(card.bonus);
+      '<div id="f-diegate">' + bonusToggleFields(card.bonus) + '</div>';
   }
 
   function perkFields(card) {
@@ -1361,6 +1547,34 @@ window.App = window.App || {};
     cb.addEventListener('change', upd);
     upd();
   }
+  // Значение как галочка (у навыка)
+  function bindValueToggle() {
+    const cb = document.getElementById('f-usevalue');
+    const wrap = document.getElementById('f-valuewrap');
+    if (!cb || !wrap) return;
+    const upd = function () { wrap.style.display = cb.checked ? '' : 'none'; };
+    cb.addEventListener('change', upd);
+    upd();
+  }
+  // Галочка «Кубик» (у навыка): включена — показан выбор кубика
+  function bindDieToggle() {
+    const cb = document.getElementById('f-usedie');
+    const wrap = document.getElementById('f-diewrap');
+    if (!cb || !wrap) return;
+    const upd = function () { wrap.style.display = cb.checked ? '' : 'none'; };
+    cb.addEventListener('change', upd);
+    upd();
+  }
+  // «Когда кубика нет — галочки нет»: блок f-diegate (галочки значения/бонуса)
+  // показывается только пока в поле «Кубик» выбран кубик
+  function bindDieGate() {
+    const dieSel = document.getElementById('f-die');
+    const gate = document.getElementById('f-diegate');
+    if (!dieSel || !gate) return;
+    const upd = function () { gate.style.display = dieSel.value ? '' : 'none'; };
+    dieSel.addEventListener('change', upd);
+    upd();
+  }
 
   function bindAppearance() {
     document.querySelectorAll('.ui-align').forEach(function (b) {
@@ -1377,6 +1591,9 @@ window.App = window.App || {};
     if (card.type === 'formula') bindFormulaEditor();
     if (card.type === 'spell' || card.type === 'perk') bindChargesToggle();
     bindBonusToggle();
+    bindValueToggle();
+    bindDieToggle();
+    bindDieGate();
     bindAppearance();
   }
 
@@ -1477,7 +1694,7 @@ window.App = window.App || {};
     if (part === 'bonus') return cardBonus(card);
     switch (card.type) {
       case 'counter': return num(card.current);
-      case 'stat': return num(card.value);
+      case 'skill': return card.value == null ? 0 : num(card.value);
       case 'spell': case 'perk': return chargesCurrent(card);
       case 'formula': return card._value != null ? card._value : 0;
       default: return 0;
@@ -1541,15 +1758,16 @@ window.App = window.App || {};
         card.die = readDie('f-die');
         card.restores = readCheck('f-restores');
         break;
-      case 'skill':
-        card.die = readDie('f-die') || 20;
-        card.bonus = readBonus();
+      case 'skill': {
+        // три независимые галочки: Кубик / Значение / Бонус
+        const dCb = document.getElementById('f-usedie');
+        card.die = (dCb ? dCb.checked : !!card.die) ? (readDie('f-die') || 20) : null;
+        const vCb = document.getElementById('f-usevalue');
+        if (vCb) card.value = vCb.checked ? num(readNum('f-value')) : null;
+        const bCb = document.getElementById('f-usebonus');
+        if (bCb) card.bonus = bCb.checked ? readText('f-bonus').trim() : '';
         break;
-      case 'stat':
-        card.value = num(readNum('f-value'));
-        card.bonus = readBonus();
-        card.die = readDie('f-die');
-        break;
+      }
       case 'formula':
         card.expression = serializeFormula(editScratch.tokens || []).trim();
         card.bonus = readBonus();
@@ -1643,7 +1861,7 @@ window.App = window.App || {};
       { type: 'counter', name: App.t('presetArmor'), extra: { current: 10, max: null } },
       { type: 'currency', name: App.t('presetMoney'), extra: {} },
       { type: 'skill', name: App.t('presetSkill'), extra: { die: 20, bonus: '' } },
-      { type: 'stat', name: App.t('presetStat'), extra: { value: 10 } }
+      { type: 'skill', name: App.t('presetStat'), extra: { value: 10, die: 20 } }
     ];
     const presetBtns = presets.map(function (p) {
       return '<button type="button" class="add-preset" data-type="' + p.type + '" data-name="' + esc(p.name) + '" data-extra="' + esc(JSON.stringify(p.extra)) + '">' + esc(p.name) + '</button>';
@@ -2046,7 +2264,8 @@ window.App = window.App || {};
     });
     initDwDrag();
     window.addEventListener('resize', function () {
-      if (isDesktop()) sizeCanvas();
+      // жмём карточки визуально/восстанавливаем положение без перезагрузки
+      if (isDesktop() && !dragState && !bandState) render();
       const w = document.getElementById('diceWidget');
       if (w && !w.classList.contains('hidden')) applyDwPos(loadDwPos());
     });

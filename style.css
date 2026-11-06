@@ -484,9 +484,17 @@ button.active { border-color: var(--accent); color: var(--accent); }
 .canvas.free { display: block; position: relative; }
 .canvas.free .card { position: absolute; }
 .canvas.free .card-body { flex: 1 1 auto; min-height: 0; }
+/* заметка на свободном холсте: текст занимает ВСЮ карточку (растянул — больше влезает,
+   прокрутка только когда текста больше, чем высоты); в колоночном/мобильном виде
+   остаётся потолок 220px из правила .note-text выше */
+.canvas.free .card .note-text { flex: 1 1 auto; min-height: 0; max-height: none; }
 /* описание — всегда ровно 2 строки с многоточием, без прокрутки; полный текст по клику */
 .canvas.free .card .desc-text { max-height: none; flex: 0 0 auto; }
-.card.type-inventory .card-body { overflow-y: auto; }
+.card.type-inventory .card-body {
+  overflow-y: auto;
+  /* прокрутка не должна наезжать на значения: дополнительный отступ справа */
+  padding-right: 14px;
+}
 .resize-handle {
   position: absolute;
   right: 0;
@@ -500,6 +508,31 @@ button.active { border-color: var(--accent); color: var(--accent); }
 }
 .resize-handle:hover { opacity: 1; }
 .card.dragging { z-index: 60; }
+
+/* ---- Магнитная сетка (видна в режиме правки) + границы ---- */
+.canvas.grid-on {
+  background-image: radial-gradient(circle, rgba(232, 230, 240, .09) 1px, transparent 1.5px);
+  background-size: 20px 20px;   /* = шаг GRID в app.js */
+  background-position: 0 0;     /* узлы сетки совпадают с координатами карточек */
+}
+/* выделенная карточка / группа */
+.card.selected {
+  border-color: var(--accent2);
+  box-shadow: 0 0 0 2px rgba(122, 108, 255, .45), var(--shadow);
+}
+/* рамка выделения по пустому месту */
+.select-band {
+  position: absolute;
+  z-index: 55;
+  border: 1px dashed var(--accent2);
+  background: rgba(122, 108, 255, .12);
+  pointer-events: none;
+  display: none;
+}
+.select-band.active { display: block; }
+/* заметка: клик — просмотр полного текста (прокрутка внутри карточки сохраняется) */
+.note-text.readable { cursor: pointer; }
+.note-text.readable:hover { color: var(--accent); }
 
 /* ---------- Formula token editor ---------- */
 .f-tokens {
@@ -705,7 +738,6 @@ button.active { border-color: var(--accent); color: var(--accent); }
 /* ---------- Centered card content ---------- */
 .card.type-counter .card-body,
 .card.type-skill .card-body,
-.card.type-stat .card-body,
 .card.type-formula .card-body,
 .card.type-perk .card-body {
   align-items: center;
