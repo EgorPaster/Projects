@@ -84,6 +84,13 @@ html, body {
   color: var(--accent);
   font-weight: 600;
 }
+/* тянешь карточку на вкладку в правке — вкладка подсвечивается как цель переноса */
+.ptab.drop-hint {
+  background: var(--panel2);
+  border-color: var(--accent);
+  color: var(--accent);
+  box-shadow: 0 0 0 2px var(--accent);
+}
 .pt-ctrl { margin-left: auto; display: flex; gap: 6px; }
 
 /* ---------- Buttons ---------- */
@@ -326,7 +333,14 @@ button.active { border-color: var(--accent); color: var(--accent); }
 
 /* Charges */
 .charges-row { display: flex; align-items: center; gap: 6px; }
-.charges-pips { letter-spacing: 1px; color: var(--accent); font-weight: 700; }
+.charges-pips { color: var(--muted); font-weight: 700; }
+/* каждый кружок заряда — кнопка: клик заполняет заряды до него */
+.charges-pips .pip {
+  background: none; border: 0; margin: 0; padding: 0 1px;
+  font: inherit; color: var(--muted); cursor: pointer;
+}
+.charges-pips .pip-full { color: var(--accent); }
+.charges-pips .pip:hover { color: var(--text); }
 
 /* ---------- FAB ---------- */
 .fab {
@@ -549,13 +563,50 @@ button.active { border-color: var(--accent); color: var(--accent); }
 .tok { display: inline-flex; align-items: center; gap: 3px; background: var(--panel2); border: 1px solid var(--border); border-radius: 6px; padding: 2px 4px; }
 .tok-num { width: 52px; background: transparent; border: none; color: var(--text); font: inherit; padding: 2px; }
 .tok-num:focus { outline: none; }
-.tok-op { min-width: 26px; padding: 2px 6px; }
+.tok-opsel { background: transparent; border: none; color: var(--accent); font: inherit; padding: 2px 0 2px 4px; }
+.tok-opsel:focus { outline: none; }
+.tok-paren { padding: 2px 6px; color: var(--accent); font-family: monospace; }
 .tok-ref { display: inline-flex; align-items: center; gap: 3px; }
 .tok-ref select { max-width: 140px; background: transparent; border: none; color: var(--accent); font: inherit; }
 .tok-ref select:focus { outline: none; }
 .tok-part { font-size: 11px; padding: 1px 5px; }
 .tok-del { font-size: 11px; padding: 0 4px; color: var(--muted); background: transparent; border: none; }
 .tok-del:hover { color: var(--danger); }
+/* перестановка элементов формулы: стрелки рядом с крестиком */
+.tok-tools { display: inline-flex; align-items: center; }
+.tok-mv { font-size: 9px; padding: 0 3px; color: var(--muted); background: transparent; border: none; }
+.tok-mv:hover { color: var(--accent); }
+.tok-mv:disabled { opacity: .3; }
+/* восклицательный знак в кружке в шапке формулы: подсказка с формулой по наведению */
+.finf {
+  display: inline-flex; align-items: center; justify-content: center;
+  width: 15px; height: 15px; border-radius: 50%;
+  border: 1px solid var(--muted); color: var(--muted);
+  font-size: 10px; font-weight: 700; line-height: 1;
+  flex: 0 0 auto; cursor: help;
+}
+.finf:hover { color: var(--accent); border-color: var(--accent); }
+/* всплывающая подсказка с формулой (кнопка «(!)»): ВНУТРИ карточки, у шапки,
+   растягивается на ширину карточки, длинная формула переносится строками */
+.finf-pop {
+  position: absolute;
+  top: 32px;
+  left: 8px;
+  right: 8px;
+  z-index: 5;
+  padding: 6px 9px;
+  background: var(--panel2);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.35;
+  white-space: pre-wrap;
+  word-break: break-word;
+  pointer-events: none;
+}
+/* пока подсказка открыта — карточка может выпустить её за свои границы, если не влезает */
+.canvas.free .card.finf-open { overflow: visible; }
 .f-buttons { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 6px; }
 .f-refadd { display: flex; gap: 6px; margin-top: 6px; }
 .f-refadd select { flex: 1; background: var(--panel); border: 1px solid var(--border); border-radius: 7px; color: var(--text); padding: 6px 8px; }
@@ -727,19 +778,11 @@ button.active { border-color: var(--accent); color: var(--accent); }
 .dw-actions #dw-roll { flex: 1; font-weight: 700; }
 .dw-actions #dw-reset { flex: 0 0 auto; }
 
-/* ---------- Appearance editor ---------- */
-.app-grid { display: grid; grid-template-columns: auto 1fr; gap: 8px; align-items: center; }
-.app-lab { color: var(--muted); font-size: 13px; }
-.app-grid input[type="color"] { width: 44px; height: 28px; padding: 0; border: 1px solid var(--border); border-radius: 6px; background: transparent; }
-.app-aligns { display: flex; gap: 4px; }
-.ui-align.active { border-color: var(--accent); color: var(--accent); }
-.app-grid input[type="checkbox"] { width: auto; margin: 0; }
-
 /* ---------- Centered card content ---------- */
 .card.type-counter .card-body,
 .card.type-skill .card-body,
 .card.type-formula .card-body,
-.card.type-perk .card-body {
+.card.type-spell .card-body {
   align-items: center;
   text-align: center;
 }

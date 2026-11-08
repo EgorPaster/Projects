@@ -6,7 +6,7 @@ window.App = window.App || {};
   // ===== Constants =====
   const STORAGE_KEY = 'custplay-v1';
   const LEGACY_KEY = 'dnd-tracker-v1';
-  const CARD_TYPES = ['counter', 'skill', 'formula', 'spell', 'currency', 'perk', 'inventory', 'note'];
+  const CARD_TYPES = ['counter', 'skill', 'formula', 'spell', 'currency', 'inventory', 'note'];
   const MIN_W = 220, MIN_H = 110;   // минимальный размер карточки: чтобы влезали кнопки/содержимое
 
   // ===== Helpers =====
@@ -33,7 +33,7 @@ window.App = window.App || {};
     return window.matchMedia('(min-width: 721px)').matches;
   }
   function nameExample(type) {
-    return ({ counter: 'Здоровье', skill: 'Акробатика', formula: 'КБ', spell: 'Огненный шар', currency: 'Деньги', perk: 'Вдохновение', inventory: 'Снаряжение', note: 'Заметка' })[type] || '';
+    return ({ counter: 'Здоровье', skill: 'Акробатика', formula: 'КБ', spell: 'Огненный шар', currency: 'Деньги', inventory: 'Снаряжение', note: 'Заметка' })[type] || '';
   }
 
   // ===== State =====
@@ -56,13 +56,26 @@ window.App = window.App || {};
       }
       if (!raw) return defaultState();
       const s = JSON.parse(raw);
-      return Object.assign(defaultState(), s);
+      // читаем ТОЛЬКО знакомые поля: мусор/обрывки из хранилища не протекают в приложение
+      const st = defaultState();
+      if (s && typeof s === 'object') {
+        if (Array.isArray(s.characters)) st.characters = s.characters.filter(function (c) { return c && typeof c === 'object'; });
+        if (s.activeCharacterId && st.characters.some(function (c) { return c.id === s.activeCharacterId; })) st.activeCharacterId = s.activeCharacterId;
+        if (s.settings && typeof s.settings === 'object') st.settings = Object.assign(st.settings, s.settings);
+        if (Array.isArray(s.log)) st.log = s.log.filter(function (e) { return e && typeof e.text === 'string'; });
+      }
+      return st;
     } catch (e) {
       return defaultState();
     }
   }
+  let saveErrorShown = false;
   function save() {
-    try { localStorage.setItem(STORAGE_KEY, JSON.stringify(state)); } catch (e) {}
+    try { localStorage.setItem(STORAGE_KEY, JSON.stringify(state)); saveErrorShown = false; }
+    catch (e) {
+      // хранилище переполнено или недоступно: предупреждаем один раз, дальше молчим, пока не пройдёт
+      if (!saveErrorShown) { saveErrorShown = true; toast(App.t('saveError')); }
+    }
   }
 
   let state = load();
@@ -72,7 +85,7 @@ window.App = window.App || {};
   let redoStack = [];
   const MAX_UNDO = 50;
   let editMode = false;
-  let editScratch = { units: null, items: null, tokens: null, formulaCard: null, uiAlign: '' };
+  let editScratch = { units: null, items: null, tokens: null, formulaCard: null };
 
   let formulaMemo = {};
   let formulaVisiting = new Set();
@@ -263,7 +276,6 @@ window.App = window.App || {};
           { id: uid(), name: 'Платина', base: 10 }
         ], amounts: {}, autoconvert: true
       };
-      case 'perk': return { description: '', charges: { mode: 'own', current: 0, max: 0, linkId: null, cost: 1, blockEmpty: false }, restores: false };
       case 'inventory': return { items: [], showWeight: true };
       case 'note': return { text: '' };
     }
@@ -288,9 +300,8 @@ window.App = window.App || {};
       case 'inventory': return { w: 300, h: 200 };
       case 'currency': return { w: 300, h: 170 };
       case 'spell': return { w: 300, h: 175 };       // описание 2 строки + заряды
-      case 'perk': return { w: 300, h: 200 };
       case 'skill': return { w: 300, h: 95 };        // шапка с кубиком (значение — опционально, лезет в 95)
-      case 'formula': return { w: 300, h: 120 };     // шапка + выражение + значение
+      case 'formula': return { w: 300, h: 95 };      // шапка + значение (выражение переехало в подсказку «!»)
       default: return { w: 300, h: 120 };            // counter: шапка + строка счётчика
     }
   }
@@ -302,9 +313,8 @@ window.App = window.App || {};
     let w = MIN_W, h = MIN_H;
     if (type === 'counter') h = 100;            // шапка + строка счётчика
     if (type === 'skill') h = card.value != null ? 95 : 75;   // шапка (+ строка значения, если есть)
-    if (type === 'formula') h = 120;            // шапка + выражение (может перенестись) + значение
+    if (type === 'formula') h = 95;             // шапка + значение (выражение переехало в подсказку «!»)
     if (type === 'spell') h = 125;              // описание 2 строки + заряды
-    if (type === 'perk') h = 120;               // описание 2 строки + заряды
     if (type === 'inventory') {                 // предметы + строка итога веса
       const n = (card.items || []).length;
       h = Math.max(h, 62 + n * 30 + 22);        // 2 строки описания в предмете тоже учтены сверху (30/строка может не хватить — проверяется тестом)
@@ -341,9 +351,13 @@ window.App = window.App || {};
     if (!ch) return;
     ensurePages(ch);
     ch.cards.forEach(function (card) {
-      // v8: «Стат» и «Навык» объединены в один тип — данные старых статов (value/bonus/die)
-      // сохраняются как есть, карточка просто становится навыком со значением
+      // v8: «Стат» → «Навык»; v15: «Перк» → «Заклинание» (отличие было только в кубике),
+      // у перка мог не быть charges — подставляем собственные
       if (card.type === 'stat') card.type = 'skill';
+      if (card.type === 'perk') {
+        card.type = 'spell';
+        if (!card.charges) card.charges = { mode: 'own', current: 0, max: 0, linkId: null, cost: 1, blockEmpty: false };
+      }
       if (card.x == null || card.y == null) autoPlace(ch, card);
       const mn = minSize(card);
       card.w = card.w == null ? defaultSize(card.type).w : Math.max(mn.w, card.w);
@@ -382,12 +396,12 @@ window.App = window.App || {};
     return cards;
   }
 
-  function newCharacter(name) {
-    const id = uid();
-    const ch = { id: id, name: name || App.t('newCharName'), cards: defaultCards() };
+  function newCharacter(name) {   // единственный путь создания: и из меню, и стартовый персонаж при пустом хранилище
+    const ch = { id: uid(), name: name || App.t('newCharName'), cards: defaultCards() };
     layoutCharacter(ch);
     state.characters.push(ch);
-    state.activeCharacterId = id;
+    state.activeCharacterId = ch.id;
+    return ch;
   }
 
   // ===== Formulas =====
@@ -409,7 +423,7 @@ window.App = window.App || {};
       case 'counter': return num(card.current);
       case 'skill': return card.value == null ? 0 : num(card.value);
       case 'formula': return evalFormula(card.id);
-      case 'spell': case 'perk': return chargesCurrent(card);
+      case 'spell': return chargesCurrent(card);
       default: return 0;
     }
   }
@@ -557,6 +571,13 @@ window.App = window.App || {};
     else if (act === 'custom-dec') openQuickDelta(card, -1, e && e.currentTarget);
     else if (act === 'roll') rollCard(card);
     else if (act === 'use') useCharge(card);
+    else if (act === 'pip') {
+      // клик по кружку заряда: заряды заполняются до этой ячейки
+      if (card.charges && card.charges.mode !== 'link') {
+        const i = Math.max(0, num(ds.i) || 0);
+        mutate(function () { card.charges.current = i; });
+      }
+    }
     else if (act === 'curr-inc') mutate(function () { card.amounts[ds.unit] = num(card.amounts[ds.unit]) + 1; normalizeCurrency(card); });
     else if (act === 'curr-dec') mutate(function () { card.amounts[ds.unit] = num(card.amounts[ds.unit]) - 1; });
     else if (act === 'curr-custom-inc') openCurrencyDelta(card, ds.unit, 1, e && e.currentTarget);
@@ -666,25 +687,36 @@ window.App = window.App || {};
     });
   }
 
+  // перегенерация внутренних ID карточек: units/items всегда, card.id и charges.linkId — когда
+  // передан idMap (импорт, дублирование персонажа). Помощник один — вызывают дубликат и импорт.
+  function renewIds(cards, idMap) {
+    cards.forEach(function (c) {
+      if (idMap) { const nu = uid(); idMap[c.id] = nu; c.id = nu; }
+      if (c.type === 'currency' && c.units) {
+        const umap = {};
+        c.units.forEach(function (u) { const nu = uid(); umap[u.id] = nu; u.id = nu; });
+        const na = {};
+        for (const k in (c.amounts || {})) if (umap[k]) na[umap[k]] = c.amounts[k];
+        c.amounts = na;
+      }
+      if (c.type === 'inventory' && c.items) c.items.forEach(function (it) { it.id = uid(); });
+      if (idMap && c.charges && c.charges.mode === 'link' && c.charges.linkId) {
+        c.charges.linkId = idMap[c.charges.linkId] || null;
+      }
+    });
+  }
+
   function duplicateCard(cardId) {
     const ch = activeChar();
     const card = findCard(cardId);
     if (!ch || !card) return;
     mutate(function () {
       const copy = JSON.parse(JSON.stringify(card));
-      copy.id = uid();
       delete copy._value; delete copy._error;
+      renewIds([copy], null);
       let base = card.name, i = 2, nm = base;
       while (ch.cards.some(function (c) { return c.name === nm; })) { nm = base + ' (' + i + ')'; i++; }
       copy.name = nm;
-      if (copy.type === 'currency' && copy.units) {
-        const umap = {};
-        copy.units.forEach(function (u) { const nu = uid(); umap[u.id] = nu; u.id = nu; });
-        const na = {};
-        for (const k in copy.amounts) if (umap[k]) na[umap[k]] = copy.amounts[k];
-        copy.amounts = na;
-      }
-      if (copy.type === 'inventory' && copy.items) copy.items.forEach(function (it) { it.id = uid(); });
       if (copy.x != null) { copy.x += 24; copy.y += 24; }
       ch.cards.push(copy);
     });
@@ -694,12 +726,18 @@ window.App = window.App || {};
     const ch = activeChar();
     const card = findCard(cardId);
     if (!ch || !card) return;
-    const refs = ch.cards.filter(function (c) { return c.type === 'formula' && App.formula.hasRef(c.expression || '', card.name); });
-    if (refs.length) {
-      confirmDialog(App.t('referencedBy') + ' ' + refs.map(function (r) { return r.name; }).join(', '), function () { doDeleteCard(cardId); });
-    } else {
-      confirmDialog(App.tf('confirmDeleteCard', { name: card.name }), function () { doDeleteCard(cardId); });
+    // кто зависит от удаляемой карточки: формулы (ссылки) и заклинания (связанные заряды)
+    const name = card.name;
+    const refs = ch.cards.filter(function (c) { return c.id !== cardId && c.type === 'formula' && App.formula.hasRef(c.expression || '', name); });
+    const linked = ch.cards.filter(function (c) { return c.id !== cardId && c.type === 'spell' && c.charges && c.charges.mode === 'link' && c.charges.linkId === cardId; });
+    let msg = '';
+    if (refs.length) msg += App.t('referencedBy') + ' ' + refs.map(function (r) { return r.name; }).join(', ');
+    if (linked.length) {
+      if (msg) msg += ' ';
+      msg += App.tf('linkedBy', { name: linked.map(function (l) { return l.name; }).join(', ') });
     }
+    const confirmMsg = msg || App.tf('confirmDeleteCard', { name: name });
+    confirmDialog(confirmMsg, function () { doDeleteCard(cardId); });
   }
   function doDeleteCard(cardId) {
     const ch = activeChar();
@@ -715,12 +753,17 @@ window.App = window.App || {};
         if (!c.restores) return;
         if (c.type === 'counter') {
           c.current = (c.max == null) ? 0 : num(c.max);
-        } else if ((c.type === 'spell' || c.type === 'perk') && c.charges && c.charges.mode === 'own') {
+        } else if (c.type === 'spell' && c.charges && c.charges.mode === 'own') {
           c.charges.current = (c.charges.max == null) ? 0 : num(c.charges.max);
         }
       });
     });
     toast(App.t('restApplied'));
+  }
+  function confirmRest() {   // «Отдых» восполняет всё сразу — спрашиваем подтверждение
+    const ch = activeChar();
+    if (!ch || !ch.cards.some(function (c) { return c.restores; })) { toast(App.t('nothingToRest')); return; }
+    confirmDialog(App.t('restConfirm'), doRest, App.t('rest'));
   }
 
   // ===== Undo / redo =====
@@ -753,25 +796,39 @@ window.App = window.App || {};
     document.getElementById('fab').classList.toggle('hidden', !editMode || !activeChar());
   }
 
+  // Накладка ↺/↻: на ПК клавиши Ctrl+Z / Ctrl+Y (и Ctrl+Shift+Z), кнопки в шапке — только телефон
+  function addUndoKeys() {
+    document.addEventListener('keydown', function (e) {
+      if (!(e.ctrlKey || e.metaKey) || e.altKey) return;
+      const k = e.key.toLowerCase();
+      if (k === 'z' && !e.shiftKey) { e.preventDefault(); undo(); }
+      else if (k === 'y' || (k === 'z' && e.shiftKey)) { e.preventDefault(); redo(); }
+    });
+  }
+
   function renderHeader() {
     const bar = document.getElementById('topbar');
+    const undoRedoBtns = isDesktop() ? '' :
+      '<button class="icon" id="undoBtn" title="' + esc(App.t('undo')) + '">↶</button>' +
+      '<button class="icon" id="redoBtn" title="' + esc(App.t('redo')) + '">↷</button>';
     bar.innerHTML =
       '<div class="brand">🎲 <span class="accent">' + esc(App.t('appName')) + '</span></div>' +
       '<div class="top-controls">' +
         '<button class="icon" id="restBtn" title="' + esc(App.t('rest')) + '">☾</button>' +
         '<button class="icon" id="diceBtn" title="' + esc(App.t('dice')) + '">⚄</button>' +
         '<button class="icon" id="logBtn" title="' + esc(App.t('log')) + '">☰</button>' +
-        '<button class="icon" id="undoBtn" title="' + esc(App.t('undo')) + '">↶</button>' +
-        '<button class="icon" id="redoBtn" title="' + esc(App.t('redo')) + '">↷</button>' +
+        undoRedoBtns +
         '<button class="icon" id="settingsBtn" title="' + esc(App.t('settings')) + '">⚙</button>' +
         '<button class="icon" id="editModeBtn" title="' + esc(App.t('editMode')) + '">' + (editMode ? '✓' : '🖉') + '</button>' +
       '</div>';
 
-    document.getElementById('restBtn').addEventListener('click', doRest);
+    document.getElementById('restBtn').addEventListener('click', confirmRest);
     document.getElementById('diceBtn').addEventListener('click', toggleDiceWidget);
     document.getElementById('logBtn').addEventListener('click', toggleLog);
-    document.getElementById('undoBtn').addEventListener('click', undo);
-    document.getElementById('redoBtn').addEventListener('click', redo);
+    const undoBtn = document.getElementById('undoBtn');
+    if (undoBtn) undoBtn.addEventListener('click', undo);
+    const redoBtn = document.getElementById('redoBtn');
+    if (redoBtn) redoBtn.addEventListener('click', redo);
     document.getElementById('settingsBtn').addEventListener('click', openSettings);
     document.getElementById('editModeBtn').addEventListener('click', toggleEditMode);
   }
@@ -807,17 +864,6 @@ window.App = window.App || {};
     else { canvas.style.width = ''; canvas.style.height = ''; }
   }
 
-  function cardUIStyle(card) {
-    const ui = card.ui || {};
-    let s = '';
-    if (ui.bg) s += 'background:' + ui.bg + ';';
-    if (ui.color) s += 'color:' + ui.color + ';';
-    if (ui.align) s += 'text-align:' + ui.align + ';';
-    if (ui.bold) s += 'font-weight:bold;';
-    if (ui.italic) s += 'font-style:italic;';
-    return s;
-  }
-
   function cardView(card, desktop) {
     const broken = (card.type === 'formula' && card._error) ? ' broken' : '';
     const sel = (desktop && editMode && selIds.has(card.id)) ? ' selected' : '';
@@ -829,7 +875,6 @@ window.App = window.App || {};
       const dy = Math.max(0, card.y);
       style += 'left:' + Math.round(dx) + 'px;top:' + Math.round(dy) + 'px;width:' + Math.round(card.w) + 'px;height:' + Math.round(card.h) + 'px;';
     }
-    style += cardUIStyle(card);
     const resize = (editMode && desktop) ? '<span class="resize-handle" title="↘"></span>' : '';
     return '<div class="card type-' + card.type + broken + sel + '" data-id="' + card.id + '" style="' + style + '">' + cardHead(card, desktop) + cardBody(card) + resize + '</div>';
   }
@@ -851,7 +896,10 @@ window.App = window.App || {};
       roller = '<button class="headroll" data-act="roll" title="' + esc(App.t('roll')) + ' ' + esc(dieLabel(card.die)) + '">' + esc(dieLabel(card.die)) + '</button>' +
         (b ? '<span class="inc">' + (b > 0 ? '+' : '−') + Math.abs(b) + '</span>' : '');
     }
-    return '<div class="card-head">' + handle + '<span class="card-name">' + (card.restores ? '<span class="restore-ic">☾</span>' : '') + esc(card.name) + '</span>' + roller + tools + '</div>';
+    // восклицательный знак в кружке у формул: навёл курсор — подсказка с самой формулой (и текущим результатом).
+    // Скрываем в режиме правки — дальше тулзы не влезают (как и кубик в шапке)
+    const finfo = (card.type === 'formula' && !editMode) ? '<span class="finf" data-id="' + esc(card.id) + '" title="Формула">!</span>' : '';
+    return '<div class="card-head">' + handle + '<span class="card-name">' + (card.restores ? '<span class="restore-ic">☾</span>' : '') + esc(card.name) + '</span>' + finfo + roller + tools + '</div>';
   }
 
   function cardBody(card) {
@@ -861,7 +909,6 @@ window.App = window.App || {};
       case 'formula': return formulaBody(card);
       case 'spell': return spellBody(card);
       case 'currency': return currencyBody(card);
-      case 'perk': return perkBody(card);
       case 'inventory': return inventoryBody(card);
       case 'note': return noteBody(card);
     }
@@ -903,13 +950,17 @@ window.App = window.App || {};
     let valueHtml;
     if (card._error) valueHtml = '<div class="err">' + esc(card._error) + '</div>';
     else valueHtml = '<div class="stat-line"><span class="stat-value">' + fmt(card._value) + '</span></div>';
-    return '<div class="card-body"><div class="meta">' + esc(card.expression || '—') + '</div>' + valueHtml + '</div>';
+    // выражение в карточке больше не показываем — оно в подсказке значка «!» в шапке
+    return '<div class="card-body">' + valueHtml + '</div>';
   }
 
   function pipsString(cur, max) {
     if (max == null || max > 12) return '';
+    // каждый кружок — кнопка: клик по ячейке заполняет заряды до неё (и опустошает всё после неё)
     let s = '';
-    for (let i = 0; i < max; i++) s += (i < cur ? '●' : '○');
+    for (let i = 1; i <= max; i++) {
+      s += '<button class="pip' + (i <= cur ? ' pip-full' : '') + '" data-act="pip" data-i="' + i + '" title="' + esc(App.t('pipFill')) + '">' + (i <= cur ? '●' : '○') + '</button>';
+    }
     return s;
   }
 
@@ -932,12 +983,6 @@ window.App = window.App || {};
   }
 
   function spellBody(card) {
-    return '<div class="card-body">' +
-      (card.description ? '<div class="desc-text">' + esc(card.description) + '</div>' : '') +
-      chargesInfo(card) + '</div>';
-  }
-
-  function perkBody(card) {
     return '<div class="card-body">' +
       (card.description ? '<div class="desc-text">' + esc(card.description) + '</div>' : '') +
       chargesInfo(card) + '</div>';
@@ -1025,6 +1070,43 @@ window.App = window.App || {};
     if (del) del.addEventListener('click', function () { deleteCard(card.id); });
     if (up) up.addEventListener('click', function () { moveCard(card.id, -1); });
     if (down) down.addEventListener('click', function () { moveCard(card.id, 1); });
+    // Телефон: долгий тап (полсекунды) по карточке в правке — «Перенести на лист…»
+    if (editMode && !isDesktop()) {
+      let lp = null;
+      el.addEventListener('touchstart', function (e) {
+        if (e.target.closest('button')) return;
+        lp = setTimeout(function () { openMoveToPage(card.id); }, 500);
+      }, { passive: true });
+      ['touchend', 'touchmove', 'touchcancel'].forEach(function (evName) {
+        el.addEventListener(evName, function () { if (lp) { clearTimeout(lp); lp = null; } }, { passive: true });
+      });
+    }
+  }
+
+  // Перенос карточки на другой лист списком (мобильный путь; на ПК карточку тащат на вкладку)
+  function openMoveToPage(cardId) {
+    const ch = activeChar();
+    const card = findCard(cardId);
+    if (!ch || !card || ch.pages.length < 2) return;
+    const from = card.page;
+    const opts = ch.pages.filter(function (p) { return p.id !== from; }).map(function (p) {
+      return '<option value="' + p.id + '"' + (false ? ' selected' : '') + '>' + esc(p.name) + '</option>';
+    }).join('');
+    if (!opts) return;
+    openModal(App.t('moveCard'), '<p class="confirm-text">' + esc(card.name) + '</p>' +
+      '<div class="field"><label>' + esc(App.t('moveToPage')) + '</label><select id="f-target">' + opts + '</select></div>',
+      [
+        { label: App.t('cancel') },
+        { label: App.t('moveCard'), cls: 'primary', onClick: function () {
+            const target = document.getElementById('f-target').value;
+            if (!target || target === from) return;
+            mutate(function () {
+              card.page = target;
+              ch.lastPage = target;
+            });
+            toast(App.t('cardMoved'));
+          } }
+      ]);
   }
 
   // ===== Free placement: сетка, границы, выделение групп =====
@@ -1107,6 +1189,24 @@ window.App = window.App || {};
     }
   }
 
+  // подсветка вкладки листа под курсором при перетаскивании карточки вверх
+  function hintTabs(e) {
+    let found = null;
+    document.querySelectorAll('.ptab').forEach(function (t) {
+      t.classList.remove('drop-hint');
+      const r = t.getBoundingClientRect();
+      if (!found && e.clientX >= r.left && e.clientX <= r.right && e.clientY >= r.top - 4 && e.clientY <= r.bottom + 4) {
+        if (t.dataset.page !== (activeChar() ? curPageId(activeChar()) : null)) found = t;
+      }
+    });
+    if (found) found.classList.add('drop-hint');
+    if (dragState) dragState.hintPage = found ? found.dataset.page : null;
+  }
+  // разубрать подсветку после дропа
+  function unhintTabs() {
+    document.querySelectorAll('.ptab.drop-hint').forEach(function (t) { t.classList.remove('drop-hint'); });
+  }
+
   function initFreePlacement() {
     const canvas = document.getElementById('canvas');
     canvas.addEventListener('pointerdown', function (e) {
@@ -1182,6 +1282,8 @@ window.App = window.App || {};
           g.el.style.left = (g.ox + ldx) + 'px';
           g.el.style.top = (g.oy + ldy) + 'px';
         });
+        // тянем карточку вверх к вкладкам листов — подсвечиваем вкладку под курсором
+        hintTabs(e);
       }
     });
     window.addEventListener('pointerup', function () {
@@ -1191,7 +1293,20 @@ window.App = window.App || {};
       dragState = null;
       ds.group.forEach(function (g) { if (g.el) g.el.classList.remove('dragging'); });
       document.body.style.userSelect = '';
-      if (!ds.moved) return;      // просто клик по ручке — ничего не перемещали
+      if (!ds.moved) { unhintTabs(); return; }      // просто клик по ручке — ничего не перемещали
+
+      // «отпустили карточку на вкладке» — переносим всю группу на этот лист
+      if (ds.hintPage) {
+        unhintTabs();
+        const chp = activeChar();
+        const from = curPageId(chp);
+        pushUndo();
+        ds.group.forEach(function (g) { if (g.card.page === from) g.card.page = ds.hintPage; });
+        chp.lastPage = ds.hintPage;   // видно результат сразу — открываем лист назначения
+        commit();
+        return;
+      }
+      unhintTabs();
 
       // 1) вычисляем, куда карточки попали бы — ещё НЕ сохраняя
       const page = ds.group[0].card.page;
@@ -1347,8 +1462,9 @@ window.App = window.App || {};
   function typeFields(card) {
     switch (card.type) {
       case 'counter':
-        return numField('f-current', App.t('current'), card.current) +
-          numField('f-max', App.t('max'), card.max == null ? '' : card.max, '—') +
+        // «Текущее» убрано из редактора: при создании оно стартует с максимума (см. applyFields),
+        // дальше игроки меняют его кнопками ⁺/⁻ на самой карточке
+        return numField('f-max', App.t('max'), card.max == null ? '' : card.max, '—') +
           dieField('f-die', card.die) +
           // галочка бонуса и само поле — только пока выбран кубик (f-diegate скрывается без кубика)
           '<div id="f-diegate">' + bonusToggleFields(card.bonus) + '</div>' +
@@ -1359,7 +1475,6 @@ window.App = window.App || {};
       case 'formula': return formulaFields(card);
       case 'spell': return spellFields(card);
       case 'currency': return currencyFields(card);
-      case 'perk': return perkFields(card);
       case 'inventory': return inventoryFields(card);
       case 'note': return noteFields(card);
     }
@@ -1378,8 +1493,7 @@ window.App = window.App || {};
       '<option value="own"' + (ch.mode !== 'link' ? ' selected' : '') + '>' + esc(App.t('chargesOwn')) + '</option>' +
       '<option value="link"' + (ch.mode === 'link' ? ' selected' : '') + '>' + esc(App.t('chargesLink')) + '</option>' +
       '</select></div>';
-    html += '<div class="field" id="f-chownwrap"><label>' + esc(App.t('current')) + '</label><input id="f-chcur" type="number" value="' + num(ch.current) + '" placeholder="0"></div>';
-    html += '<div class="field" id="f-chownwrap2"><label>' + esc(App.t('max')) + '</label><input id="f-chmax" type="number" value="' + (ch.max == null ? '' : ch.max) + '" placeholder="3"></div>';
+    html += '<div class="field" id="f-chownwrap"><label>' + esc(App.t('max')) + '</label><input id="f-chmax" type="number" value="' + (ch.max == null ? '' : ch.max) + '" placeholder="3"></div>';
     html += '<div class="field" id="f-chlinkwrap"><label>' + esc(App.t('linkTo')) + '</label><select id="f-chlink">' + linkOpts + '</select></div>';
     html += '<div class="field" id="f-chcostwrap"><label>' + esc(App.t('costPerUse')) + '</label><input id="f-chcost" type="number" value="' + (num(ch.cost) || 1) + '" placeholder="1"></div>';
     html += '<div class="field check" id="f-chblockwrap"><input id="f-chblock" type="checkbox"' + (ch.blockEmpty ? ' checked' : '') + '><label for="f-chblock">' + esc(App.t('blockEmpty')) + '</label></div>';
@@ -1390,10 +1504,6 @@ window.App = window.App || {};
   function formulaFields(card) {
     editScratch.tokens = tokenizeFormula(card.expression || '');
     editScratch.formulaCard = card;
-    const ch = activeChar();
-    const refOpts = ch.cards.filter(function (c) { return c.id !== card.id; }).map(function (c) {
-      return '<option value="' + esc(c.name) + '">' + esc(c.name) + '</option>';
-    }).join('');
     return '<div class="field"><label>' + esc(App.t('expression')) + '</label>' +
       '<div class="f-tokens" id="f-tokens"></div>' +
       '<div class="f-buttons">' +
@@ -1404,9 +1514,9 @@ window.App = window.App || {};
         '<button type="button" class="small f-op" data-op="(">(</button>' +
         '<button type="button" class="small f-op" data-op=")">)</button>' +
         '<button type="button" class="small f-op" data-op="num">' + esc(App.t('number')) + '</button>' +
+        '<button type="button" class="small" id="f-addref">+ ' + esc(App.t('addParam')) + '</button>' +
+        '<button type="button" class="small" id="f-addbonus">+ ' + esc(App.t('bonusOf')) + '</button>' +
       '</div>' +
-      '<div class="f-refadd"><select id="f-newref">' + refOpts + '</select>' +
-      '<button type="button" class="small" id="f-addref">+ ' + esc(App.t('addParam')) + '</button></div>' +
       '<div class="f-preview" id="f-preview">= —</div>' +
       '<div class="formula-help">' + esc(App.t('formulaTip')) + '</div>' +
       '</div>' +
@@ -1419,11 +1529,6 @@ window.App = window.App || {};
       chargesFields(card, true) +
       dieField('f-die', card.die) +
       '<div id="f-diegate">' + bonusToggleFields(card.bonus) + '</div>';
-  }
-
-  function perkFields(card) {
-    return '<div class="field"><label>' + esc(App.t('description')) + '</label><textarea id="f-desc" placeholder="' + esc(App.t('description')) + '…">' + esc(card.description || '') + '</textarea></div>' +
-      chargesFields(card, true);
   }
 
   function noteFields(card) {
@@ -1445,22 +1550,6 @@ window.App = window.App || {};
       '<div class="sublist" id="f-items"></div>' +
       '<button type="button" class="small" id="f-additem">+ ' + esc(App.t('addItem')) + '</button></div>' +
       checkField('f-showweight', App.t('totalWeight'), !!card.showWeight);
-  }
-
-  function appearanceFields(card) {
-    const ui = card.ui || {};
-    const aligns = [['left', '⇤'], ['center', '⇔'], ['right', '⇥']];
-    const alignBtns = aligns.map(function (a) {
-      return '<button type="button" class="small ui-align' + (editScratch.uiAlign === a[0] ? ' active' : '') + '" data-v="' + a[0] + '" title="' + a[0] + '">' + a[1] + '</button>';
-    }).join('');
-    return '<div class="field"><label>' + esc(App.t('appearance')) + '</label>' +
-      '<div class="app-grid">' +
-        '<span class="app-lab">' + esc(App.t('background')) + '</span><input type="color" id="ui-bg" value="' + (ui.bg || '#232334') + '">' +
-        '<span class="app-lab">' + esc(App.t('textColor')) + '</span><input type="color" id="ui-color" value="' + (ui.color || '#e8e6f0') + '">' +
-        '<span class="app-lab">' + esc(App.t('alignment')) + '</span><span class="app-aligns">' + alignBtns + '</span>' +
-        '<span class="app-lab">' + esc(App.t('bold')) + '</span><input type="checkbox" id="ui-bold"' + (ui.bold ? ' checked' : '') + '>' +
-        '<span class="app-lab">' + esc(App.t('italic')) + '</span><input type="checkbox" id="ui-italic"' + (ui.italic ? ' checked' : '') + '>' +
-      '</div></div>';
   }
 
   function bindCurrencyEditor() {
@@ -1525,7 +1614,7 @@ window.App = window.App || {};
     const mode = document.getElementById('f-chmode');
     function upd() {
       const isOwn = mode.value !== 'link';
-      ['f-chownwrap', 'f-chownwrap2'].forEach(function (id) { const el = document.getElementById(id); if (el) el.style.display = isOwn ? '' : 'none'; });
+      ['f-chownwrap'].forEach(function (id) { const el = document.getElementById(id); if (el) el.style.display = isOwn ? '' : 'none'; });
       ['f-chlinkwrap', 'f-chcostwrap'].forEach(function (id) { const el = document.getElementById(id); if (el) el.style.display = isOwn ? 'none' : ''; });
     }
     mode.addEventListener('change', upd);
@@ -1576,35 +1665,22 @@ window.App = window.App || {};
     upd();
   }
 
-  function bindAppearance() {
-    document.querySelectorAll('.ui-align').forEach(function (b) {
-      b.addEventListener('click', function () {
-        editScratch.uiAlign = b.dataset.v;
-        document.querySelectorAll('.ui-align').forEach(function (x) { x.classList.toggle('active', x === b); });
-      });
-    });
-  }
+  function bindAppearance() {}   // ОФОРМЛЕНИЕ убрано (v15)
 
   function postInitEditor(card) {
     if (card.type === 'currency') bindCurrencyEditor();
     if (card.type === 'inventory') bindInventoryEditor();
     if (card.type === 'formula') bindFormulaEditor();
-    if (card.type === 'spell' || card.type === 'perk') bindChargesToggle();
+    if (card.type === 'spell') bindChargesToggle();
     bindBonusToggle();
     bindValueToggle();
     bindDieToggle();
     bindDieGate();
-    bindAppearance();
   }
 
   // ===== Formula token editor =====
   function opSymbol(v) {
     return ({ '+': '+', '-': '−', '*': '×', '/': '÷', '(': '(', ')': ')' })[v] || v;
-  }
-  function cycleOp(v) {
-    const order = ['+', '-', '*', '/'];
-    const i = order.indexOf(v);
-    return i === -1 ? '+' : order[(i + 1) % order.length];
   }
   function tokenizeFormula(str) {
     const tokens = [];
@@ -1647,7 +1723,15 @@ window.App = window.App || {};
     if (t.t === 'num') {
       inner = '<input type="number" class="tok-num" data-i="' + i + '" value="' + esc(t.v) + '">';
     } else if (t.t === 'op') {
-      inner = '<button type="button" class="tok-op" data-i="' + i + '">' + opSymbol(t.v) + '</button>';
+      if (t.v === '(' || t.v === ')') {
+        // скобка — просто метка, менять нечего
+        inner = '<span class="tok-paren">' + opSymbol(t.v) + '</span>';
+      } else {
+        const opOpts = ['+', '-', '*', '/'].map(function (o) {
+          return '<option value="' + o + '"' + (o === t.v ? ' selected' : '') + '>' + opSymbol(o) + '</option>';
+        }).join('');
+        inner = '<select class="tok-opsel" data-i="' + i + '">' + opOpts + '</select>';
+      }
     } else if (t.t === 'ref') {
       const opts = cardNames.map(function (n) {
         return '<option value="' + esc(n) + '"' + (n === t.name ? ' selected' : '') + '>' + esc(n) + '</option>';
@@ -1655,7 +1739,12 @@ window.App = window.App || {};
       inner = '<span class="tok-ref"><select class="tok-refsel" data-i="' + i + '">' + opts + '</select>' +
         '<button type="button" class="tok-part" data-i="' + i + '" title="' + esc(App.t('valueOf')) + ' / ' + esc(App.t('bonusOf')) + '">' + (t.part === 'bonus' ? esc(App.t('bonusOf')) : esc(App.t('valueOf'))) + '</button></span>';
     }
-    return '<span class="tok" data-i="' + i + '">' + inner + '<button type="button" class="tok-del" title="✕">×</button></span>';
+    return '<span class="tok" data-i="' + i + '">' + inner +
+      '<span class="tok-tools">' +
+        '<button type="button" class="tok-mv" data-dir="-1" title="◀">◀</button>' +
+        '<button type="button" class="tok-mv" data-dir="1" title="▶">▶</button>' +
+        '<button type="button" class="tok-del" title="✕">×</button>' +
+      '</span></span>';
   }
   function renderFormulaTokens() {
     const area = document.getElementById('f-tokens');
@@ -1668,12 +1757,21 @@ window.App = window.App || {};
       const t = tokens[i];
       const del = wrap.querySelector('.tok-del');
       if (del) del.addEventListener('click', function () { tokens.splice(i, 1); renderFormulaTokens(); updateFormulaPreview(); });
+      wrap.querySelectorAll('.tok-mv').forEach(function (mv) {
+        mv.addEventListener('click', function () {
+          const j = i + Number(mv.dataset.dir);
+          if (j < 0 || j >= tokens.length) return;
+          const tmp = tokens[i]; tokens[i] = tokens[j]; tokens[j] = tmp;
+          renderFormulaTokens();
+          updateFormulaPreview();
+        });
+      });
       const num = wrap.querySelector('.tok-num');
       if (num) num.addEventListener('input', function () { t.v = num.value; updateFormulaPreview(); });
-      const opBtn = wrap.querySelector('.tok-op');
-      if (opBtn) opBtn.addEventListener('click', function () { t.v = cycleOp(t.v); opBtn.textContent = opSymbol(t.v); updateFormulaPreview(); });
+      const opSel = wrap.querySelector('.tok-opsel');
+      if (opSel) opSel.addEventListener('change', function () { t.v = opSel.value; updateFormulaPreview(); });
       const sel = wrap.querySelector('.tok-refsel');
-      if (sel) sel.addEventListener('change', function () { t.name = sel.value; updateFormulaPreview(); });
+      if (sel) sel.addEventListener('change', function () { t.name = sel.value; editScratch.lastRefName = sel.value; updateFormulaPreview(); });
       const partBtn = wrap.querySelector('.tok-part');
       if (partBtn) partBtn.addEventListener('click', function () { t.part = (t.part === 'bonus' ? 'value' : 'bonus'); partBtn.textContent = (t.part === 'bonus' ? App.t('bonusOf') : App.t('valueOf')); updateFormulaPreview(); });
     });
@@ -1681,9 +1779,16 @@ window.App = window.App || {};
   function insertFormulaToken(kind) {
     const tokens = editScratch.tokens || [];
     if (kind === 'num') tokens.push({ t: 'num', v: '1' });
-    else if (kind === 'ref') {
-      const sel = document.getElementById('f-newref');
-      if (sel && sel.value) tokens.push({ t: 'ref', name: sel.value, part: 'value' });
+    else if (kind === 'ref' || kind === 'ref-bonus') {
+      // список параметров убран: подставляем последний выбранный (или первую карточку-другую),
+      // сменить можно прямо в чипе его выпадающим списком
+      const ch = activeChar();
+      const name = (editScratch.lastRefName &&
+        ch.cards.some(function (c) { return c.name === editScratch.lastRefName; }))
+        ? editScratch.lastRefName
+        : (ch.cards.find(function (c) { return c.id !== editScratch.formulaCard.id; }) || ch.cards[0] || {}).name;
+      if (!name) return;
+      tokens.push({ t: 'ref', name: name, part: kind === 'ref-bonus' ? 'bonus' : 'value' });
     } else {
       tokens.push({ t: 'op', v: kind });
     }
@@ -1695,7 +1800,7 @@ window.App = window.App || {};
     switch (card.type) {
       case 'counter': return num(card.current);
       case 'skill': return card.value == null ? 0 : num(card.value);
-      case 'spell': case 'perk': return chargesCurrent(card);
+      case 'spell': return chargesCurrent(card);
       case 'formula': return card._value != null ? card._value : 0;
       default: return 0;
     }
@@ -1728,6 +1833,8 @@ window.App = window.App || {};
     });
     const addRef = document.getElementById('f-addref');
     if (addRef) addRef.addEventListener('click', function () { insertFormulaToken('ref'); });
+    const addBonus = document.getElementById('f-addbonus');
+    if (addBonus) addBonus.addEventListener('click', function () { insertFormulaToken('ref-bonus'); });
     updateFormulaPreview();
   }
 
@@ -1740,20 +1847,19 @@ window.App = window.App || {};
       charges.linkId = link && link.value ? link.value : null;
       charges.cost = num(readNum('f-chcost')) || 1;
     } else {
-      charges.current = num(readNum('f-chcur'));
       charges.max = readNumOrNull('f-chmax');
+      // при создании заряды стартуют с максимума (см. правило счётчиков)
+      if (card._new && charges.max != null) charges.current = num(charges.max);
     }
     return charges;
   }
 
-  // ОФОРМЛЕНИЕ: временно скрыто из редактора (по просьбе пользователя, «пока рано»).
-  // Чтобы вернуть: в openCardEditor снова добавить body += appearanceFields(card);
-  // и в applyFields снять guard вокруг назначения card.ui.
   function applyFields(card) {
     switch (card.type) {
       case 'counter':
-        card.current = num(readNum('f-current'));
         card.max = readNumOrNull('f-max');
+        // при создании счётчика текущее значение = максимуму (нет максимума — остаётся стартовым)
+        if (card._new && card.max != null) card.current = num(card.max);
         card.bonus = readBonus();
         card.die = readDie('f-die');
         card.restores = readCheck('f-restores');
@@ -1780,11 +1886,6 @@ window.App = window.App || {};
         card.bonus = readBonus();
         card.restores = readCheck('f-restores');
         break;
-      case 'perk':
-        card.description = readText('f-desc');
-        card.charges = readCharges(card);
-        card.restores = readCheck('f-restores');
-        break;
       case 'currency': {
         const units = editScratch.units || card.units;
         card.units = units.map(function (u) { return { id: u.id, name: u.name, base: num(u.base) }; });
@@ -1801,25 +1902,13 @@ window.App = window.App || {};
         card.text = readText('f-text');
         break;
     }
-    const uiBg = document.getElementById('ui-bg');
-    if (uiBg) {   // ОФОРМЛЕНИЕ: поля скрыты — существующие настройки карточки сохраняем как есть
-      card.ui = {
-        bg: readText('ui-bg'),
-        color: readText('ui-color'),
-        align: editScratch.uiAlign || '',
-        bold: readCheck('ui-bold'),
-        italic: readCheck('ui-italic')
-      };
-    }
   }
 
   function openCardEditor(cardId) {
     const card = findCard(cardId);
     if (!card) return;
-    editScratch.uiAlign = (card.ui && card.ui.align) || '';
     let body = '<div class="field"><label>' + esc(App.t('name')) + '</label><input id="f-name" type="text" value="' + esc(card.name) + '" placeholder="' + esc(nameExample(card.type)) + '"></div>';
     body += typeFields(card);
-    // body += appearanceFields(card);   // ОФОРМЛЕНИЕ: временно скрыто (см. комментарий в applyFields)
     openModal(typeLabel(card.type), body, [
       { label: App.t('cancel') },
       { label: App.t('save'), cls: 'primary', onClick: function () { return saveCardEdit(card); } }
@@ -1842,6 +1931,7 @@ window.App = window.App || {};
       }
       card.name = name;
       applyFields(card);
+      delete card._new;   // метка «только что создан» снята: дальше правки не трогают текущее значение
       // содержимое могло вырасти (добавили валюты/предметы) — не даём карточке остаться
       // меньше минимума, иначе строки уйдут за границы
       const mn = minSize(card);
@@ -1894,6 +1984,7 @@ window.App = window.App || {};
       let i = 2, base = nm;
       while (ch.cards.some(function (c) { return c.name === nm; })) { nm = base + ' (' + i + ')'; i++; }
       const c = createCard(type, nm, extra);
+      c._new = true;   // метка «только что создан»: при первом сохранении current = max (метка снимается и не сохраняется)
       c.page = curPageId(ch);
       newId = c.id;
       ch.cards.push(c);
@@ -1982,7 +2073,7 @@ window.App = window.App || {};
   // ===== Export / import =====
   function stripTransient(ch) {
     const copy = JSON.parse(JSON.stringify(ch));
-    copy.cards.forEach(function (c) { delete c._value; delete c._error; });
+    copy.cards.forEach(function (c) { delete c._value; delete c._error; delete c._new; });
     return copy;
   }
   function safeName(s) { return s.replace(/[\\/:*?"<>|]+/g, '_').trim() || 'character'; }
@@ -2016,50 +2107,66 @@ window.App = window.App || {};
   function importCharacter(json) {
     const data = JSON.parse(json);
     const src = data.character || (data.cards ? data : null);
-    if (!src || !Array.isArray(src.cards)) throw new Error('bad');
-    const copy = JSON.parse(JSON.stringify(src));
-    copy.id = uid();
+    const copy = normalizeImport(src);
     let nm = copy.name || App.t('newCharName');
     let i = 2, base = nm;
     while (state.characters.some(function (c) { return c.name === nm; })) { nm = base + ' (' + i + ')'; i++; }
     copy.name = nm;
-    const idMap = {};
-    copy.cards.forEach(function (c) { const old = c.id; const nu = uid(); c.id = nu; idMap[old] = nu; });
-    copy.cards.forEach(function (c) {
-      if (c.type === 'currency' && c.units) {
-        const umap = {};
-        c.units.forEach(function (u) { const nu = uid(); umap[u.id] = nu; u.id = nu; });
-        const na = {};
-        for (const k in (c.amounts || {})) if (umap[k]) na[umap[k]] = c.amounts[k];
-        c.amounts = na;
-      }
-      if (c.type === 'inventory' && c.items) c.items.forEach(function (it) { it.id = uid(); });
-      if (c.charges && c.charges.mode === 'link' && c.charges.linkId) {
-        c.charges.linkId = idMap[c.charges.linkId] || null;
-      }
-    });
+    renewIds(copy.cards, {});
     layoutCharacter(copy);
     mutate(function () { state.characters.push(copy); state.activeCharacterId = copy.id; });
+    toast(App.t('imported'));
+  }
+  function importAll(json) {
+    const data = JSON.parse(json);
+    if (!data || !Array.isArray(data.characters)) throw new Error('bad');
+    // сначала ВСЁ приводим в норму и только потом переключаем состояние: кривой файл не испортит игру
+    const fresh = data.characters.map(function (c2) {
+      const ch = normalizeImport(c2);
+      renewIds(ch.cards, {});
+      return ch;
+    });
+    mutate(function () {
+      state.characters = fresh;
+      fresh.forEach(layoutCharacter);
+      if (data.settings && typeof data.settings === 'object') state.settings = Object.assign(state.settings, data.settings);
+      state.activeCharacterId = fresh.length ? fresh[0].id : null;
+    });
     toast(App.t('imported'));
   }
   function exportAll() {
     download('custplay-backup.json', JSON.stringify({ app: 'custplay', kind: 'backup', version: 1, characters: state.characters.map(stripTransient), settings: state.settings }, null, 2));
     toast(App.t('exported'));
   }
-  function importAll(json) {
-    const data = JSON.parse(json);
-    if (!data || !Array.isArray(data.characters)) throw new Error('bad');
-    mutate(function () {
-      state.characters = data.characters.map(function (ch) {
-        const c = JSON.parse(JSON.stringify(ch));
-        c.id = uid();
-        layoutCharacter(c);
-        return c;
+
+  // проверка и нормализация импортируемого персонажа: старые типы (stat → навык, perk → заклинание),
+  // незнакомые карточки отбрасываем, битые поля подставляем. Кидает ошибку для кривого файла.
+  function normalizeImport(src) {
+    if (!src || typeof src !== 'object' || !Array.isArray(src.cards)) throw new Error('bad');
+    const ch = { id: uid(), name: String(src.name || App.t('newCharName')), pages: [], cards: [] };
+    if (Array.isArray(src.pages)) {
+      src.pages.forEach(function (p) {
+        if (p && typeof p === 'object' && typeof p.id === 'string') {
+          ch.pages.push({ id: p.id, name: String(p.name || App.t('pageBase')) });
+        }
       });
-      if (data.settings) state.settings = Object.assign(state.settings, data.settings);
-      state.activeCharacterId = state.characters.length ? state.characters[0].id : null;
+    }
+    src.cards.forEach(function (card) {
+      if (!card || typeof card !== 'object') return;
+      let type = card.type === 'stat' ? 'skill' : card.type === 'perk' ? 'spell' : card.type;
+      if (CARD_TYPES.indexOf(type) === -1) return;   // незнакомый тип — не импортируем
+      const c = JSON.parse(JSON.stringify(card));
+      c.type = type;
+      c.name = String(c.name || App.t('newCharName'));
+      if (!c.id || typeof c.id !== 'string') c.id = uid();
+      if (c.charges && typeof c.charges === 'object') {
+        c.charges.mode = (c.charges.mode === 'link') ? 'link' : 'own';
+      } else if (type === 'spell') {
+        c.charges = { mode: 'own', current: 0, max: 0, linkId: null, cost: 1, blockEmpty: false };
+      }
+      ch.cards.push(c);
     });
-    toast(App.t('imported'));
+    return ch;
   }
 
   // ===== Dice widget =====
@@ -2242,17 +2349,44 @@ window.App = window.App || {};
     toastTimer = setTimeout(function () { t.classList.add('hidden'); }, 2200);
   }
 
+  // всплывающая подсказка значка «(!)» у карточки-формулы:
+  // клик — показать (плашка ВНУТРИ карточки, на уровне шапки; длинная формула переносится),
+  // клик в другом месте — спрятать
+  function initFormulaInfo() {
+    const closeAll = function () {
+      const old = document.getElementById('finfPop');
+      if (old) old.remove();
+      document.querySelectorAll('.card.finf-open').forEach(function (c) { c.classList.remove('finf-open'); });
+    };
+    document.addEventListener('click', function (e) {
+      const finf = e.target.closest ? e.target.closest('.finf') : null;
+      const old = document.getElementById('finfPop');
+      if (!finf) { if (old) old.remove(); closeAll(); return; }
+      closeAll();
+      const cardEl = finf.closest('.card');
+      const card = cardEl ? findCard(cardEl.dataset.id) : null;
+      if (!card) return;
+      const pop = document.createElement('div');
+      pop.id = 'finfPop';
+      pop.className = 'finf-pop';
+      pop.textContent = (card.expression || '—') + (card._error ? '' : ' = ' + fmt(card._value));
+      cardEl.appendChild(pop);
+      cardEl.classList.add('finf-open');   // разрешаем карточке «выпустить» плашку (переключаем overflow)
+      e.stopPropagation();
+    }, true);
+  }
+
   // ===== Init =====
   function init() {
     if (!state.characters.length) {
-      const id = uid();
-      const ch = { id: id, name: App.t('newCharName'), cards: defaultCards() };
-      state.characters.push(ch);
-      state.activeCharacterId = id;
+      newCharacter();   // стартовый персонаж с демо-карточками — тот же путь, что и «Новый персонаж»
       save();
     }
     state.characters.forEach(layoutCharacter);
+    computeFormulas();   // считаем формулы и при старте: раньше до первого изменения показывали «—»
     initFreePlacement();
+    initFormulaInfo();
+    addUndoKeys();
     render();
     document.getElementById('fab').addEventListener('click', openAddMenu);
     document.getElementById('backdrop').addEventListener('click', closeModal);
