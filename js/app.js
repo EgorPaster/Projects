@@ -947,32 +947,73 @@ window.App = window.App || {};
 
   function renderHeader() {
     const bar = document.getElementById('topbar');
-    const undoRedoBtns = isDesktop() ? '' :
-      '<button class="icon" id="undoBtn" title="' + esc(App.t('undo')) + '">↶</button>' +
-      '<button class="icon" id="redoBtn" title="' + esc(App.t('redo')) + '">↷</button>';
+    const desktop = isDesktop();
     const ch = activeChar();
+    // мобильный топбар: только Правка, Кубики и кебаб (Отдых/История/Назад/Вперед внутри)
+    const controls = desktop ?
+      '<button class="icon" id="restBtn" title="' + esc(App.t('rest')) + '">☾</button>' +
+      '<button class="icon" id="diceBtn" title="' + esc(App.t('dice')) + '">⚄</button>' +
+      '<button class="icon" id="logBtn" title="' + esc(App.t('log')) + '">☰</button>' +
+      '<button class="icon" id="editModeBtn" title="' + esc(App.t('editMode')) + '">' + (editMode ? '✓' : '✎') + '</button>' :
+      '<button class="icon" id="editModeBtn" title="' + esc(App.t('editMode')) + '">' + (editMode ? '✓' : '✎') + '</button>' +
+      '<button class="icon" id="diceBtn" title="' + esc(App.t('dice')) + '">⚄</button>' +
+      '<button class="icon" id="topMenuBtn" title="' + esc(App.t('log')) + '">⋮</button>';
     bar.innerHTML =
       '<button type="button" class="brand brand-btn" id="brandBtn" title="' + esc(App.t('settings')) + '">🎲 <span class="accent">' + esc(App.t('appName')) + '</span></button>' +
       '<div class="char-name' + (ch ? '' : ' hidden') + '">' +
         '<span class="orn">◆</span><span class="char-title">' + esc(ch ? ch.name : '') + '</span><span class="orn">◆</span>' +
       '</div>' +
-      '<div class="top-controls">' +
-        '<button class="icon" id="restBtn" title="' + esc(App.t('rest')) + '">☾</button>' +
-        '<button class="icon" id="diceBtn" title="' + esc(App.t('dice')) + '">⚄</button>' +
-        '<button class="icon" id="logBtn" title="' + esc(App.t('log')) + '">☰</button>' +
-        undoRedoBtns +
-        '<button class="icon" id="editModeBtn" title="' + esc(App.t('editMode')) + '">' + (editMode ? '✓' : '🖉') + '</button>' +
-      '</div>';
+      '<div class="top-controls">' + controls + '</div>';
 
     document.getElementById('brandBtn').addEventListener('click', openSettings);
-    document.getElementById('restBtn').addEventListener('click', confirmRest);
+    const restBtn = document.getElementById('restBtn');
+    if (restBtn) restBtn.addEventListener('click', confirmRest);
     document.getElementById('diceBtn').addEventListener('click', toggleDiceWidget);
-    document.getElementById('logBtn').addEventListener('click', toggleLog);
-    const undoBtn = document.getElementById('undoBtn');
-    if (undoBtn) undoBtn.addEventListener('click', undo);
-    const redoBtn = document.getElementById('redoBtn');
-    if (redoBtn) redoBtn.addEventListener('click', redo);
+    const logBtn = document.getElementById('logBtn');
+    if (logBtn) logBtn.addEventListener('click', toggleLog);
     document.getElementById('editModeBtn').addEventListener('click', toggleEditMode);
+    const topMenuBtn = document.getElementById('topMenuBtn');
+    if (topMenuBtn) topMenuBtn.addEventListener('click', function () { openTopMenu(topMenuBtn); });
+  }
+  // Кебаб мобильного топбара: Отдых / История / Назад / Вперед (вертикальное меню)
+  function openTopMenu(anchor) {
+    closeTopMenu();
+    const menu = document.createElement('div');
+    menu.className = 'ctxmenu';
+    menu.id = 'topMenu';
+    menu.innerHTML =
+      '<button type="button" data-act="rest">☾ ' + esc(App.t('rest')) + '</button>' +
+      '<button type="button" data-act="log">☰ ' + esc(App.t('log')) + '</button>' +
+      '<button type="button" data-act="undo">↶ ' + esc(App.t('menuUndo')) + '</button>' +
+      '<button type="button" data-act="redo">↷ ' + esc(App.t('menuRedo')) + '</button>';
+    const r = anchor.getBoundingClientRect();
+    menu.style.top = (r.bottom + 4) + 'px';
+    menu.style.right = (window.innerWidth - r.right) + 'px';
+    document.body.appendChild(menu);
+    menu.addEventListener('click', function (e) {
+      const b = e.target.closest('button[data-act]');
+      if (!b) return;
+      closeTopMenu();
+      if (b.dataset.act === 'rest') confirmRest();
+      else if (b.dataset.act === 'log') toggleLog();
+      else if (b.dataset.act === 'undo') undo();
+      else if (b.dataset.act === 'redo') redo();
+    });
+    setTimeout(function () {
+      document.addEventListener('pointerdown', onTopMenuClose, true);
+      window.addEventListener('resize', onTopMenuClose);
+    }, 0);
+  }
+  function onTopMenuClose(e) {
+    const m = document.getElementById('topMenu');
+    if (m && e && m.contains(e.target)) return;
+    closeTopMenu();
+  }
+  function closeTopMenu() {
+    const m = document.getElementById('topMenu');
+    if (m) m.remove();
+    document.removeEventListener('pointerdown', onTopMenuClose, true);
+    window.removeEventListener('resize', onTopMenuClose);
   }
 
   function toggleEditMode() {
@@ -2793,10 +2834,23 @@ window.App = window.App || {};
         else document.getElementById('diceWidget').classList.add('hidden');
       }
     });
+    // журнал: клик/тап мимо самого окна закрывает его; триггеры (кебаб/☰) исключены,
+    // чтобы их собственный toggle не конфликтовал с этим закрытием
+    document.addEventListener('pointerdown', function (e) {
+      const log = document.getElementById('log');
+      if (!log || log.classList.contains('hidden')) return;
+      if (e.target.closest('#log')) return;
+      if (e.target.closest('#logBtn, #topMenu, #topMenuBtn')) return;
+      log.classList.add('hidden');
+    }, true);
     initDwDrag();
+    let lastDesktop = isDesktop();
     window.addEventListener('resize', function () {
-      // жмём карточки визуально/восстанавливаем положение без перезагрузки
-      if (isDesktop() && !dragState && !bandState) render();
+      // ПК: поджимаем карточки без перезагрузки; смена ориентации/брейкпоинта —
+      // перерисовываем ЛЮБОЙ режим, иначе с телефона после поворота остаётся ПК-версия
+      const d = isDesktop();
+      if ((d || d !== lastDesktop) && !dragState && !bandState) render();
+      lastDesktop = d;
       const w = document.getElementById('diceWidget');
       if (w && !w.classList.contains('hidden')) applyDwPos(loadDwPos());
     });

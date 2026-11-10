@@ -114,7 +114,7 @@ html, body {
 }
 .page-tabs.hidden { display: none; }
 .ptab {
-  padding: 4px 16px;
+  padding: 4px 10px;
   font-size: 14px;
   border-radius: 14px;
   background: transparent;
@@ -164,8 +164,9 @@ html, body {
 /* ⚙ меню страницы: ⋮ внутри вкладки (только в режиме правки) */
 .pt-kebab {
   display: inline-block;
-  margin-left: 6px;
-  padding: 0 6px;
+  margin-left: 4px;
+  margin-right: -3px;
+  padding: 0 3px;
   border-radius: 10px;
   font-weight: 700;
   color: var(--muted);
@@ -723,6 +724,10 @@ button.active { border-color: var(--accent); color: var(--accent); }
   .brand { font-size: 15px; }
   .fab { right: 14px; bottom: 14px; }
   .dw { left: 12px; bottom: 74px; width: calc(100vw - 24px); }
+  /* имя персонажа в центре — компактнее, чтобы не наезжать на кнопки */
+  .char-name { gap: 6px; max-width: 42vw; }
+  .char-name .orn { font-size: 7px; }
+  .char-name .char-title { font-size: 12px; letter-spacing: .08em; }
 }
 
 /* ---------- Free placement (desktop) ---------- */
