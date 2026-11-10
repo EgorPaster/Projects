@@ -50,6 +50,50 @@ html, body {
   white-space: nowrap;
 }
 .brand .accent { color: var(--accent); }
+/* логотип = кнопка меню настроек (A-вариант): нейтральный клик, лёгкий hover */
+.brand-btn {
+  background: transparent;
+  border-color: transparent;
+  border-radius: 10px;
+  padding: 6px 10px;
+}
+.brand-btn:hover {
+  background: rgba(212, 169, 60, .08);
+  border-color: rgba(212, 169, 60, .25);
+}
+/* имя персонажа в центре топбара: золотой градиент + мягкое свечение */
+.char-name {
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  transform: translate(-50%, -50%);
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  max-width: min(46vw, 480px);
+  pointer-events: none;
+  white-space: nowrap;
+}
+.char-name .orn {
+  font-size: 9px;
+  color: rgba(212, 169, 60, .45);
+  line-height: 1;
+}
+.char-name .char-title {
+  font-family: Georgia, 'Times New Roman', serif;
+  font-size: 16px;
+  font-weight: 600;
+  letter-spacing: .14em;
+  text-transform: uppercase;
+  background: linear-gradient(180deg, #f6e3a1 0%, var(--accent) 55%, #9a7420 100%);
+  -webkit-background-clip: text;
+  background-clip: text;
+  -webkit-text-fill-color: transparent;
+  color: var(--accent);
+  filter: drop-shadow(0 1px 1px rgba(0, 0, 0, .65)) drop-shadow(0 0 6px rgba(212, 169, 60, .25));
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
 .top-controls {
   display: flex;
   align-items: center;
@@ -91,7 +135,44 @@ html, body {
   color: var(--accent);
   box-shadow: 0 0 0 2px var(--accent);
 }
+/* всплывающее контекстное меню (⋮ у вкладки страницы) */
+.ctxmenu {
+  position: fixed;
+  z-index: 500;
+  min-width: 160px;
+  display: flex;
+  flex-direction: column;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 4px;
+  box-shadow: 0 8px 24px rgba(0,0,0,.45);
+}
+.ctxmenu button {
+  display: block;
+  width: 100%;
+  text-align: left;
+  background: transparent;
+  border: none;
+  border-radius: 6px;
+  padding: 8px 10px;
+}
+.ctxmenu button:hover:not(:disabled) { background: var(--panel2); }
+.ctxmenu button:disabled { opacity: .4; cursor: not-allowed; }
+.ctxmenu button.danger { color: var(--danger, #e57878); }
 .pt-ctrl { margin-left: auto; display: flex; gap: 6px; }
+/* ⚙ меню страницы: ⋮ внутри вкладки (только в режиме правки) */
+.pt-kebab {
+  display: inline-block;
+  margin-left: 6px;
+  padding: 0 6px;
+  border-radius: 10px;
+  font-weight: 700;
+  color: var(--muted);
+  opacity: .7;
+}
+.pt-kebab:hover { background: var(--panel2); color: var(--text); opacity: 1; }
+.ptab { display: inline-flex; align-items: center; }
 
 /* ---------- Buttons ---------- */
 button {

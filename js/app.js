@@ -150,10 +150,11 @@ window.App = window.App || {};
     do { name = base + ' ' + i; i++; } while (ch.pages.some(function (p) { return p.name === name; }));
     return name;
   }
-  function openPageRename() {
+  function openPageRename(pageId) {
     const ch = activeChar();
     if (!ch) return;
-    const page = ch.pages.find(function (p) { return p.id === ch.lastPage; });
+    const page = ch.pages.find(function (p) { return p.id === (pageId || ch.lastPage); });
+    if (!page) return;
     openModal(App.t('renamePage'),
       '<div class="field"><label>' + esc(App.t('pageName')) + '</label>' +
       '<input id="p-name" type="text" value="' + esc(page.name) + '" placeholder="' + esc(App.t('pageNameHint')) + '"></div>',
@@ -226,6 +227,51 @@ window.App = window.App || {};
     });
     toast(App.t('pageDeleted'));
   }
+  function duplicatePage(pageId) {
+    const ch = activeChar();
+    if (!ch) return;
+    const page = ch.pages.find(function (p) { return p.id === pageId; });
+    if (!page) return;
+    mutate(function () {
+      const copy = { id: uid(), name: page.name };
+      const pTaken = {};
+      ch.pages.forEach(function (p) { pTaken[p.name] = true; });
+      copy.name = nextCloneName(page.name, pTaken);
+      const origs = ch.cards.filter(function (c) { return c.page === pageId; });
+      const copies = origs.map(function (c) { return JSON.parse(JSON.stringify(c)); });
+      // уникальные имена копий (в рамках всего персонажа, как требует isNameUsed);
+      // карта переименований — для перебиндинга формул внутри копии
+      const taken = {};
+      ch.cards.forEach(function (c) { taken[c.name] = true; });
+      const renames = {};
+      copies.forEach(function (c) {
+        const nu = nextCloneName(c.name, taken);
+        if (nu !== c.name) renames[c.name] = nu;
+        c.name = nu;
+      });
+      const idMap = {};
+      renewIds(copies, idMap);
+      copies.forEach(function (c, i) {
+        c.page = copy.id;
+        // формулы копии: ссылки на переименованные карточки копии — на новые имена;
+        // имена с других страниц не трогаются (renameRefs сравнивает имя чипа целиком)
+        if (c.type === 'formula' && c.expression) {
+          for (const old in renames) c.expression = App.formula.renameRefs(c.expression, old, renames[old]);
+        }
+        // связь зарядов на счётчик с другой страницы — сохраняем как есть
+        if (c.charges && c.charges.mode === 'link' && !c.charges.linkId &&
+            origs[i].charges && origs[i].charges.linkId) {
+          const tgt = ch.cards.find(function (x) { return x.id === origs[i].charges.linkId; });
+          if (tgt && tgt.page !== copy.id) c.charges.linkId = origs[i].charges.linkId;
+        }
+      });
+      const idx = ch.pages.findIndex(function (p) { return p.id === pageId; });
+      ch.pages.splice(idx + 1, 0, copy);
+      ch.cards = ch.cards.concat(copies);
+      ch.lastPage = copy.id;
+    });
+    toast(App.t('pageDuplicated') || App.t('duplicate'));
+  }
   function renderTabs() {
     const bar = document.getElementById('pageTabs');
     const ch = activeChar();
@@ -233,30 +279,71 @@ window.App = window.App || {};
     ensurePages(ch);
     bar.classList.remove('hidden');
     const tabs = ch.pages.map(function (p) {
-      return '<button class="ptab' + (p.id === ch.lastPage ? ' active' : '') + '" data-page="' + p.id + '">' + esc(p.name) + '</button>';
+      const kebab = editMode ? '<span class="pt-kebab" data-kebab="' + p.id + '" title="' + esc(App.t('pageMenu')) + '">⋮</span>' : '';
+      return '<button class="ptab' + (p.id === ch.lastPage ? ' active' : '') + '" data-page="' + p.id + '">' + esc(p.name) + kebab + '</button>';
     }).join('');
-    const ctrl =
+    const ctrl = editMode ?
       '<span class="pt-ctrl">' +
       '<button class="icon" id="pt-add" title="' + esc(App.t('addPage')) + '">+</button>' +
-      (editMode ? '<button class="icon" id="pt-rename" title="' + esc(App.t('renamePage')) + '">✎</button>' : '') +
-      (editMode && ch.pages.length > 1 ? '<button class="icon danger" id="pt-delete" title="' + esc(App.t('deletePage')) + '">✕</button>' : '') +
-      '</span>';
+      '</span>' : '';
     bar.innerHTML = tabs + ctrl;
+    closePageMenu();
     bar.querySelectorAll('.ptab').forEach(function (b) {
-      b.addEventListener('click', function () { ch.lastPage = b.dataset.page; commit(); });
+      b.addEventListener('click', function (e) {
+        const kb = e.target.closest('.pt-kebab');
+        if (kb) { e.stopPropagation(); openPageMenu(kb.dataset.kebab, kb); return; }
+        ch.lastPage = b.dataset.page; commit();
+      });
     });
-    bar.querySelector('#pt-add').addEventListener('click', function () {
+    const add = bar.querySelector('#pt-add');
+    if (add) add.addEventListener('click', function () {
       mutate(function () {
         const p = { id: uid(), name: defaultPageName(ch) };
         ch.pages.push(p);
         ch.lastPage = p.id;
       });
     });
-    if (editMode) {
-      bar.querySelector('#pt-rename').addEventListener('click', openPageRename);
-      const del = bar.querySelector('#pt-delete');
-      if (del) del.addEventListener('click', function () { deletePage(ch.lastPage); });
-    }
+  }
+  // Контекстное меню страницы (⋮): переименовать / удалить / дублировать
+  function openPageMenu(pageId, anchor) {
+    const ch = activeChar();
+    if (!ch || !anchor) return;
+    closePageMenu();
+    const canDelete = ch.pages.length > 1;
+    const menu = document.createElement('div');
+    menu.className = 'ctxmenu';
+    menu.id = 'pageMenu';
+    menu.innerHTML =
+      '<button type="button" data-act="rename">✎ ' + esc(App.t('renamePage')) + '</button>' +
+      '<button type="button" data-act="dup">⧉ ' + esc(App.t('duplicate')) + '</button>' +
+      '<button type="button" data-act="del"' + (canDelete ? ' class="danger"' : ' disabled') + '>✕ ' + esc(App.t('deletePage')) + '</button>';
+    const r = anchor.getBoundingClientRect();
+    menu.style.left = Math.max(4, Math.min(r.left, window.innerWidth - 170)) + 'px';
+    menu.style.top = (r.bottom + 4) + 'px';
+    document.body.appendChild(menu);
+    menu.addEventListener('click', function (e) {
+      const b = e.target.closest('button[data-act]');
+      if (!b || b.disabled) return;
+      closePageMenu();
+      if (b.dataset.act === 'rename') openPageRename(pageId);
+      else if (b.dataset.act === 'dup') duplicatePage(pageId);
+      else if (b.dataset.act === 'del') deletePage(pageId);
+    });
+    setTimeout(function () {
+      document.addEventListener('pointerdown', onPageMenuClose, true);
+      window.addEventListener('resize', onPageMenuClose);
+    }, 0);
+  }
+  function onPageMenuClose(e) {
+    const m = document.getElementById('pageMenu');
+    if (m && e && m.contains(e.target)) return;
+    closePageMenu();
+  }
+  function closePageMenu() {
+    const m = document.getElementById('pageMenu');
+    if (m) m.remove();
+    document.removeEventListener('pointerdown', onPageMenuClose, true);
+    window.removeEventListener('resize', onPageMenuClose);
   }
   function findCard(cardId) {
     const ch = activeChar();
@@ -271,6 +358,15 @@ window.App = window.App || {};
     const ch = activeChar();
     if (!ch) return false;
     return ch.cards.some(function (c) { return c.name === name && c.id !== exceptId; });
+  }
+  // Уникальное имя клона: базой служит имя без прежнего суффикса «Имя (2)»,
+  // т.е. клон «Здоровье (2)» при занятом «(2)»/«(3)» станет «Здоровье (4)», а не «(2) (2)»
+  function nextCloneName(name, taken) {
+    const base = name.replace(/\s*\(\d+\)$/, '');
+    let i = 2, nm = base;
+    while (taken[nm]) { nm = base + ' (' + i + ')'; i++; }
+    taken[nm] = true;
+    return nm;
   }
 
   function typeLabelKey(type) { return 'type' + type.charAt(0).toUpperCase() + type.slice(1); }
@@ -757,9 +853,9 @@ window.App = window.App || {};
       const copy = JSON.parse(JSON.stringify(card));
       delete copy._value; delete copy._error;
       renewIds([copy], null);
-      let base = card.name, i = 2, nm = base;
-      while (ch.cards.some(function (c) { return c.name === nm; })) { nm = base + ' (' + i + ')'; i++; }
-      copy.name = nm;
+      const taken = {};
+      ch.cards.forEach(function (c) { taken[c.name] = true; });
+      copy.name = nextCloneName(card.name, taken);
       if (copy.x != null) { copy.x += 24; copy.y += 24; }
       ch.cards.push(copy);
     });
@@ -806,7 +902,7 @@ window.App = window.App || {};
   function confirmRest() {   // «Отдых» восполняет всё сразу — спрашиваем подтверждение
     const ch = activeChar();
     if (!ch || !ch.cards.some(function (c) { return c.restores; })) { toast(App.t('nothingToRest')); return; }
-    confirmDialog(App.t('restConfirm'), doRest, App.t('rest'));
+    confirmDialog(App.t('restConfirm'), doRest, App.t('rest'), { no: App.t('no'), yes: App.t('yes'), yesCls: 'primary' });
   }
 
   // ===== Undo / redo =====
@@ -854,17 +950,21 @@ window.App = window.App || {};
     const undoRedoBtns = isDesktop() ? '' :
       '<button class="icon" id="undoBtn" title="' + esc(App.t('undo')) + '">↶</button>' +
       '<button class="icon" id="redoBtn" title="' + esc(App.t('redo')) + '">↷</button>';
+    const ch = activeChar();
     bar.innerHTML =
-      '<div class="brand">🎲 <span class="accent">' + esc(App.t('appName')) + '</span></div>' +
+      '<button type="button" class="brand brand-btn" id="brandBtn" title="' + esc(App.t('settings')) + '">🎲 <span class="accent">' + esc(App.t('appName')) + '</span></button>' +
+      '<div class="char-name' + (ch ? '' : ' hidden') + '">' +
+        '<span class="orn">◆</span><span class="char-title">' + esc(ch ? ch.name : '') + '</span><span class="orn">◆</span>' +
+      '</div>' +
       '<div class="top-controls">' +
         '<button class="icon" id="restBtn" title="' + esc(App.t('rest')) + '">☾</button>' +
         '<button class="icon" id="diceBtn" title="' + esc(App.t('dice')) + '">⚄</button>' +
         '<button class="icon" id="logBtn" title="' + esc(App.t('log')) + '">☰</button>' +
         undoRedoBtns +
-        '<button class="icon" id="settingsBtn" title="' + esc(App.t('settings')) + '">⚙</button>' +
         '<button class="icon" id="editModeBtn" title="' + esc(App.t('editMode')) + '">' + (editMode ? '✓' : '🖉') + '</button>' +
       '</div>';
 
+    document.getElementById('brandBtn').addEventListener('click', openSettings);
     document.getElementById('restBtn').addEventListener('click', confirmRest);
     document.getElementById('diceBtn').addEventListener('click', toggleDiceWidget);
     document.getElementById('logBtn').addEventListener('click', toggleLog);
@@ -872,7 +972,6 @@ window.App = window.App || {};
     if (undoBtn) undoBtn.addEventListener('click', undo);
     const redoBtn = document.getElementById('redoBtn');
     if (redoBtn) redoBtn.addEventListener('click', redo);
-    document.getElementById('settingsBtn').addEventListener('click', openSettings);
     document.getElementById('editModeBtn').addEventListener('click', toggleEditMode);
   }
 
@@ -1664,10 +1763,11 @@ window.App = window.App || {};
     document.getElementById('modal').innerHTML = '';
   }
 
-  function confirmDialog(msg, onYes, title) {
+  function confirmDialog(msg, onYes, title, btnLabels) {
+    const lbl = btnLabels || {};
     openModal(title || App.t('delete'), '<p class="confirm-text">' + esc(msg) + '</p>', [
-      { label: App.t('cancel') },
-      { label: App.t('delete'), cls: 'danger', onClick: onYes }
+      { label: lbl.no || App.t('cancel') },
+      { label: lbl.yes || App.t('delete'), cls: lbl.yesCls || 'danger', onClick: onYes }
     ]);
   }
 
@@ -2279,6 +2379,7 @@ window.App = window.App || {};
       '<select id="s-char">' + charOpts + '</select>' +
       '<div class="f-buttons">' +
         '<button type="button" id="s-newchar">+ ' + esc(App.t('newCharacter')) + '</button>' +
+        (ch ? '<button type="button" id="s-renchar">✎ ' + esc(App.t('renameCharacter')) + '</button>' : '') +
         (ch ? '<button type="button" class="danger" id="s-delchar">' + esc(App.t('deleteCharacter')) + '</button>' : '') +
       '</div></div>' +
       '<div class="field"><label>' + esc(App.t('dataTitle')) + '</label>' +
@@ -2298,6 +2399,10 @@ window.App = window.App || {};
     document.getElementById('s-newchar').addEventListener('click', function () {
       closeModal();
       openNewCharModal();
+    });
+    if (ch) document.getElementById('s-renchar').addEventListener('click', function () {
+      closeModal();
+      openRenameCharModal(ch);
     });
     if (ch) document.getElementById('s-delchar').addEventListener('click', function () {
       closeModal();
@@ -2322,6 +2427,23 @@ window.App = window.App || {};
             const inp = document.getElementById('charNameInput');
             const name = inp.value.trim() || App.t('newCharName');
             mutate(function () { newCharacter(name); });
+          } }
+      ]
+    );
+    const inp = document.getElementById('charNameInput');
+    if (inp) { inp.focus(); inp.select(); }
+  }
+
+  function openRenameCharModal(ch) {
+    openModal(App.t('renameCharacter'),
+      '<div class="field"><label>' + esc(App.t('charName')) + '</label><input id="charNameInput" type="text" value="' + esc(ch.name) + '" placeholder="' + esc(App.t('charName')) + '"></div>',
+      [
+        { label: App.t('cancel') },
+        { label: App.t('save'), cls: 'primary', onClick: function () {
+            const nm = document.getElementById('charNameInput').value.trim();
+            if (!nm || nm === ch.name) return true;   // пусто/без изменений — молча закрываем
+            mutate(function () { ch.name = nm; });
+            toast(App.t('charRenamed'));
           } }
       ]
     );
