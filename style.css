@@ -247,6 +247,20 @@ button.active { border-color: var(--accent); color: var(--accent); }
   font-size: 13px;
   font-weight: 700;
 }
+.linktag {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--accent);
+  background: rgba(212, 169, 60, .12);
+  border: 1px solid rgba(212, 169, 60, .35);
+  border-radius: 7px;
+  padding: 1px 6px;
+  font-size: 12px;
+  cursor: pointer;
+}
+.linktag:hover { background: rgba(212, 169, 60, .24); }
 /* тост результата по центру экрана: сам бросок фиолетовым, бонус приглушённо, итог крупно золотым */
 #rollToast {
   position: fixed;
@@ -331,16 +345,153 @@ button.active { border-color: var(--accent); color: var(--accent); }
 }
 .full-text { white-space: pre-wrap; line-height: 1.5; max-height: calc(100vh - 200px); overflow-y: auto; overflow-wrap: anywhere; }
 
-/* Charges */
-.charges-row { display: flex; align-items: center; gap: 6px; }
-.charges-pips { color: var(--muted); font-weight: 700; }
-/* каждый кружок заряда — кнопка: клик заполняет заряды до него */
-.charges-pips .pip {
-  background: none; border: 0; margin: 0; padding: 0 1px;
-  font: inherit; color: var(--muted); cursor: pointer;
+/* ---------- Charges: гексы и треугольники (v17) ---------- */
+/* кнопка «Применить» — закреплена у правого края карточки (как в стенде) */
+.charges-row { display: flex; align-items: center; gap: 8px; width: 100%; }
+.chg-area { display: flex; flex-direction: column; gap: 6px; min-width: 0; flex: 1 1 auto; }
+.chg-row {
+  /* размер фигуры и отступ — общие переменные, чтобы выравнивание гексов
+     не ломалось на мобильном (там значения переопределяются в @media ниже) */
+  --charge-size: 22px;
+  --charge-gap: 6px;
+  min-height: 27px;
+  display: flex;
+  align-items: center;
+  justify-content: flex-start;
+  gap: var(--charge-gap);
 }
-.charges-pips .pip-full { color: var(--accent); }
-.charges-pips .pip:hover { color: var(--text); }
+/* гексы — группа, отцентрованная над рядом треугольников (сдвиг считается в app.js
+   от максимума карточки: при 24 это ровно промежутки 2–3, 3–4 и 4–5, как в стенде) */
+
+/* фигура заряда: пустая — только контур, заполненная — заливка */
+.charge {
+  --chg-empty: #505064;
+  --chg-fill: var(--accent);
+  --chg-stroke: var(--accent);
+  position: relative;
+  flex: 0 0 var(--charge-size);
+  width: var(--charge-size);
+  height: var(--charge-size);
+  display: inline-grid;
+  place-items: center;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  cursor: pointer;
+  transition: transform .2s cubic-bezier(.2,.8,.2,1);
+  transform-origin: center;
+  -webkit-tap-highlight-color: transparent;
+}
+.charge, .charge:hover { background: transparent; border-color: transparent; box-shadow: none; }
+.charge:hover { transform: scale(1.2); z-index: 2; }
+.charge:focus-visible { outline: 2px solid var(--chg-stroke); outline-offset: 3px; }
+.charge svg { width: 100%; height: 100%; overflow: visible; display: block; pointer-events: none; }
+.charge polygon {
+  fill: transparent;
+  stroke: var(--chg-empty);
+  stroke-width: 3;
+  stroke-linejoin: round;
+  transition: fill .18s ease, stroke .18s ease;
+}
+.charge.filled polygon { fill: var(--chg-fill); stroke: var(--chg-stroke); }
+
+/* блик по наведению на заполненную фигуру */
+.charge .shine { position: absolute; inset: 0; overflow: hidden; pointer-events: none; clip-path: var(--shape); }
+.charge.hex { --shape: polygon(50% 0, 93% 25%, 93% 75%, 50% 100%, 7% 75%, 7% 25%); }
+.charge.triangle { --shape: polygon(50% 0, 100% 100%, 0 100%); }
+.charge .shine::after {
+  content: "";
+  position: absolute;
+  inset: -35%;
+  background: linear-gradient(
+    110deg,
+    transparent 38%,
+    rgba(255,255,255,.08) 44%,
+    rgba(255,255,255,.82) 50%,
+    rgba(255,255,255,.12) 56%,
+    transparent 63%
+  );
+  transform: translateX(-135%);
+}
+.charge.filled:hover .shine::after { animation: shine-once .68s ease-out 1 forwards; }
+@keyframes shine-once { to { transform: translateX(135%); } }
+
+/* появление треугольника (заполнили ячейку): pop + вспышка */
+.charge.just-appeared { animation: tri-pop .36s cubic-bezier(.2,.9,.3,1.4) both; }
+@keyframes tri-pop {
+  0%   { transform: scale(.55); filter: drop-shadow(0 0 8px rgba(255,209,102,.9)); }
+  60%  { transform: scale(1.12); }
+  100% { transform: scale(1); filter: drop-shadow(0 0 0 rgba(255,209,102,0)); }
+}
+
+/* угасание потраченного треугольника (призрак поверх карточки) */
+.charge.just-removed { animation: tri-collapse .32s cubic-bezier(.4,0,.7,1) forwards; pointer-events: none; }
+@keyframes tri-collapse {
+  0%   { transform: scale(1); opacity: 1; }
+  55%  { transform: scale(.75); opacity: .8; }
+  100% { transform: scale(.15); opacity: 0; }
+}
+
+/* прямая анимация: треугольники слетаются в новый гекс */
+.charge.converting {
+  animation: fly-to-hex .72s cubic-bezier(.55,0,.85,.35) forwards;
+  pointer-events: none;
+  z-index: 5;
+}
+@keyframes fly-to-hex {
+  0%   { transform: translate(0,0) scale(1); opacity: 1; }
+  65%  { transform: translate(var(--dx, 0px), var(--dy, 0px)) scale(.48); opacity: .85; }
+  100% { transform: translate(var(--dx, 0px), var(--dy, 0px)) scale(.05); opacity: 0; }
+}
+
+/* обратная анимация: из гекса вылетают треугольники в свои ячейки */
+.charge.unmerging {
+  animation: fly-from-hex .68s cubic-bezier(.2,.7,.3,1) forwards;
+  pointer-events: none;
+  z-index: 5;
+}
+@keyframes fly-from-hex {
+  0%   { transform: translate(var(--dx, 0px), var(--dy, 0px)) scale(.05); opacity: 0; }
+  35%  { opacity: 1; }
+  100% { transform: translate(0,0) scale(1); opacity: 1; }
+}
+
+/* гекс при распаде: вспышка и схлопывание */
+.charge.unmerging-source { animation: hex-shrink .55s ease-out forwards; pointer-events: none; }
+@keyframes hex-shrink {
+  0%   { transform: scale(1); opacity: 1; filter: drop-shadow(0 0 0 rgba(255,209,102,0)); }
+  35%  { transform: scale(1.15); opacity: 1; filter: drop-shadow(0 0 14px rgba(255,209,102,.95)); }
+  100% { transform: scale(.1); opacity: 0; filter: drop-shadow(0 0 0 rgba(255,209,102,0)); }
+}
+
+/* новый гекс после слияния: вспышка появления */
+.charge.just-merged { animation: hex-appear .55s cubic-bezier(.2,.8,.2,1.2) both; }
+@keyframes hex-appear {
+  0%   { transform: scale(.15); opacity: 0; filter: drop-shadow(0 0 12px rgba(255,209,102,.9)); }
+  55%  { transform: scale(1.15); opacity: 1; }
+  100% { transform: scale(1); opacity: 1; filter: drop-shadow(0 0 0 rgba(255,209,102,0)); }
+}
+
+/* тег вместо фигур, когда зарядов больше 24 (например, «26 / 26»).
+   Приклеен слева, на месте фигур; цвет — как у ячеек:
+   золотой у собственных, фиолетовый у связанных. */
+.chg-badge {
+  flex: 0 0 auto;
+  min-width: 64px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 30px;
+  padding: 0 12px;
+  border-radius: 9px;
+  font-weight: 750;
+  font-size: 15px;
+  letter-spacing: .02em;
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+}
+.chg-badge.own  { color: var(--accent); border: 1px solid rgba(212,169,60,.32); background: rgba(212,169,60,.08); }
+.chg-badge.link { color: #b3a8ff; border: 1px solid rgba(122,108,255,.38); background: rgba(122,108,255,.10); }
 
 /* ---------- FAB ---------- */
 .fab {
@@ -486,6 +637,7 @@ button.active { border-color: var(--accent); color: var(--accent); }
   .canvas { gap: 10px; padding: 10px; }
   .counter-val { font-size: 26px; }
   .counter-btn { height: 46px; flex-basis: 48px; }
+  .chg-row { --charge-size: 19px; --charge-gap: 4px; }
   #topbar { padding: 6px 8px; gap: 5px; }
   .brand { font-size: 15px; }
   .fab { right: 14px; bottom: 14px; }
@@ -672,7 +824,8 @@ button.active { border-color: var(--accent); color: var(--accent); }
 .dw-pop { display: inline-block; animation: rollPop .3s ease-out; }
 
 /* ---------- Charges / use button ---------- */
-.use-btn { margin-left: auto; flex: 0 0 auto; }
+.use-btn { margin-left: auto; flex: 0 0 auto; min-width: 88px; text-align: center; justify-content: center; }
+/* кнопка одной ширины во всех строках зарядов — строки не дёргаются при активации */
 
 /* ---------- Currency ---------- */
 .currency-row .amt { cursor: pointer; border-bottom: 1px dashed var(--border); }

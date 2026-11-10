@@ -59,7 +59,20 @@ window.App = window.App || {};
       // читаем ТОЛЬКО знакомые поля: мусор/обрывки из хранилища не протекают в приложение
       const st = defaultState();
       if (s && typeof s === 'object') {
-        if (Array.isArray(s.characters)) st.characters = s.characters.filter(function (c) { return c && typeof c === 'object'; });
+        if (Array.isArray(s.characters)) {
+          st.characters = s.characters.filter(function (c) { return c && typeof c === 'object'; }).map(function (c) {
+            // карточки без id/имени не отдаём конечному коду дальше как есть — подставляем честные значения
+            const ch = c;
+            if (Array.isArray(ch.cards)) {
+              ch.cards = ch.cards.filter(function (k) { return k && typeof k === 'object'; }).map(function (k) {
+                if (!k.id) k.id = uid();
+                if (typeof k.name !== 'string' || !k.name) k.name = '—';
+                return k;
+              });
+            }
+            return ch;
+          });
+        }
         if (s.activeCharacterId && st.characters.some(function (c) { return c.id === s.activeCharacterId; })) st.activeCharacterId = s.activeCharacterId;
         if (s.settings && typeof s.settings === 'object') st.settings = Object.assign(st.settings, s.settings);
         if (Array.isArray(s.log)) st.log = s.log.filter(function (e) { return e && typeof e.text === 'string'; });
@@ -314,7 +327,15 @@ window.App = window.App || {};
     if (type === 'counter') h = 100;            // шапка + строка счётчика
     if (type === 'skill') h = card.value != null ? 95 : 75;   // шапка (+ строка значения, если есть)
     if (type === 'formula') h = 95;             // шапка + значение (выражение переехало в подсказку «!»)
-    if (type === 'spell') h = 125;              // описание 2 строки + заряды
+    if (type === 'spell') {
+      const sk = chargeSkeleton(card.charges ? chargeMaxUnits(card) : null);
+      if (sk) {
+        // фигуры: ширина 300, чтобы кнопка «Применить» не налезала на ячейки при сжатии
+        w = 300;
+        // два ряда фигур (гексы + треугольники) + описание; значения подогнаны тестом
+        h = (card.description || '').trim() ? 162 : 118;
+      } else h = MIN_H;   // тег вместо фигур — компактная карточка
+    }
     if (type === 'inventory') {                 // предметы + строка итога веса
       const n = (card.items || []).length;
       h = Math.max(h, 62 + n * 30 + 22);        // 2 строки описания в предмете тоже учтены сверху (30/строка может не хватить — проверяется тестом)
@@ -553,7 +574,7 @@ window.App = window.App || {};
       const target = findCard(ch.linkId);
       if (!target || target.type !== 'counter') return;
       const cost = num(ch.cost) || 1;
-      if (ch.blockEmpty && num(target.current) < cost) { toast(App.t('insufficient')); return; }
+      if (ch.blockEmpty && num(target.current) < cost) { toast(App.tf('insufficientLinked', { name: target.name })); return; }
       mutate(function () { target.current = num(target.current) - cost; });
       return;
     }
@@ -572,17 +593,39 @@ window.App = window.App || {};
     else if (act === 'roll') rollCard(card);
     else if (act === 'use') useCharge(card);
     else if (act === 'pip') {
-      // клик по кружку заряда: заряды заполняются до этой ячейки
+      // клик по фигуре заряда: заряды заполняются до этой ячейки (и опустошаются после неё)
       if (card.charges && card.charges.mode !== 'link') {
-        const i = Math.max(0, num(ds.i) || 0);
-        mutate(function () { card.charges.current = i; });
+        const max = card.charges.max == null ? null : num(card.charges.max);
+        const cur = num(card.charges.current);
+        let next;
+        if (ds.hex != null) {
+          // гекс: заполняем до кратного шести
+          next = (Math.max(0, num(ds.hex) || 0) + 1) * CHG_PER_HEX;
+        } else {
+          // треугольник: до конца заполненных гексов + свой индекс + 1
+          const base = cur - (cur % CHG_PER_HEX);
+          next = base + Math.max(0, num(ds.i) || 0) + 1;
+        }
+        if (max != null) next = Math.min(next, num(max));
+        if (next === cur) return;   // клик мимо запаса (сверх максимума) — ничего не меняем
+        mutate(function () { card.charges.current = next; });
+      } else {
+        // связанные ячейки только показывают остаток счётчика: пополнять их кликами нельзя
+        const tgt = card.charges && card.charges.linkId ? findCard(card.charges.linkId) : null;
+        if (tgt) toast(App.tf('refillRes', { name: tgt.name }));
       }
     }
     else if (act === 'curr-inc') mutate(function () { card.amounts[ds.unit] = num(card.amounts[ds.unit]) + 1; normalizeCurrency(card); });
     else if (act === 'curr-dec') mutate(function () { card.amounts[ds.unit] = num(card.amounts[ds.unit]) - 1; });
     else if (act === 'curr-custom-inc') openCurrencyDelta(card, ds.unit, 1, e && e.currentTarget);
     else if (act === 'curr-custom-dec') openCurrencyDelta(card, ds.unit, -1, e && e.currentTarget);
-    else if (act === 'item-del') mutate(function () { card.items = card.items.filter(function (i) { return i.id !== ds.item; }); });
+    else if (act === 'item-del') {
+      const item = (card.items || []).find(function (i) { return i.id === ds.item; });
+      const itemName = item ? item.name : '';
+      confirmDialog(App.tf('confirmDeleteItem', { name: itemName }), function () {
+        mutate(function () { card.items = card.items.filter(function (i) { return i.id !== ds.item; }); });
+      });
+    }
   }
 
   // ===== Ввод своего значения (маленькие ++/−−) =====
@@ -860,6 +903,7 @@ window.App = window.App || {};
     }
     canvas.innerHTML = visible.map(function (c) { return cardView(c, desktop); }).join('');
     visible.forEach(bindCard);
+    syncChargeFx(visible);
     if (desktop) sizeCanvas();
     else { canvas.style.width = ''; canvas.style.height = ''; }
   }
@@ -899,7 +943,10 @@ window.App = window.App || {};
     // восклицательный знак в кружке у формул: навёл курсор — подсказка с самой формулой (и текущим результатом).
     // Скрываем в режиме правки — дальше тулзы не влезают (как и кубик в шапке)
     const finfo = (card.type === 'formula' && !editMode) ? '<span class="finf" data-id="' + esc(card.id) + '" title="Формула">!</span>' : '';
-    return '<div class="card-head">' + handle + '<span class="card-name">' + (card.restores ? '<span class="restore-ic">☾</span>' : '') + esc(card.name) + '</span>' + finfo + roller + tools + '</div>';
+    // 🔗 у заклинаний с привязанными зарядами: клик — плашка «от какого счётчика зависят заряды»
+    const linktag = (!editMode && card.type === 'spell' && card.charges && card.charges.mode === 'link')
+      ? '<span class="linktag" title="' + esc(App.t('charges')) + '">🔗</span>' : '';
+    return '<div class="card-head">' + handle + '<span class="card-name">' + (card.restores ? '<span class="restore-ic">☾</span>' : '') + esc(card.name) + '</span>' + finfo + linktag + roller + tools + '</div>';
   }
 
   function cardBody(card) {
@@ -954,38 +1001,260 @@ window.App = window.App || {};
     return '<div class="card-body">' + valueHtml + '</div>';
   }
 
-  function pipsString(cur, max) {
-    if (max == null || max > 12) return '';
-    // каждый кружок — кнопка: клик по ячейке заполняет заряды до неё (и опустошает всё после неё)
-    let s = '';
-    for (let i = 1; i <= max; i++) {
-      s += '<button class="pip' + (i <= cur ? ' pip-full' : '') + '" data-act="pip" data-i="' + i + '" title="' + esc(App.t('pipFill')) + '">' + (i <= cur ? '●' : '○') + '</button>';
+  /* ===== Заряды-фигуры (v17, по мотивам стенда «3 гекса / 24 заряда») =====
+     1 гекс = 6 зарядов, максимум 3 гекса + 6 треугольников = 24.
+     Предел больше 24 (или без предела) — фигуры заменяет текстовый тег. */
+  const CHG_PER_HEX = 6;
+  const CHG_HEX_MAX = 3;
+  const CHG_TRI_MAX = 6;
+  // цвета как на стенде: собственные заряды — золотые, связанные (от счётчика) — фиолетовые
+  const CHG_PAL = {
+    own:  { fill: '#B58A43', stroke: '#F4C65E' },
+    link: { fill: '#7669C9', stroke: '#C1B7FF' }
+  };
+  const CHG_HEX_PTS = '30,3 53,16 53,39 30,52 7,39 7,16';
+  const CHG_TRI_PTS = '30,4 55,50 5,50';
+
+  function chgOwnPalette(card) {
+    return CHG_PAL[card.charges && card.charges.mode === 'link' ? 'link' : 'own'];
+  }
+
+  // «единицы ресурса»: собственные — текущее число зарядов; связанные — floor(текущего счётчика / траты)
+  function chargeUnits(card) {
+    const ch = card.charges || {};
+    if (ch.mode === 'link') {
+      const t = findCard(ch.linkId);
+      if (t && t.type === 'counter' && t.max != null) return Math.floor(num(t.current) / (num(ch.cost) || 1));
+      return null;
     }
-    return s;
+    return num(ch.current);
+  }
+  // предел в единицах; null — без предела
+  function chargeMaxUnits(card) {
+    const ch = card.charges || {};
+    if (ch.mode === 'link') {
+      const t = findCard(ch.linkId);
+      if (t && t.type === 'counter' && t.max != null) return Math.floor(num(t.max) / (num(ch.cost) || 1));
+      return null;
+    }
+    return ch.max == null ? null : num(ch.max);
+  }
+  // скелет ячеек: треугольных слотов всегда шесть; гексовых — сколько реально
+  // может набраться от максимума (макс 8 → 1 гекс). null — фигуры не показываем
+  // (предел неизвестен, нулевой или выше 24 — вместо них тег с числом)
+  function chargeSkeleton(maxUnits) {
+    if (maxUnits == null || maxUnits <= 0 || maxUnits > CHG_HEX_MAX * CHG_PER_HEX + CHG_TRI_MAX) return null;
+    // гексовых слотов — сколько реально может набраться (макс 8 → 1 гекс);
+    // треугольных хватает для одной группы: при максимуме меньше 6 — ровно
+    // столько (макс 5 → 5 ячеек), иначе все шесть (макс 6 → 6 ячеек и 1 гекс)
+    const hexSlots = Math.min(CHG_HEX_MAX, Math.floor(maxUnits / CHG_PER_HEX));
+    const triSlots = maxUnits < CHG_PER_HEX ? Math.min(CHG_TRI_MAX, Math.floor(maxUnits)) : CHG_TRI_MAX;
+    return { hexSlots: hexSlots, triSlots: triSlots };
+  }
+  // сколько ячеек каждого ряда заполнено при данном числе единиц
+  function chargeFill(units, sk) {
+    const u = Math.max(0, Math.floor(num(units) || 0));
+    const hexFilled = Math.min(sk.hexSlots, Math.floor(u / CHG_PER_HEX));
+    const cap = sk.hexSlots * CHG_PER_HEX;
+    const triFilled = u > cap ? Math.min(sk.triSlots, u - cap) : Math.min(sk.triSlots, u % CHG_PER_HEX);
+    return { hexes: hexFilled, tris: triFilled };
+  }
+
+  function chgBtnHTML(kind, filled, palette, attrs, title) {
+    return '<button type="button" class="charge ' + kind + (filled ? ' filled' : '') + '"' + attrs +
+      ' style="--chg-fill:' + palette.fill + ';--chg-stroke:' + palette.stroke + '"' +
+      (title ? ' title="' + esc(title) + '"' : '') + '>' +
+      '<svg viewBox="0 0 60 54" aria-hidden="true"><polygon points="' + (kind === 'hex' ? CHG_HEX_PTS : CHG_TRI_PTS) + '"/></svg>' +
+      (filled ? '<span class="shine" aria-hidden="true"></span>' : '') +
+      '</button>';
+  }
+
+  // два ряда фигур: гексы сверху, треугольники снизу
+  function chargeFiguresHTML(card, tip) {
+    const sk = chargeSkeleton(chargeMaxUnits(card));
+    if (!sk) return null;
+    const pal = chgOwnPalette(card);
+    const fill = chargeFill(chargeUnits(card) || 0, sk);
+    const clickable = !(card.charges && card.charges.mode === 'link');
+    let hexes = '';
+    for (let i = 0; i < sk.hexSlots; i++) {
+      const attrs = clickable ? ' data-act="pip" data-hex="' + i + '"' : ' data-act="pip"';
+      hexes += chgBtnHTML('hex', i < fill.hexes, pal, attrs, clickable ? App.t('pipFill') : tip);
+    }
+    // гексы — группа, отцентрованная над рядом треугольников: при 6 треугольниках
+    // и 3 гексах это ровно промежутки 2–3, 3–4, 4–5 (как в стенде); при меньшем
+    // максимуме группа сжимается к центру ряда
+    const hexShift = Math.max(0, sk.triSlots - sk.hexSlots) / 2;
+    const hexRowStyle = ' style="margin-left: calc(' + hexShift + ' * (var(--charge-size) + var(--charge-gap)))"';
+    let tris = '';
+    for (let i = 0; i < sk.triSlots; i++) {
+      const attrs = clickable ? ' data-act="pip" data-i="' + i + '"' : ' data-act="pip"';
+      tris += chgBtnHTML('triangle', i < fill.tris, pal, attrs, clickable ? App.t('pipFill') : tip);
+    }
+    return '<div class="chg-area">' +
+      (sk.hexSlots ? '<div class="chg-row chg-hexes"' + hexRowStyle + '>' + hexes + '</div>' : '') +
+      (sk.triSlots ? '<div class="chg-row chg-tris">' + tris + '</div>' : '') +
+      '</div>';
+  }
+
+  // тег с числом вместо фигур (предел > 24 или без предела), цвет — как у ячеек
+  function chargeBadgeHTML(card) {
+    const m = card.charges && card.charges.mode === 'link' ? 'link' : 'own';
+    const cur = Math.floor(num(chargeUnits(card)) || 0);
+    const maxU = chargeMaxUnits(card);
+    const txt = cur + (maxU != null ? ' / ' + Math.floor(maxU) : '');
+    return '<span class="chg-badge ' + m + '">' + txt + '</span>';
   }
 
   function chargesInfo(card) {
     const ch = card.charges || {};
+    const useBtn = '<button class="small primary use-btn" data-act="use">' + esc(App.t('use')) + '</button>';
     if (ch.mode === 'link') {
       const target = findCard(ch.linkId);
+      if (target && target.type === 'counter' && target.max != null) {
+        const tip = App.tf('linkPipTip', { cost: num(ch.cost) || 1, name: target.name });
+        const figs = chargeFiguresHTML(card, tip);
+        // ячеек больше 24 — тег вместо фигур
+        return '<div class="charges-row">' + (figs || chargeBadgeHTML(card)) + useBtn + '</div>';
+      }
+      // счётчик без предела или потерянная ссылка — старый текстовый вид
       const nm = target ? target.name : App.t('brokenRef');
       const remain = target && target.type === 'counter' ? num(target.current) : 0;
-      const cost = num(ch.cost) || 1;
-      return '<div class="charges-row"><span class="meta">' + esc(App.tf('linkedCharges', { name: nm })) + ' · ' + esc(App.t('valueOf')) + ' ' + remain + '</span>' +
-        '<button class="small primary use-btn" data-act="use">' + esc(App.t('use')) + (cost !== 1 ? ' (−' + cost + ')' : '') + '</button></div>';
+      return '<div class="charges-row"><span class="meta">' + esc(App.tf('linkedCharges', { name: nm })) + ': ' + remain + '</span>' +
+        useBtn + '</div>';
     }
-    const cur = num(ch.current);
-    const max = ch.max == null ? null : num(ch.max);
-    const pips = pipsString(cur, max);
-    return '<div class="charges-row"><span class="charges-pips">' + pips + '</span>' +
-      '<span class="meta">' + cur + (max != null ? ' / ' + max : '') + '</span>' +
-      '<button class="small primary use-btn" data-act="use">' + esc(App.t('use')) + '</button></div>';
+    const figs = chargeFiguresHTML(card, App.t('pipFill'));
+    return '<div class="charges-row">' + (figs || chargeBadgeHTML(card)) + useBtn + '</div>';
   }
 
   function spellBody(card) {
     return '<div class="card-body">' +
       (card.description ? '<div class="desc-text">' + esc(card.description) + '</div>' : '') +
       chargesInfo(card) + '</div>';
+  }
+
+  /* ===== Анимации зарядов: дублёры-призраки поверх карточки =====
+     Состояние меняется сразу (undo/журнал не ждут), картинка догоняет сама. */
+  const chgPrev = {};   // cardId -> прежнее число единиц
+
+  function chgGhost(kind, filled, pal, r) {
+    const tpl = document.createElement('template');
+    tpl.innerHTML = chgBtnHTML(kind, filled, pal, '', '');
+    const el = tpl.content.firstElementChild;
+    el.style.position = 'fixed';
+    el.style.left = Math.round(r.left) + 'px';
+    el.style.top = Math.round(r.top) + 'px';
+    el.style.width = Math.round(r.width) + 'px';
+    el.style.height = Math.round(r.height) + 'px';
+    el.style.margin = '0';
+    el.style.flex = '0 0 auto';
+    el.style.pointerEvents = 'none';
+    el.style.zIndex = '9999';
+    document.body.appendChild(el);
+    return el;
+  }
+  function chgClearLater(ghosts, ms) {
+    window.setTimeout(function () { ghosts.forEach(function (g) { g.remove(); }); }, ms);
+  }
+
+  function chargeFx(card, prevU, newU) {
+    const el = document.querySelector('.card[data-id="' + card.id + '"]');
+    if (!el) return;
+    const sk = chargeSkeleton(chargeMaxUnits(card));
+    if (!sk) return;
+    const pal = chgOwnPalette(card);
+    const hexCap = sk.hexSlots * CHG_PER_HEX;
+    const prevF = chargeFill(prevU, sk), newF = chargeFill(newU, sk);
+    const hexRow = el.querySelector('.chg-hexes');
+    const triRow = el.querySelector('.chg-tris');
+    const hexEls = hexRow ? hexRow.querySelectorAll('.charge') : [];
+    const triEls = triRow ? triRow.querySelectorAll('.charge') : [];
+    const ghosts = [];
+
+    if (newU > prevU && newU % CHG_PER_HEX === 0 && newU <= hexCap && hexEls.length) {
+      // слияние: бывшие треугольники слетаются в слот нового гекса
+      const hexEl = hexEls[newF.hexes - 1];
+      if (hexEl) {
+        const hr = hexEl.getBoundingClientRect();
+        const hx = hr.left + hr.width / 2, hy = hr.top + hr.height / 2;
+        for (let i = 0; i < prevF.tris; i++) {
+          const slot = triEls[i];
+          if (!slot) break;
+          const r = slot.getBoundingClientRect();
+          const g = chgGhost('triangle', true, pal, r);
+          g.style.setProperty('--dx', Math.round(hx - (r.left + r.width / 2)) + 'px');
+          g.style.setProperty('--dy', Math.round(hy - (r.top + r.height / 2)) + 'px');
+          g.classList.add('converting');
+          g.style.animationDelay = (i * 28) + 'ms';
+          ghosts.push(g);
+        }
+        hexEl.classList.add('just-merged');
+        window.setTimeout(function () { hexEl.classList.remove('just-merged'); }, 600);
+        chgClearLater(ghosts, prevF.tris * 28 + 780);
+      }
+    } else if (prevU > newU && prevU % CHG_PER_HEX === 0 && prevU <= hexCap && hexEls.length) {
+      // распад гекса: он вспыхивает и схлопывается, треугольники разлетаются в свои ячейки
+      const hexEl = hexEls[Math.floor(prevU / CHG_PER_HEX) - 1];
+      if (hexEl) {
+        const hr = hexEl.getBoundingClientRect();
+        const hx = hr.left + hr.width / 2, hy = hr.top + hr.height / 2;
+        const hexGhost = chgGhost('hex', true, pal, hr);
+        hexGhost.classList.add('unmerging-source');
+        ghosts.push(hexGhost);
+        for (let i = 0; i < newF.tris; i++) {
+          const slot = triEls[i];
+          if (!slot) break;
+          const r = slot.getBoundingClientRect();
+          const g = chgGhost('triangle', true, pal, r);
+          g.style.setProperty('--dx', Math.round(hx - (r.left + r.width / 2)) + 'px');
+          g.style.setProperty('--dy', Math.round(hy - (r.top + r.height / 2)) + 'px');
+          g.classList.add('unmerging');
+          g.style.animationDelay = (i * 28) + 'ms';
+          ghosts.push(g);
+        }
+        chgClearLater(ghosts, newF.tris * 28 + 740);
+      }
+    } else if (newU > prevU) {
+      // обычное заполнение: pop новых треугольников (+ вспышка дорисовавшихся гексов)
+      for (let i = prevF.tris; i < newF.tris; i++) {
+        const it = triEls[i];
+        if (!it) break;
+        it.classList.remove('just-appeared');
+        void it.offsetWidth;
+        it.classList.add('just-appeared');
+        window.setTimeout(function (n) { return function () { n.classList.remove('just-appeared'); }; }(it), 420);
+      }
+      for (let h = 0; h < sk.hexSlots; h++) {
+        if (h >= prevF.hexes && h < newF.hexes && hexEls[h]) {
+          hexEls[h].classList.add('just-merged');
+          window.setTimeout(function (n) { return function () { n.classList.remove('just-merged'); }; }(hexEls[h]), 600);
+        }
+      }
+    } else if (newU < prevU) {
+      // обычная трата: угасает последний бывший треугольник
+      const slot = triEls[prevF.tris - 1];
+      if (slot) {
+        const g = chgGhost('triangle', true, pal, slot.getBoundingClientRect());
+        g.classList.add('just-removed');
+        chgClearLater([g], 360);
+      }
+    }
+  }
+
+  // после каждой перерисовки: сравнить прежние единицы с новыми, запустить нужную анимацию.
+  // Первую отрисовку карточки не анимируем (открытие листа — не событие траты)
+  function syncChargeFx(visible) {
+    const seen = {};
+    visible.forEach(function (card) {
+      if (card.type !== 'spell' || !card.charges) return;
+      seen[card.id] = true;
+      const u = chargeUnits(card);
+      const prev = chgPrev[card.id];
+      chgPrev[card.id] = u;
+      if (prev == null || u == null || prev === u) return;
+      chargeFx(card, prev, u);
+    });
+    Object.keys(chgPrev).forEach(function (id) { if (!seen[id]) delete chgPrev[id]; });
   }
 
   function currencyBody(card) {
@@ -2349,9 +2618,8 @@ window.App = window.App || {};
     toastTimer = setTimeout(function () { t.classList.add('hidden'); }, 2200);
   }
 
-  // всплывающая подсказка значка «(!)» у карточки-формулы:
-  // клик — показать (плашка ВНУТРИ карточки, на уровне шапки; длинная формула переносится),
-  // клик в другом месте — спрятать
+  // всплывающая подсказка значка «(!)» у формул и «🔗» у привязанных заклинаний:
+  // клик — показать плашку ВНУТРИ карточки на уровне шапки, клик в другом месте — спрятать
   function initFormulaInfo() {
     const closeAll = function () {
       const old = document.getElementById('finfPop');
@@ -2360,18 +2628,25 @@ window.App = window.App || {};
     };
     document.addEventListener('click', function (e) {
       const finf = e.target.closest ? e.target.closest('.finf') : null;
+      const linktag = e.target.closest ? e.target.closest('.linktag') : null;
       const old = document.getElementById('finfPop');
-      if (!finf) { if (old) old.remove(); closeAll(); return; }
+      if (!finf && !linktag) { if (old) old.remove(); closeAll(); return; }
       closeAll();
-      const cardEl = finf.closest('.card');
+      const cardEl = (finf || linktag).closest('.card');
       const card = cardEl ? findCard(cardEl.dataset.id) : null;
       if (!card) return;
       const pop = document.createElement('div');
       pop.id = 'finfPop';
       pop.className = 'finf-pop';
-      pop.textContent = (card.expression || '—') + (card._error ? '' : ' = ' + fmt(card._value));
+      if (finf) {
+        pop.textContent = (card.expression || '—') + (card._error ? '' : ' = ' + fmt(card._value));
+      } else if (linktag && card.charges && card.charges.mode === 'link') {
+        const tgt = findCard(card.charges.linkId);
+        const name = tgt ? tgt.name : App.t('brokenRef');
+        pop.textContent = App.tf('linkDependsOn', { name: name, cost: card.charges.cost || 1 });
+      }
       cardEl.appendChild(pop);
-      cardEl.classList.add('finf-open');   // разрешаем карточке «выпустить» плашку (переключаем overflow)
+      cardEl.classList.add('finf-open');   // разрешаем карточке «выпустить» плашку
       e.stopPropagation();
     }, true);
   }

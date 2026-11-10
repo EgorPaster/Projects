@@ -2,7 +2,7 @@
    Стратегия: сеть-в-первую-очередь (обновления всегда свежие при интернете),
    при отсутствии сети — из кэша (офлайн-режим PWA).
    При выходе новой версии меняй CACHE_NAME (например, custplay-v2), кэш перезапишется. */
-const CACHE_NAME = 'custplay-v15';
+const CACHE_NAME = 'custplay-v17';
 const ASSETS = [
   './',
   './index.html',
@@ -20,9 +20,11 @@ const ASSETS = [
 
 self.addEventListener('install', function (e) {
   e.waitUntil(
-    caches.open(CACHE_NAME)
-      .then(function (cache) { return cache.addAll(ASSETS); })
-      .then(function () { return self.skipWaiting(); })
+    caches.open(CACHE_NAME).then(function (cache) {
+      // cache:'reload' — берём файлы мимо внутреннего кэша браузера, иначе свежие правки
+      // могут не пережить обновление версии (у простых серверов нет меток свежести)
+      return Promise.all(ASSETS.map(function (a) { return cache.add(new Request(a, { cache: 'reload' })); }));
+    }).then(function () { return self.skipWaiting(); })
   );
 });
 
@@ -42,7 +44,7 @@ self.addEventListener('fetch', function (e) {
   // Навигация (открытие/перезагрузка страницы): сначала сеть, офлайн — кэш
   if (e.request.mode === 'navigate') {
     e.respondWith(
-      fetch(e.request).then(function (res) {
+      fetch(e.request, { cache: 'reload' }).then(function (res) {
         const copy = res.clone();
         caches.open(CACHE_NAME).then(function (c) { c.put(e.request, copy); });
         return res;
@@ -53,9 +55,9 @@ self.addEventListener('fetch', function (e) {
     return;
   }
 
-  // Ресурсы: сеть → кэш (офлайн)
+  // Ресурсы: сеть → кэш (офлайн); cache:'reload' см. в install
   e.respondWith(
-    fetch(e.request).then(function (res) {
+    fetch(e.request, { cache: 'reload' }).then(function (res) {
       const copy = res.clone();
       caches.open(CACHE_NAME).then(function (c) { c.put(e.request, copy); });
       return res;
