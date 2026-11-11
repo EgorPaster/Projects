@@ -227,51 +227,6 @@ window.App = window.App || {};
     });
     toast(App.t('pageDeleted'));
   }
-  function duplicatePage(pageId) {
-    const ch = activeChar();
-    if (!ch) return;
-    const page = ch.pages.find(function (p) { return p.id === pageId; });
-    if (!page) return;
-    mutate(function () {
-      const copy = { id: uid(), name: page.name };
-      const pTaken = {};
-      ch.pages.forEach(function (p) { pTaken[p.name] = true; });
-      copy.name = nextCloneName(page.name, pTaken);
-      const origs = ch.cards.filter(function (c) { return c.page === pageId; });
-      const copies = origs.map(function (c) { return JSON.parse(JSON.stringify(c)); });
-      // уникальные имена копий (в рамках всего персонажа, как требует isNameUsed);
-      // карта переименований — для перебиндинга формул внутри копии
-      const taken = {};
-      ch.cards.forEach(function (c) { taken[c.name] = true; });
-      const renames = {};
-      copies.forEach(function (c) {
-        const nu = nextCloneName(c.name, taken);
-        if (nu !== c.name) renames[c.name] = nu;
-        c.name = nu;
-      });
-      const idMap = {};
-      renewIds(copies, idMap);
-      copies.forEach(function (c, i) {
-        c.page = copy.id;
-        // формулы копии: ссылки на переименованные карточки копии — на новые имена;
-        // имена с других страниц не трогаются (renameRefs сравнивает имя чипа целиком)
-        if (c.type === 'formula' && c.expression) {
-          for (const old in renames) c.expression = App.formula.renameRefs(c.expression, old, renames[old]);
-        }
-        // связь зарядов на счётчик с другой страницы — сохраняем как есть
-        if (c.charges && c.charges.mode === 'link' && !c.charges.linkId &&
-            origs[i].charges && origs[i].charges.linkId) {
-          const tgt = ch.cards.find(function (x) { return x.id === origs[i].charges.linkId; });
-          if (tgt && tgt.page !== copy.id) c.charges.linkId = origs[i].charges.linkId;
-        }
-      });
-      const idx = ch.pages.findIndex(function (p) { return p.id === pageId; });
-      ch.pages.splice(idx + 1, 0, copy);
-      ch.cards = ch.cards.concat(copies);
-      ch.lastPage = copy.id;
-    });
-    toast(App.t('pageDuplicated') || App.t('duplicate'));
-  }
   function renderTabs() {
     const bar = document.getElementById('pageTabs');
     const ch = activeChar();
@@ -279,71 +234,157 @@ window.App = window.App || {};
     ensurePages(ch);
     bar.classList.remove('hidden');
     const tabs = ch.pages.map(function (p) {
-      const kebab = editMode ? '<span class="pt-kebab" data-kebab="' + p.id + '" title="' + esc(App.t('pageMenu')) + '">⋮</span>' : '';
+      // кебаб ⋮ ВНУТРИ вкладки справа, только в правке (как ручка ⋮⋮ на карточках)
+      const kebab = editMode ? '<span class="pt-kebab" data-page="' + p.id + '" title="' + esc(App.t('pageMenu')) + '">⋮</span>' : '';
       return '<button class="ptab' + (p.id === ch.lastPage ? ' active' : '') + '" data-page="' + p.id + '">' + esc(p.name) + kebab + '</button>';
     }).join('');
-    const ctrl = editMode ?
-      '<span class="pt-ctrl">' +
-      '<button class="icon" id="pt-add" title="' + esc(App.t('addPage')) + '">+</button>' +
-      '</span>' : '';
+    // «+» — только в правке (старые кнопки ✎/✕ заменил кебаб ⋮ у каждой вкладки)
+    const ctrl = editMode ? '<span class="pt-ctrl"><button class="icon" id="pt-add" title="' + esc(App.t('addPage')) + '">+</button></span>' : '';
     bar.innerHTML = tabs + ctrl;
-    closePageMenu();
     bar.querySelectorAll('.ptab').forEach(function (b) {
-      b.addEventListener('click', function (e) {
-        const kb = e.target.closest('.pt-kebab');
-        if (kb) { e.stopPropagation(); openPageMenu(kb.dataset.kebab, kb); return; }
-        ch.lastPage = b.dataset.page; commit();
-      });
+      const k = b.querySelector('.pt-kebab');
+      if (k) k.addEventListener('click', function (e) { e.stopPropagation(); openPageMenu(b.dataset.page, k); });
+      if (editMode && isDesktop()) b.addEventListener('pointerdown', function (e) { startTabDrag(b, ch, bar, e); });
+      else b.addEventListener('click', function () { ch.lastPage = b.dataset.page; commit(); });
     });
-    const add = bar.querySelector('#pt-add');
-    if (add) add.addEventListener('click', function () {
-      mutate(function () {
-        const p = { id: uid(), name: defaultPageName(ch) };
-        ch.pages.push(p);
-        ch.lastPage = p.id;
+    if (editMode) {
+      bar.querySelector('#pt-add').addEventListener('click', function () {
+        mutate(function () {
+          const p = { id: uid(), name: defaultPageName(ch) };
+          ch.pages.push(p);
+          ch.lastPage = p.id;
+        });
       });
-    });
+    }
   }
-  // Контекстное меню страницы (⋮): переименовать / удалить / дублировать
-  function openPageMenu(pageId, anchor) {
-    const ch = activeChar();
-    if (!ch || !anchor) return;
+  // перенос вкладок в своей строке drag and drop (только в правке, десктоп):
+  // вся вкладка кроме кебаба — ручка (без ручек-точек). Во время переноса ничего не переставляем:
+  // вкладка под курсором подсвечивается (.drop-hint), свап — в момент ОТПУСКАНИЯ.
+  // Так «3 через 2 на место 1» даёт ровно 3-2-1 (свап с конечной целью, без цепочки промежуточных).
+  // Состояние ОДНО глобальное (tabDrag) + одна пара обработчиков на window — как у drag карточек:
+  // никаких слушателей на каждую кнопку, нечему «протухать» между перерисовками.
+  let tabDrag = null;   // { b, ch, bar, startX, moved, target }
+  function startTabDrag(b, ch, bar, e) {
+    if (e.button !== 0 || tabDrag) return;
+    const kebab = b.querySelector('.pt-kebab');
+    if (kebab && kebab.contains(e.target)) return;   // кебаб — меню, не перенос
+    tabDrag = { b: b, ch: ch, bar: bar, startX: e.clientX, moved: false, target: null };
+  }
+  function tabDragPick(x) {
+    const tabs = Array.prototype.slice.call(tabDrag.bar.querySelectorAll('.ptab'));
+    for (let i = 0; i < tabs.length; i++) {
+      const t = tabs[i];
+      if (t === tabDrag.b) continue;
+      const r = t.getBoundingClientRect();
+      if (x >= r.left && x < r.right) return t;
+    }
+    return null;
+  }
+  window.addEventListener('pointermove', function (e) {
+    if (!tabDrag) return;
+    if (!tabDrag.moved && Math.abs(e.clientX - tabDrag.startX) > 5) {
+      tabDrag.moved = true;
+      tabDrag.b.classList.add('dragging');
+    }
+    if (!tabDrag.moved) return;
+    const t = tabDragPick(e.clientX);
+    if (t !== tabDrag.target) {
+      if (tabDrag.target) tabDrag.target.classList.remove('drop-hint');
+      tabDrag.target = t;
+      if (t) t.classList.add('drop-hint');
+    }
+  });
+  window.addEventListener('pointerup', function () {
+    if (!tabDrag) return;
+    const td = tabDrag;
+    tabDrag = null;
+    td.b.classList.remove('dragging');
+    if (td.target) td.target.classList.remove('drop-hint');
+    if (!td.moved) { td.ch.lastPage = td.b.dataset.page; commit(); return; }   // это был клик, не перенос
+    if (!td.target) return;   // отпустили мимо вкладок — ничего не меняем
+    // свап местами в DOM, порядок из DOM — одна mutate
+    const anchor = (td.b.nextSibling === td.target) ? td.b : td.b.nextSibling;
+    td.bar.insertBefore(td.b, td.target);
+    td.bar.insertBefore(td.target, anchor);
+    const order = Array.prototype.slice.call(td.bar.querySelectorAll('.ptab')).map(function (t) { return t.dataset.page; });
+    mutate(function () {
+      td.ch.pages.sort(function (x, y) { return order.indexOf(x.id) - order.indexOf(y.id); });
+    });
+  });
+  // контекстное меню страницы (⋮): переименовать / удалить. Закрывается кликом мимо и по resize
+  function closePageMenu() {
+    const m = document.querySelector('.ctxmenu');
+    if (m) m.remove();
+    document.removeEventListener('pointerdown', onPageMenuClose, true);
+    window.removeEventListener('resize', closePageMenu);
+  }
+  function onPageMenuClose(e) {
+    const m = document.querySelector('.ctxmenu');
+    if (m && !m.contains(e.target)) closePageMenu();
+  }
+  function openPageMenu(pageId, kebab) {
     closePageMenu();
-    const canDelete = ch.pages.length > 1;
+    const ch = activeChar();
+    if (!ch) return;
     const menu = document.createElement('div');
     menu.className = 'ctxmenu';
-    menu.id = 'pageMenu';
+    const canDel = ch.pages.length > 1;
     menu.innerHTML =
       '<button type="button" data-act="rename">✎ ' + esc(App.t('renamePage')) + '</button>' +
-      '<button type="button" data-act="dup">⧉ ' + esc(App.t('duplicate')) + '</button>' +
-      '<button type="button" data-act="del"' + (canDelete ? ' class="danger"' : ' disabled') + '>✕ ' + esc(App.t('deletePage')) + '</button>';
-    const r = anchor.getBoundingClientRect();
-    menu.style.left = Math.max(4, Math.min(r.left, window.innerWidth - 170)) + 'px';
-    menu.style.top = (r.bottom + 4) + 'px';
+      '<button type="button" data-act="del"' + (canDel ? '' : ' disabled') + '>✕ ' + esc(App.t('deletePage')) + '</button>';
+    const r = kebab.getBoundingClientRect();
+    menu.style.left = Math.round(r.left) + 'px';
+    menu.style.top = Math.round(r.bottom + 4) + 'px';
     document.body.appendChild(menu);
     menu.addEventListener('click', function (e) {
-      const b = e.target.closest('button[data-act]');
+      const b = e.target.closest('button');
       if (!b || b.disabled) return;
       closePageMenu();
       if (b.dataset.act === 'rename') openPageRename(pageId);
-      else if (b.dataset.act === 'dup') duplicatePage(pageId);
       else if (b.dataset.act === 'del') deletePage(pageId);
     });
-    setTimeout(function () {
-      document.addEventListener('pointerdown', onPageMenuClose, true);
-      window.addEventListener('resize', onPageMenuClose);
-    }, 0);
+    document.addEventListener('pointerdown', onPageMenuClose, true);
+    window.addEventListener('resize', closePageMenu);
   }
-  function onPageMenuClose(e) {
-    const m = document.getElementById('pageMenu');
-    if (m && e && m.contains(e.target)) return;
-    closePageMenu();
-  }
-  function closePageMenu() {
-    const m = document.getElementById('pageMenu');
+  // v19: кебаб-меню мобильной шапки (⋮): Отдых / История / Назад / Вперед.
+  // Генеричное .ctxmenu, прижат вправо под кнопкой; закрытие — клик мимо (pointerdown capture) и resize
+  function closeTopMenu() {
+    const m = document.getElementById('topMenu');
     if (m) m.remove();
-    document.removeEventListener('pointerdown', onPageMenuClose, true);
-    window.removeEventListener('resize', onPageMenuClose);
+    document.removeEventListener('pointerdown', onTopMenuClose, true);
+    window.removeEventListener('resize', closeTopMenu);
+  }
+  function onTopMenuClose(e) {
+    const m = document.getElementById('topMenu');
+    if (m && !m.contains(e.target)) closeTopMenu();
+  }
+  function openTopMenu() {
+    closeTopMenu();
+    const btn = document.getElementById('topMenuBtn');
+    if (!btn) return;
+    const menu = document.createElement('div');
+    menu.className = 'ctxmenu';
+    menu.id = 'topMenu';
+    menu.innerHTML =
+      '<button type="button" data-act="rest">☾ ' + esc(App.t('rest')) + '</button>' +
+      '<button type="button" data-act="log">☰ ' + esc(App.t('log')) + '</button>' +
+      '<button type="button" data-act="undo">↶ ' + esc(App.t('menuUndo')) + '</button>' +
+      '<button type="button" data-act="redo">↷ ' + esc(App.t('menuRedo')) + '</button>';
+    const r = btn.getBoundingClientRect();
+    menu.style.right = Math.round(window.innerWidth - r.right) + 'px';
+    menu.style.top = Math.round(r.bottom + 4) + 'px';
+    document.body.appendChild(menu);
+    menu.addEventListener('click', function (e) {
+      const b = e.target.closest('button');
+      if (!b) return;
+      closeTopMenu();
+      if (b.dataset.act === 'rest') confirmRest();
+      else if (b.dataset.act === 'log') toggleLog();
+      else if (b.dataset.act === 'undo') undo();
+      else if (b.dataset.act === 'redo') redo();
+    });
+    document.addEventListener('pointerdown', onTopMenuClose, true);
+    window.addEventListener('resize', closeTopMenu);
   }
   function findCard(cardId) {
     const ch = activeChar();
@@ -358,15 +399,6 @@ window.App = window.App || {};
     const ch = activeChar();
     if (!ch) return false;
     return ch.cards.some(function (c) { return c.name === name && c.id !== exceptId; });
-  }
-  // Уникальное имя клона: базой служит имя без прежнего суффикса «Имя (2)»,
-  // т.е. клон «Здоровье (2)» при занятом «(2)»/«(3)» станет «Здоровье (4)», а не «(2) (2)»
-  function nextCloneName(name, taken) {
-    const base = name.replace(/\s*\(\d+\)$/, '');
-    let i = 2, nm = base;
-    while (taken[nm]) { nm = base + ' (' + i + ')'; i++; }
-    taken[nm] = true;
-    return nm;
   }
 
   function typeLabelKey(type) { return 'type' + type.charAt(0).toUpperCase() + type.slice(1); }
@@ -852,10 +884,12 @@ window.App = window.App || {};
     mutate(function () {
       const copy = JSON.parse(JSON.stringify(card));
       delete copy._value; delete copy._error;
-      renewIds([copy], null);
-      const taken = {};
-      ch.cards.forEach(function (c) { taken[c.name] = true; });
-      copy.name = nextCloneName(card.name, taken);
+      copy.id = uid();           // новый id копии ОБЯЗАТЕЛЕН: id ищется/удаляется/анимируется по data-id,
+                                 // общий id ломает удаление дубля, заряды и Ctrl+Z (баг v17-дублей)
+      renewIds([copy], null);    // внутренние id (units/items); linkId НЕ ремапим — цель внешняя
+      let base = card.name, i = 2, nm = base;
+      while (ch.cards.some(function (c) { return c.name === nm; })) { nm = base + ' (' + i + ')'; i++; }
+      copy.name = nm;
       if (copy.x != null) { copy.x += 24; copy.y += 24; }
       ch.cards.push(copy);
     });
@@ -947,23 +981,32 @@ window.App = window.App || {};
 
   function renderHeader() {
     const bar = document.getElementById('topbar');
-    const desktop = isDesktop();
     const ch = activeChar();
-    // мобильный топбар: только Правка, Кубики и кебаб (Отдых/История/Назад/Вперед внутри)
-    const controls = desktop ?
+    const desktop = isDesktop();
+    // v19: мобильный ряд — [✎/✓ Правка] [⚄ Кубики] [⋮ кебаб: Отдых/История/Назад/Вперед];
+    // ↶↷ из узкой шапки убраны (переехали в кебаб); карандаш ✎ вместо 🖉 (тофу-квадрат на Android)
+    const editGlyph = editMode ? '✓' : '✎';
+    const editBtnHtml =
+      '<button class="icon" id="editModeBtn" title="' + esc(App.t('editMode')) + '">' + editGlyph + '</button>';
+    const diceBtnHtml =
+      '<button class="icon" id="diceBtn" title="' + esc(App.t('dice')) + '">⚄</button>';
+    const controlsHtml = desktop ?
       '<button class="icon" id="restBtn" title="' + esc(App.t('rest')) + '">☾</button>' +
-      '<button class="icon" id="diceBtn" title="' + esc(App.t('dice')) + '">⚄</button>' +
+      diceBtnHtml +
       '<button class="icon" id="logBtn" title="' + esc(App.t('log')) + '">☰</button>' +
-      '<button class="icon" id="editModeBtn" title="' + esc(App.t('editMode')) + '">' + (editMode ? '✓' : '✎') + '</button>' :
-      '<button class="icon" id="editModeBtn" title="' + esc(App.t('editMode')) + '">' + (editMode ? '✓' : '✎') + '</button>' +
-      '<button class="icon" id="diceBtn" title="' + esc(App.t('dice')) + '">⚄</button>' +
-      '<button class="icon" id="topMenuBtn" title="' + esc(App.t('log')) + '">⋮</button>';
+      editBtnHtml :
+      editBtnHtml +
+      diceBtnHtml +
+      '<button class="icon" id="topMenuBtn" title="' + esc(App.t('menu')) + '">⋮</button>';
+    // v18.2: настройки за логотипом (кнопка #brandBtn вместо div.brand), имя персонажа
+    // в центре топбара (.char-name); кнопка ⚙ #settingsBtn из игрового ряда убрана
+    const charNameHtml = ch ?
+      '<div class="char-name"><span class="orn">◆</span><span class="char-title">' + esc(ch.name) + '</span><span class="orn">◆</span></div>' :
+      '';
     bar.innerHTML =
-      '<button type="button" class="brand brand-btn" id="brandBtn" title="' + esc(App.t('settings')) + '">🎲 <span class="accent">' + esc(App.t('appName')) + '</span></button>' +
-      '<div class="char-name' + (ch ? '' : ' hidden') + '">' +
-        '<span class="orn">◆</span><span class="char-title">' + esc(ch ? ch.name : '') + '</span><span class="orn">◆</span>' +
-      '</div>' +
-      '<div class="top-controls">' + controls + '</div>';
+      '<button class="brand brand-btn" id="brandBtn" title="' + esc(App.t('settings')) + '">🎲 <span class="accent">' + esc(App.t('appName')) + '</span></button>' +
+      charNameHtml +
+      '<div class="top-controls">' + controlsHtml + '</div>';
 
     document.getElementById('brandBtn').addEventListener('click', openSettings);
     const restBtn = document.getElementById('restBtn');
@@ -973,47 +1016,7 @@ window.App = window.App || {};
     if (logBtn) logBtn.addEventListener('click', toggleLog);
     document.getElementById('editModeBtn').addEventListener('click', toggleEditMode);
     const topMenuBtn = document.getElementById('topMenuBtn');
-    if (topMenuBtn) topMenuBtn.addEventListener('click', function () { openTopMenu(topMenuBtn); });
-  }
-  // Кебаб мобильного топбара: Отдых / История / Назад / Вперед (вертикальное меню)
-  function openTopMenu(anchor) {
-    closeTopMenu();
-    const menu = document.createElement('div');
-    menu.className = 'ctxmenu';
-    menu.id = 'topMenu';
-    menu.innerHTML =
-      '<button type="button" data-act="rest">☾ ' + esc(App.t('rest')) + '</button>' +
-      '<button type="button" data-act="log">☰ ' + esc(App.t('log')) + '</button>' +
-      '<button type="button" data-act="undo">↶ ' + esc(App.t('menuUndo')) + '</button>' +
-      '<button type="button" data-act="redo">↷ ' + esc(App.t('menuRedo')) + '</button>';
-    const r = anchor.getBoundingClientRect();
-    menu.style.top = (r.bottom + 4) + 'px';
-    menu.style.right = (window.innerWidth - r.right) + 'px';
-    document.body.appendChild(menu);
-    menu.addEventListener('click', function (e) {
-      const b = e.target.closest('button[data-act]');
-      if (!b) return;
-      closeTopMenu();
-      if (b.dataset.act === 'rest') confirmRest();
-      else if (b.dataset.act === 'log') toggleLog();
-      else if (b.dataset.act === 'undo') undo();
-      else if (b.dataset.act === 'redo') redo();
-    });
-    setTimeout(function () {
-      document.addEventListener('pointerdown', onTopMenuClose, true);
-      window.addEventListener('resize', onTopMenuClose);
-    }, 0);
-  }
-  function onTopMenuClose(e) {
-    const m = document.getElementById('topMenu');
-    if (m && e && m.contains(e.target)) return;
-    closeTopMenu();
-  }
-  function closeTopMenu() {
-    const m = document.getElementById('topMenu');
-    if (m) m.remove();
-    document.removeEventListener('pointerdown', onTopMenuClose, true);
-    window.removeEventListener('resize', onTopMenuClose);
+    if (topMenuBtn) topMenuBtn.addEventListener('click', openTopMenu);
   }
 
   function toggleEditMode() {
@@ -1159,12 +1162,13 @@ window.App = window.App || {};
     return CHG_PAL[card.charges && card.charges.mode === 'link' ? 'link' : 'own'];
   }
 
-  // «единицы ресурса»: собственные — текущее число зарядов; связанные — floor(текущего счётчика / траты)
+  // «единицы ресурса»: собственные — текущее число зарядов; связанные — floor(текущего счётчика / траты).
+  // Счётчик без максимума тоже годится: единицы считаются, предела просто нет (тег без « / N»)
   function chargeUnits(card) {
     const ch = card.charges || {};
     if (ch.mode === 'link') {
       const t = findCard(ch.linkId);
-      if (t && t.type === 'counter' && t.max != null) return Math.floor(num(t.current) / (num(ch.cost) || 1));
+      if (t && t.type === 'counter') return Math.floor(num(t.current) / (num(ch.cost) || 1));
       return null;
     }
     return num(ch.current);
@@ -1251,13 +1255,15 @@ window.App = window.App || {};
     const useBtn = '<button class="small primary use-btn" data-act="use">' + esc(App.t('use')) + '</button>';
     if (ch.mode === 'link') {
       const target = findCard(ch.linkId);
-      if (target && target.type === 'counter' && target.max != null) {
+      if (target && target.type === 'counter') {
+        // счётчик без предела — тег вместо фигур (как при зарядов больше 24)
+        if (target.max == null) return '<div class="charges-row">' + chargeBadgeHTML(card) + useBtn + '</div>';
         const tip = App.tf('linkPipTip', { cost: num(ch.cost) || 1, name: target.name });
         const figs = chargeFiguresHTML(card, tip);
         // ячеек больше 24 — тег вместо фигур
         return '<div class="charges-row">' + (figs || chargeBadgeHTML(card)) + useBtn + '</div>';
       }
-      // счётчик без предела или потерянная ссылка — старый текстовый вид
+      // потерянная ссылка — старый текстовый вид
       const nm = target ? target.name : App.t('brokenRef');
       const remain = target && target.type === 'counter' ? num(target.current) : 0;
       return '<div class="charges-row"><span class="meta">' + esc(App.tf('linkedCharges', { name: nm })) + ': ' + remain + '</span>' +
@@ -1333,26 +1339,31 @@ window.App = window.App || {};
         chgClearLater(ghosts, prevF.tris * 28 + 780);
       }
     } else if (prevU > newU && prevU % CHG_PER_HEX === 0 && prevU <= hexCap && hexEls.length) {
-      // распад гекса: он вспыхивает и схлопывается, треугольники разлетаются в свои ячейки
+      // распад гекса: он вспыхивает и схлопывается, треугольники разлетаются в свои ячейки.
+      // Ячейки-цели скрыты на время полёта (chg-pending): призрак приземлился — слот проявился,
+      // иначе треугольники видны сразу и призраки залетают в уже существующие
       const hexEl = hexEls[Math.floor(prevU / CHG_PER_HEX) - 1];
       if (hexEl) {
         const hr = hexEl.getBoundingClientRect();
         const hx = hr.left + hr.width / 2, hy = hr.top + hr.height / 2;
         const hexGhost = chgGhost('hex', true, pal, hr);
         hexGhost.classList.add('unmerging-source');
-        ghosts.push(hexGhost);
         for (let i = 0; i < newF.tris; i++) {
           const slot = triEls[i];
           if (!slot) break;
+          slot.classList.add('chg-pending');
           const r = slot.getBoundingClientRect();
           const g = chgGhost('triangle', true, pal, r);
           g.style.setProperty('--dx', Math.round(hx - (r.left + r.width / 2)) + 'px');
           g.style.setProperty('--dy', Math.round(hy - (r.top + r.height / 2)) + 'px');
           g.classList.add('unmerging');
           g.style.animationDelay = (i * 28) + 'ms';
-          ghosts.push(g);
+          // приземление призрака (полёт .68s + задержка ряда): проявляем слот, дублёра убираем
+          window.setTimeout(function (s, gh) {
+            return function () { s.classList.remove('chg-pending'); gh.remove(); };
+          }(slot, g), i * 28 + 700);
         }
-        chgClearLater(ghosts, newF.tris * 28 + 740);
+        chgClearLater([hexGhost], newF.tris * 28 + 740);
       }
     } else if (newU > prevU) {
       // обычное заполнение: pop новых треугольников (+ вспышка дорисовавшихся гексов)
@@ -1804,11 +1815,11 @@ window.App = window.App || {};
     document.getElementById('modal').innerHTML = '';
   }
 
-  function confirmDialog(msg, onYes, title, btnLabels) {
-    const lbl = btnLabels || {};
+  function confirmDialog(msg, onYes, title, labels) {
+    labels = labels || {};
     openModal(title || App.t('delete'), '<p class="confirm-text">' + esc(msg) + '</p>', [
-      { label: lbl.no || App.t('cancel') },
-      { label: lbl.yes || App.t('delete'), cls: lbl.yesCls || 'danger', onClick: onYes }
+      { label: labels.no || App.t('cancel') },
+      { label: labels.yes || App.t('delete'), cls: labels.yesCls || 'danger', onClick: onYes }
     ]);
   }
 
@@ -2441,13 +2452,13 @@ window.App = window.App || {};
       closeModal();
       openNewCharModal();
     });
-    if (ch) document.getElementById('s-renchar').addEventListener('click', function () {
-      closeModal();
-      openRenameCharModal(ch);
-    });
     if (ch) document.getElementById('s-delchar').addEventListener('click', function () {
       closeModal();
       confirmDialog(App.tf('confirmDeleteChar', { name: ch.name }), deleteActiveCharacter, App.t('deleteCharacter'));
+    });
+    if (ch) document.getElementById('s-renchar').addEventListener('click', function () {
+      closeModal();
+      openRenameCharModal(ch);
     });
     document.getElementById('s-expchar').addEventListener('click', exportCharacter);
     document.getElementById('s-impchar').addEventListener('click', function () { pickFile(importCharacter); });
@@ -2459,6 +2470,26 @@ window.App = window.App || {};
     });
   }
 
+  // v18.2: переименование персонажа из настроек (кнопка «✎ Переименовать»);
+  // пустое имя или без изменений — молча закрываем, иначе mutate (работает Ctrl+Z) + тост
+  function openRenameCharModal(ch) {
+    openModal(App.t('renameCharacter'),
+      '<div class="field"><label>' + esc(App.t('charName')) + '</label><input id="charNameInput" type="text" value="' + esc(ch.name) + '"></div>',
+      [
+        { label: App.t('cancel') },
+        { label: App.t('save'), cls: 'primary', onClick: function () {
+            const inp = document.getElementById('charNameInput');
+            const name = inp.value.trim();
+            if (!name || name === ch.name) { closeModal(); return; }
+            mutate(function () { ch.name = name; });
+            toast(App.t('charRenamed'));
+          } }
+      ]
+    );
+    const inp = document.getElementById('charNameInput');
+    if (inp) { inp.focus(); inp.select(); }
+  }
+
   function openNewCharModal() {
     openModal(App.t('newCharacter'),
       '<div class="field"><label>' + esc(App.t('charName')) + '</label><input id="charNameInput" type="text" value="' + esc(App.t('newCharName')) + '" placeholder="' + esc(App.t('newCharName')) + '"></div>',
@@ -2468,23 +2499,6 @@ window.App = window.App || {};
             const inp = document.getElementById('charNameInput');
             const name = inp.value.trim() || App.t('newCharName');
             mutate(function () { newCharacter(name); });
-          } }
-      ]
-    );
-    const inp = document.getElementById('charNameInput');
-    if (inp) { inp.focus(); inp.select(); }
-  }
-
-  function openRenameCharModal(ch) {
-    openModal(App.t('renameCharacter'),
-      '<div class="field"><label>' + esc(App.t('charName')) + '</label><input id="charNameInput" type="text" value="' + esc(ch.name) + '" placeholder="' + esc(App.t('charName')) + '"></div>',
-      [
-        { label: App.t('cancel') },
-        { label: App.t('save'), cls: 'primary', onClick: function () {
-            const nm = document.getElementById('charNameInput').value.trim();
-            if (!nm || nm === ch.name) return true;   // пусто/без изменений — молча закрываем
-            mutate(function () { ch.name = nm; });
-            toast(App.t('charRenamed'));
           } }
       ]
     );
@@ -2834,21 +2848,25 @@ window.App = window.App || {};
         else document.getElementById('diceWidget').classList.add('hidden');
       }
     });
-    // журнал: клик/тап мимо самого окна закрывает его; триггеры (кебаб/☰) исключены,
-    // чтобы их собственный toggle не конфликтовал с этим закрытием
+    initDwDrag();
+    // v20c: на мобильном журнал «История» закрывается тапом мимо окна (pointerdown capture на document).
+    // Исключения: само окно #log, кнопки открытия #logBtn/#topMenuBtn и кебаб-меню #topMenu —
+    // иначе тап по пункту «История» в кебабе закрывал журнал ДО клика и не давал его переключить
     document.addEventListener('pointerdown', function (e) {
+      if (isDesktop()) return;
       const log = document.getElementById('log');
       if (!log || log.classList.contains('hidden')) return;
-      if (e.target.closest('#log')) return;
-      if (e.target.closest('#logBtn, #topMenu, #topMenuBtn')) return;
+      const t = e.target;
+      if (!t || !t.closest) return;
+      if (log.contains(t)) return;
+      if (t.closest('#logBtn') || t.closest('#topMenuBtn') || t.closest('#topMenu')) return;
       log.classList.add('hidden');
     }, true);
-    initDwDrag();
-    let lastDesktop = isDesktop();
+    let lastDesktop = isDesktop();   // v19: для пересечения брейкпоинта при смене ориентации
     window.addEventListener('resize', function () {
-      // ПК: поджимаем карточки без перезагрузки; смена ориентации/брейкпоинта —
-      // перерисовываем ЛЮБОЙ режим, иначе с телефона после поворота остаётся ПК-версия
       const d = isDesktop();
+      // v19: перерисовываем на десктопе ИЛИ при пересечении брейкпоинта 721px в любую сторону —
+      // иначе после поворота телефона в портрет шапка остаётся ПК-версией до reload
       if ((d || d !== lastDesktop) && !dragState && !bandState) render();
       lastDesktop = d;
       const w = document.getElementById('diceWidget');

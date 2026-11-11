@@ -50,49 +50,47 @@ html, body {
   white-space: nowrap;
 }
 .brand .accent { color: var(--accent); }
-/* логотип = кнопка меню настроек (A-вариант): нейтральный клик, лёгкий hover */
+/* v18.2: настройки за логотипом (кнопка #brandBtn) + имя персонажа в центре топбара */
 .brand-btn {
   background: transparent;
-  border-color: transparent;
-  border-radius: 10px;
-  padding: 6px 10px;
+  border: none;
+  color: inherit;
+  font: inherit;
+  cursor: pointer;
+  padding: 2px 8px;
+  border-radius: 8px;
+  transition: background .12s, box-shadow .12s;
 }
 .brand-btn:hover {
-  background: rgba(212, 169, 60, .08);
-  border-color: rgba(212, 169, 60, .25);
+  background: rgba(212, 175, 55, .12);
+  box-shadow: 0 0 0 1px rgba(212, 175, 55, .25);
 }
-/* имя персонажа в центре топбара: золотой градиент + мягкое свечение */
 .char-name {
   position: absolute;
   left: 50%;
   top: 50%;
   transform: translate(-50%, -50%);
+  pointer-events: none;
   display: flex;
   align-items: center;
   gap: 10px;
   max-width: min(46vw, 480px);
-  pointer-events: none;
   white-space: nowrap;
 }
-.char-name .orn {
-  font-size: 9px;
-  color: rgba(212, 169, 60, .45);
-  line-height: 1;
-}
+.char-name .orn { color: var(--accent); opacity: .6; font-size: 11px; }
 .char-name .char-title {
   font-family: Georgia, 'Times New Roman', serif;
-  font-size: 16px;
-  font-weight: 600;
-  letter-spacing: .14em;
+  font-size: 17px;
   text-transform: uppercase;
-  background: linear-gradient(180deg, #f6e3a1 0%, var(--accent) 55%, #9a7420 100%);
+  letter-spacing: .14em;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  background: linear-gradient(180deg, #f6e3a1, #9a7420);
   -webkit-background-clip: text;
   background-clip: text;
   -webkit-text-fill-color: transparent;
-  color: var(--accent);
-  filter: drop-shadow(0 1px 1px rgba(0, 0, 0, .65)) drop-shadow(0 0 6px rgba(212, 169, 60, .25));
-  overflow: hidden;
-  text-overflow: ellipsis;
+  color: #d4af37;   /* запасной цвет, если background-clip:text не поддержан */
+  filter: drop-shadow(0 1px 2px rgba(0, 0, 0, .6)) drop-shadow(0 0 6px rgba(212, 175, 55, .25));
 }
 .top-controls {
   display: flex;
@@ -116,6 +114,8 @@ html, body {
 .ptab {
   padding: 4px 10px;
   font-size: 14px;
+  display: inline-flex;
+  align-items: center;
   border-radius: 14px;
   background: transparent;
   border-color: transparent;
@@ -135,45 +135,53 @@ html, body {
   color: var(--accent);
   box-shadow: 0 0 0 2px var(--accent);
 }
-/* всплывающее контекстное меню (⋮ у вкладки страницы) */
+.pt-ctrl { margin-left: auto; display: flex; gap: 6px; }
+
+/* кебаб ⋮ внутри вкладки справа (только в правке) и его меню: fixed под кнопкой,
+   закрывается кликом мимо (pointerdown capture) и по resize.
+   Ручки-точек как на карточках НЕТ: всю вкладку (кроме кебаба) можно перетаскивать */
+.pt-kebab {
+  margin-left: 5px;
+  margin-right: -4px;
+  padding: 0 2px;
+  cursor: pointer;
+  color: var(--muted);
+  user-select: none;
+}
+.pt-kebab:hover { color: var(--text); }
+/* переносимая вкладка приподнята, цель под курсором подсвечена золотом (.drop-hint см. выше) */
+.ptab.dragging {
+  opacity: .75;
+  transform: translateY(-2px);
+  box-shadow: 0 4px 10px rgba(0, 0, 0, .4);
+  position: relative;
+  z-index: 2;
+}
+.ptab { transition: background .12s, color .12s, box-shadow .12s; }
 .ctxmenu {
   position: fixed;
-  z-index: 500;
-  min-width: 160px;
-  display: flex;
-  flex-direction: column;
-  background: var(--panel);
+  z-index: 3000;
+  min-width: 200px;
+  background: var(--panel, #1b1b29);
   border: 1px solid var(--border);
   border-radius: 10px;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, .45);
   padding: 4px;
-  box-shadow: 0 8px 24px rgba(0,0,0,.45);
 }
 .ctxmenu button {
   display: block;
   width: 100%;
   text-align: left;
   background: transparent;
-  border: none;
-  border-radius: 6px;
-  padding: 8px 10px;
+  border: 0;
+  border-radius: 8px;
+  padding: 7px 10px;
+  font-size: 13px;
+  color: var(--text);
 }
-.ctxmenu button:hover:not(:disabled) { background: var(--panel2); }
-.ctxmenu button:disabled { opacity: .4; cursor: not-allowed; }
-.ctxmenu button.danger { color: var(--danger, #e57878); }
-.pt-ctrl { margin-left: auto; display: flex; gap: 6px; }
-/* ⚙ меню страницы: ⋮ внутри вкладки (только в режиме правки) */
-.pt-kebab {
-  display: inline-block;
-  margin-left: 4px;
-  margin-right: -3px;
-  padding: 0 3px;
-  border-radius: 10px;
-  font-weight: 700;
-  color: var(--muted);
-  opacity: .7;
-}
-.pt-kebab:hover { background: var(--panel2); color: var(--text); opacity: 1; }
-.ptab { display: inline-flex; align-items: center; }
+.ctxmenu button:hover { background: var(--panel2); }
+.ctxmenu button:disabled { opacity: .4; cursor: default; }
+.ctxmenu button:disabled:hover { background: transparent; }
 
 /* ---------- Buttons ---------- */
 button {
@@ -445,6 +453,9 @@ button.active { border-color: var(--accent); color: var(--accent); }
 /* гексы — группа, отцентрованная над рядом треугольников (сдвиг считается в app.js
    от максимума карточки: при 24 это ровно промежутки 2–3, 3–4 и 4–5, как в стенде) */
 
+/* ячейка-цель распада: скрыта, пока в неё летит призрак (появляется при приземлении) */
+.charge.chg-pending { visibility: hidden; }
+
 /* фигура заряда: пустая — только контур, заполненная — заливка */
 .charge {
   --chg-empty: #505064;
@@ -526,9 +537,11 @@ button.active { border-color: var(--accent); color: var(--accent); }
   100% { transform: translate(var(--dx, 0px), var(--dy, 0px)) scale(.05); opacity: 0; }
 }
 
-/* обратная анимация: из гекса вылетают треугольники в свои ячейки */
+/* обратная анимация: из гекса вылетают треугольники в свои ячейки.
+   fill-mode: both обязателен: во время задержки (i*28мс) действует кадр 0% —
+   призрак невидим у гекса; иначе он проступает на месте слота-цели до старта полёта */
 .charge.unmerging {
-  animation: fly-from-hex .68s cubic-bezier(.2,.7,.3,1) forwards;
+  animation: fly-from-hex .68s cubic-bezier(.2,.7,.3,1) both;
   pointer-events: none;
   z-index: 5;
 }
@@ -722,12 +735,11 @@ button.active { border-color: var(--accent); color: var(--accent); }
   .chg-row { --charge-size: 19px; --charge-gap: 4px; }
   #topbar { padding: 6px 8px; gap: 5px; }
   .brand { font-size: 15px; }
-  .fab { right: 14px; bottom: 14px; }
-  .dw { left: 12px; bottom: 74px; width: calc(100vw - 24px); }
-  /* имя персонажа в центре — компактнее, чтобы не наезжать на кнопки */
   .char-name { gap: 6px; max-width: 42vw; }
   .char-name .orn { font-size: 7px; }
   .char-name .char-title { font-size: 12px; letter-spacing: .08em; }
+  .fab { right: 14px; bottom: 14px; }
+  .dw { left: 12px; bottom: 74px; width: calc(100vw - 24px); }
 }
 
 /* ---------- Free placement (desktop) ---------- */
