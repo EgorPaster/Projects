@@ -2396,6 +2396,24 @@ window.App = window.App || {};
   // ===== Пикер карточки (замена нативного select: у options на ПК белый фон) =====
   // Тёмная панель со строкой поиска — единый вид на ПК и мобилке.
   let refMenuAnchor = null;
+  // Позиционирование панели у анкора: не вылезать за правый край, при нехватке
+  // места снизу — раскрыть вверх, в любом случае целиком в видимой области.
+  // Вынесено отдельной функцией, чтобы на resize НЕ закрывать панель, а переставлять:
+  // на телефоне фокус на строке поиска открывает клавиатуру, окно «сжимается» —
+  // раньше resize закрывал меню, и список вспыхивал и исчезал вместе с клавиатурой.
+  function placeRefMenu() {
+    const menu = document.getElementById('refmenu');
+    if (!menu || !refMenuAnchor) return;
+    const r = refMenuAnchor.getBoundingClientRect();
+    const left = Math.max(8, Math.min(r.left, window.innerWidth - menu.offsetWidth - 8));
+    let top = r.bottom + 4;
+    if (top + menu.offsetHeight > window.innerHeight - 8) top = Math.max(8, r.top - menu.offsetHeight - 4);
+    // панель обязана остаться в пределах видимой области целиком
+    // (при открытой клавиатуре видимая область сжимается по высоте)
+    top = Math.min(top, Math.max(8, window.innerHeight - menu.offsetHeight - 8));
+    menu.style.left = left + 'px';
+    menu.style.top = top + 'px';
+  }
   // anchor — кнопка, к которой прижимается панель; opts.chip — переименовать чип,
   // opts.area — вставить новый чип в позицию курсора этого поля
   function openRefMenu(anchor, opts) {
@@ -2445,17 +2463,15 @@ window.App = window.App || {};
     renderList('');
     search.addEventListener('input', function () { renderList(search.value); });
     document.body.appendChild(menu);
-    // прижать к анкору: не вылезать за правый край, при нехватке места снизу — раскрыть вверх
-    const r = anchor.getBoundingClientRect();
-    let left = Math.min(r.left, window.innerWidth - menu.offsetWidth - 8);
-    let top = r.bottom + 4;
-    if (top + menu.offsetHeight > window.innerHeight - 8) top = Math.max(8, r.top - menu.offsetHeight - 4);
-    menu.style.left = Math.max(8, left) + 'px';
-    menu.style.top = top + 'px';
-    setTimeout(function () { search.focus(); }, 0);
-    // закрытие: клик/тап мимо (кроме самой панели и её кнопки-анкора) + resize
+    placeRefMenu();
+    // v25.2: фокус на строке поиска — только на ПК. На телефоне автофокус тут же
+    // поднимает клавиатуру; поиск доступен тапом по строке, когда он нужен.
+    if (isDesktop()) setTimeout(function () { search.focus(); }, 0);
+    // закрытие: клик/тап мимо (кроме самой панели и её кнопки-анкора).
+    // resize НЕ закрывает панель, а переставляет её (клавиатура на телефоне
+    // меняет высоту окна и раньше гасила список сразу после открытия)
     document.addEventListener('pointerdown', onRefMenuDocDown, true);
-    window.addEventListener('resize', closeRefMenu);
+    window.addEventListener('resize', placeRefMenu);
   }
   function onRefMenuDocDown(e) {
     const menu = document.getElementById('refmenu');
@@ -2465,7 +2481,7 @@ window.App = window.App || {};
     const menu = document.getElementById('refmenu');
     if (menu) menu.parentNode.removeChild(menu);
     document.removeEventListener('pointerdown', onRefMenuDocDown, true);
-    window.removeEventListener('resize', closeRefMenu);
+    window.removeEventListener('resize', placeRefMenu);
     refMenuAnchor = null;
   }
   function updateFormulaPreview() {
