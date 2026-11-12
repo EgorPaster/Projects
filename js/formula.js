@@ -1,7 +1,25 @@
 window.App = window.App || {};
 
 App.formula = (function () {
+  // юникод-операторы → ASCII: телефоны и копипаст дают − × ÷ вместо - * /
+  // заменяем только ВНЕ {...}: имена карточек в ссылках не трогаем
+  function normalizeOps(input) {
+    let out = '';
+    let inRef = false;
+    for (const c of String(input)) {
+      if (c === '{') inRef = true;
+      else if (c === '}') inRef = false;
+      if (!inRef) {
+        if (c === '−' || c === '–' || c === '—') { out += '-'; continue; }
+        if (c === '×') { out += '*'; continue; }
+        if (c === '÷') { out += '/'; continue; }
+      }
+      out += c;
+    }
+    return out;
+  }
   function tokenize(input) {
+    input = normalizeOps(input);
     const tokens = [];
     let i = 0;
     while (i < input.length) {

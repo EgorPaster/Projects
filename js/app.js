@@ -7,6 +7,8 @@ window.App = window.App || {};
   const STORAGE_KEY = 'custplay-v1';
   const LEGACY_KEY = 'dnd-tracker-v1';
   const CARD_TYPES = ['counter', 'skill', 'formula', 'spell', 'currency', 'inventory', 'note'];
+  // v22: типы, которые можно использовать в формулах — без валюты/инвентаря/заметок
+  const FORMULA_REF_TYPES = ['counter', 'skill', 'formula', 'spell'];
   const MIN_W = 220, MIN_H = 110;   // минимальный размер карточки: чтобы влезали кнопки/содержимое
 
   // ===== Helpers =====
@@ -96,9 +98,9 @@ window.App = window.App || {};
 
   let undoStack = [];
   let redoStack = [];
-  const MAX_UNDO = 50;
+  const MAX_UNDO = 15;   // v20d: 15 действий достаточно (каждый снимок = копия всего состояния)
   let editMode = false;
-  let editScratch = { units: null, items: null, tokens: null, formulaCard: null };
+  let editScratch = { units: null, items: null, formulaCard: null, editCard: null };
 
   let formulaMemo = {};
   let formulaVisiting = new Set();
@@ -564,13 +566,55 @@ window.App = window.App || {};
   }
   function cardBonus(card) {
     if (card.bonus == null || String(card.bonus).trim() === '') return 0;
-    try { return App.formula.evaluateArithmetic(String(card.bonus)); }
+    try { return evalCardExpr(card, card.bonus); }
     catch (e) { return 0; }
+  }
+  // ===== Выражения со ссылками в полях (v25) =====
+  // Поля бонуса/максимума/значения хранят строку вида «2 + {Мана}» или «{Имя}.бонус».
+  // evalCardExpr подставляет текущие числа карточек; exprVisiting защищает от циклов
+  // между полями (бонус → формула → бонус той же карточки и т.п.).
+  const exprVisiting = new Set();
+  function evalCardExpr(card, input) {
+    const s = String(input == null ? '' : input).trim();
+    if (s === '') return 0;
+    if (exprVisiting.has(card.id)) { const e = new Error('cycle'); e.cycle = true; throw e; }
+    exprVisiting.add(card.id);
+    try {
+      return App.formula.evaluate(s, function (name, part) {
+        const target = findCardByName(name);
+        if (!target) throw new Error(name);
+        if (target.id === card.id) throw new Error('self');
+        return part === 'bonus' ? cardBonus(target) : cardValue(target);
+      });
+    } finally { exprVisiting.delete(card.id); }
+  }
+  // выражение → число; число проходит как есть; битая ссылка/пустота → null (без предела)
+  function exprNumber(card, input) {
+    if (input == null) return null;
+    if (typeof input === 'number') return input;
+    try { const v = evalCardExpr(card, input); return Number.isFinite(v) ? v : null; }
+    catch (e) { return null; }
+  }
+  // максимум счётчика (число или выражение), null — без предела
+  function counterMaxNum(card) { return exprNumber(card, card.max); }
+  // максимум собственных зарядов заклинания
+  function chargesMaxNum(card) { return exprNumber(card, card.charges ? card.charges.max : null); }
+  // значение навыка (число или выражение)
+  function skillValueNum(card) {
+    if (card.value == null) return 0;
+    if (typeof card.value === 'number') return num(card.value);
+    try { return evalCardExpr(card, card.value); } catch (e) { return 0; }
+  }
+  // все строковые поля карточки, где могут быть ссылки {Имя} (переименование/удаление)
+  function cardExprFields(c) {
+    return [c.expression, c.bonus, c.max, c.value, c.charges && c.charges.max]
+      .filter(function (v) { return v != null && typeof v !== 'number' && String(v).indexOf('{') !== -1; })
+      .map(String);
   }
   function cardValue(card) {
     switch (card.type) {
       case 'counter': return num(card.current);
-      case 'skill': return card.value == null ? 0 : num(card.value);
+      case 'skill': return skillValueNum(card);
       case 'formula': return evalFormula(card.id);
       case 'spell': return chargesCurrent(card);
       default: return 0;
@@ -723,7 +767,7 @@ window.App = window.App || {};
     else if (act === 'pip') {
       // клик по фигуре заряда: заряды заполняются до этой ячейки (и опустошаются после неё)
       if (card.charges && card.charges.mode !== 'link') {
-        const max = card.charges.max == null ? null : num(card.charges.max);
+        const max = chargesMaxNum(card);
         const cur = num(card.charges.current);
         let next;
         if (ds.hex != null) {
@@ -744,7 +788,13 @@ window.App = window.App || {};
       }
     }
     else if (act === 'curr-inc') mutate(function () { card.amounts[ds.unit] = num(card.amounts[ds.unit]) + 1; normalizeCurrency(card); });
-    else if (act === 'curr-dec') mutate(function () { card.amounts[ds.unit] = num(card.amounts[ds.unit]) - 1; });
+    else if (act === 'curr-dec') mutate(function () {
+      const current = num(card.amounts[ds.unit]);
+      if (current > 0) {
+        card.amounts[ds.unit] = current - 1;
+        normalizeCurrency(card);
+      }
+    });
     else if (act === 'curr-custom-inc') openCurrencyDelta(card, ds.unit, 1, e && e.currentTarget);
     else if (act === 'curr-custom-dec') openCurrencyDelta(card, ds.unit, -1, e && e.currentTarget);
     else if (act === 'item-del') {
@@ -792,7 +842,8 @@ window.App = window.App || {};
       done = true;
       const v = num(inp.value);
       detach();
-      if (v) mutate(function () { applyFn(v); });
+      // v22: знак кнопки участвует в расчёте — «−−» должна уменьшать, а не прибавлять введённое
+      if (v) mutate(function () { applyFn(sign * v); });
     };
     const onDoc = function (e) {          // клик мимо окна = отмена (без записи)
       if (pop.contains(e.target)) return;
@@ -840,8 +891,12 @@ window.App = window.App || {};
     anchor = anchor || row.querySelector(sign > 0 ? '.counter-more.plus' : '.counter-more.minus');
     if (!anchor) return;
     deltaPop(anchor, sign, function (v) {
-      card.amounts[unitId] = num(card.amounts[unitId]) + v;
-      normalizeCurrency(card);
+      const current = num(card.amounts[unitId]) || 0;
+      // v23: не даём значению стать меньше нуля
+      if (sign > 0 || current + v >= 0) {
+        card.amounts[unitId] = current + v;
+        normalizeCurrency(card);
+      }
     });
   }
 
@@ -899,9 +954,13 @@ window.App = window.App || {};
     const ch = activeChar();
     const card = findCard(cardId);
     if (!ch || !card) return;
-    // кто зависит от удаляемой карточки: формулы (ссылки) и заклинания (связанные заряды)
+    // кто зависит от удаляемой карточки: ссылки в формулах, бонусах, максимумах,
+    // значениях и в максимумах зарядов (v25) + заклинания со связанными зарядами
     const name = card.name;
-    const refs = ch.cards.filter(function (c) { return c.id !== cardId && c.type === 'formula' && App.formula.hasRef(c.expression || '', name); });
+    const refs = ch.cards.filter(function (c) {
+      if (c.id === cardId) return false;
+      return cardExprFields(c).some(function (s) { return App.formula.hasRef(s, name); });
+    });
     const linked = ch.cards.filter(function (c) { return c.id !== cardId && c.type === 'spell' && c.charges && c.charges.mode === 'link' && c.charges.linkId === cardId; });
     let msg = '';
     if (refs.length) msg += App.t('referencedBy') + ' ' + refs.map(function (r) { return r.name; }).join(', ');
@@ -925,9 +984,11 @@ window.App = window.App || {};
       ch.cards.forEach(function (c) {
         if (!c.restores) return;
         if (c.type === 'counter') {
-          c.current = (c.max == null) ? 0 : num(c.max);
+          const mx = counterMaxNum(c);   // максимум может быть выражением — считаем на момент отдыха
+          c.current = mx == null ? 0 : num(mx);
         } else if (c.type === 'spell' && c.charges && c.charges.mode === 'own') {
-          c.charges.current = (c.charges.max == null) ? 0 : num(c.charges.max);
+          const mx = chargesMaxNum(c);
+          c.charges.current = mx == null ? 0 : num(mx);
         }
       });
     });
@@ -973,9 +1034,11 @@ window.App = window.App || {};
   function addUndoKeys() {
     document.addEventListener('keydown', function (e) {
       if (!(e.ctrlKey || e.metaKey) || e.altKey) return;
-      const k = e.key.toLowerCase();
-      if (k === 'z' && !e.shiftKey) { e.preventDefault(); undo(); }
-      else if (k === 'y' || (k === 'z' && e.shiftKey)) { e.preventDefault(); redo(); }
+      // v20d: сравниваем ФИЗИЧЕСКУЮ клавишу e.code, а не e.key — на русской раскладке
+      // Ctrl+Z даёт key='я' (и Ctrl+Y='н'), из-за чего отмена молча не срабатывала.
+      // e.code='KeyZ'/'KeyY' не зависит от языка раскладки.
+      if (e.code === 'KeyZ' && !e.shiftKey) { e.preventDefault(); undo(); }
+      else if (e.code === 'KeyY' || (e.code === 'KeyZ' && e.shiftKey)) { e.preventDefault(); redo(); }
     });
   }
 
@@ -1107,7 +1170,7 @@ window.App = window.App || {};
 
   function counterBody(card) {
     const cur = num(card.current);
-    const max = card.max == null ? null : num(card.max);
+    const max = counterMaxNum(card);
     const over = (max != null && cur > max);
     const under = cur < 0;
     const val = '<span class="counter-val' + (over ? ' over' : '') + (under ? ' under' : '') + '">' + cur + (max != null ? '<small> / ' + max + '</small>' : '') + '</span>';
@@ -1130,7 +1193,7 @@ window.App = window.App || {};
   // показывает строку значения как у бывшего «стата»
   function skillBody(card) {
     if (card.value == null) return '';
-    const val = num(card.value);
+    const val = skillValueNum(card);
     const bonus = cardBonus(card);
     return '<div class="card-body"><div class="stat-line"><span class="stat-value' + (val < 0 ? ' under' : '') + '">' + fmt(val) + '</span>' +
       (bonus ? '<span class="stat-bonus">(' + (bonus > 0 ? '+' : '') + bonus + ')</span>' : '') + '</div></div>';
@@ -1178,10 +1241,12 @@ window.App = window.App || {};
     const ch = card.charges || {};
     if (ch.mode === 'link') {
       const t = findCard(ch.linkId);
-      if (t && t.type === 'counter' && t.max != null) return Math.floor(num(t.max) / (num(ch.cost) || 1));
+      // максимум счётчика может быть выражением ({Мана} + 2) — сначала считаем его
+      const tm = t && t.type === 'counter' ? counterMaxNum(t) : null;
+      if (tm != null) return Math.floor(tm / (num(ch.cost) || 1));
       return null;
     }
-    return ch.max == null ? null : num(ch.max);
+    return chargesMaxNum(card);
   }
   // скелет ячеек: треугольных слотов всегда шесть; гексовых — сколько реально
   // может набраться от максимума (макс 8 → 1 гекс). null — фигуры не показываем
@@ -1810,6 +1875,7 @@ window.App = window.App || {};
     });
   }
   function closeModal() {
+    closeRefMenu();   // пикер живёт на document.body — прибираем за модалкой
     document.getElementById('backdrop').classList.add('hidden');
     document.getElementById('modal').classList.add('hidden');
     document.getElementById('modal').innerHTML = '';
@@ -1830,19 +1896,86 @@ window.App = window.App || {};
   }
 
   // ===== Form helpers =====
-  function numField(id, label, value, placeholder) {
-    return '<div class="field"><label>' + esc(label) + '</label><input id="' + id + '" type="number" step="1" value="' + (value == null ? '' : value) + '" placeholder="' + esc(placeholder || '0') + '"></div>';
+  function readNum(id) { const el = document.getElementById(id); return el ? el.value : ''; }
+  function readDie(id) { const el = document.getElementById(id); const v = el ? el.value : ''; return v === '' ? null : Number(v); }
+  function readCheck(id) { const el = document.getElementById(id); return el ? el.checked : false; }
+  function readText(id) { const el = document.getElementById(id); return el ? el.value : ''; }
+
+  // ===== Универсальное поле-выражение (v25) =====
+  // Тот же контентедит-механизм, что у формулы: свободный ввод + чипы-параметры
+  // («+ Параметр» — поиск карточки, вставка в позицию курсора).
+  // Хранение — строка («2 + {Мана}»); чистое число нормализуется в Number,
+  // поэтому старые сохранения остаются числами и ничего не ломает.
+  function exprOrNull(s) {
+    s = String(s == null ? '' : s).trim();
+    if (!s) return null;
+    const n = Number(s);
+    return Number.isFinite(n) ? n : s;
   }
-  function bonusField(id, val) {
-    return '<div class="field"><label>' + esc(App.t('bonus')) + '</label><input id="' + id + '" type="text" value="' + esc(val == null ? '' : val) + '" placeholder="+2, -3, 2*2, 1/2"></div>';
+  function exprFieldHTML(idPrefix, label, value, tip) {
+    return '<div class="field"><label>' + esc(label) + '</label>' +
+      '<div class="f-expr" id="' + idPrefix + '-expr" contenteditable="true" spellcheck="false" data-expr="' + esc(value == null ? '' : String(value)) + '"></div>' +
+      '<div class="f-buttons"><button type="button" class="small" id="' + idPrefix + '-addref">+ ' + esc(App.t('addParam')) + '</button></div>' +
+      // живой предпросмотр «= N» — как в редакторе формул
+      '<div class="f-preview" id="' + idPrefix + '-preview">= —</div>' +
+      (tip ? '<div class="formula-help">' + esc(tip) + '</div>' : '') +
+      '</div>';
+  }
+  function readExpr(idPrefix) {
+    const area = document.getElementById(idPrefix + '-expr');
+    return area ? serializeExpr(area) : '';
+  }
+  // живой предпросмотр «= N» под каждым полем-выражением (кроме самой формулы —
+  // у неё свой updateFormulaPreview со своим циклом-чеком)
+  function updateExprPreviews() {
+    document.querySelectorAll('.f-expr').forEach(function (area) {
+      if (area.id === 'f-expr') return;
+      const prev = document.getElementById(area.id.replace(/-expr$/, '-preview'));
+      if (!prev) return;
+      // заодно дорисовываем чипы (имя, знач./бонус): при повторном открытии
+      // редактора они отрисовываются из data-expr без единого input-события
+      refreshChips(area);
+      const card = editScratch.editCard || editScratch.formulaCard;
+      const str = serializeExpr(area).trim();
+      if (!str) { prev.innerHTML = '= —'; return; }
+      try {
+        const val = evalCardExpr(card, str);   // ссылка на саму карточку → ошибка, как в формулах
+        prev.innerHTML = '= ' + fmt(val);
+      } catch (e) {
+        prev.innerHTML = '= <span class="err">' + esc(App.t('brokenRef')) + '</span>';
+      }
+    });
+  }
+  // привязка всех полей-выражений открытого редактора: отрисовка + кнопка «+ Параметр»
+  function bindExprFields() {
+    ['f-max', 'f-bonus', 'f-value', 'f-chmax'].forEach(function (p) {
+      const area = document.getElementById(p + '-expr');
+      if (!area) return;
+      renderExprInto(area, area.dataset.expr || '');
+      lastExpr = null;
+      ensureExprCaretTracking();
+      area.addEventListener('input', updateExprPreviews);
+      const btn = document.getElementById(p + '-addref');
+      if (btn) btn.addEventListener('click', function () {
+        if (refMenuAnchor === btn) closeRefMenu();   // повторный клик — просто закрыть
+        else openRefMenu(btn, { area: area });
+      });
+    });
+    updateExprPreviews();
+  }
+  // бонус-выражение: читается только если стоит галочка «Добавить бонус» (иначе пусто)
+  function readBonus() {
+    const cb = document.getElementById('f-usebonus');
+    if (cb && !cb.checked) return '';
+    return readExpr('f-bonus').trim();
   }
   // Бонус как галочка: поставил галочку — появилось поле выражения; снял — бонус обнулился
+  // (v25: поле-выражение с чипами-параметрами)
   function bonusToggleFields(val) {
     const has = val != null && String(val).trim() !== '';
     return checkField('f-usebonus', App.t('addBonus'), has) +
-      '<div class="field" id="f-bonuswrap"' + (has ? '' : ' style="display:none"') + '">' +
-      '<label>' + esc(App.t('bonus')) + '</label>' +
-      '<input id="f-bonus" type="text" value="' + esc(val == null ? '' : val) + '" placeholder="+2, -3, 2*2, 1/2"></div>';
+      '<div id="f-bonuswrap"' + (has ? '' : ' style="display:none"') + '>' +
+      exprFieldHTML('f-bonus', App.t('bonus'), val, '') + '</div>';
   }
   // Галочка «Кубик»: поставил — появился выбор кубика (d20 по умолчанию), снял — скрылся
   function dieToggleFields(die) {
@@ -1851,12 +1984,12 @@ window.App = window.App || {};
       dieField('f-die', die || 20) + '</div>';
   }
   // Значение как галочка (у навыка): то же поведение — включил, появилось поле
+  // (v25: значение тоже умеет параметр — «{Уровень} * 2»)
   function valueToggleFields(val) {
     const has = val != null;
     return checkField('f-usevalue', App.t('addValue'), has) +
-      '<div class="field" id="f-valuewrap"' + (has ? '' : ' style="display:none"') + '">' +
-      '<label>' + esc(App.t('value')) + '</label>' +
-      '<input id="f-value" type="number" step="1" value="' + (val == null ? '' : val) + '"></div>';
+      '<div id="f-valuewrap"' + (has ? '' : ' style="display:none"') + '>' +
+      exprFieldHTML('f-value', App.t('value'), val, '') + '</div>';
   }
   function dieField(id, val) {
     let opts = '<option value=""' + (!val ? ' selected' : '') + '>' + esc(App.t('noDie')) + '</option>';
@@ -1868,24 +2001,15 @@ window.App = window.App || {};
   function checkField(id, label, checked) {
     return '<div class="field check"><input id="' + id + '" type="checkbox"' + (checked ? ' checked' : '') + '><label for="' + id + '">' + esc(label) + '</label></div>';
   }
-  function readNum(id) { const el = document.getElementById(id); return el ? el.value : ''; }
-  function readDie(id) { const el = document.getElementById(id); const v = el ? el.value : ''; return v === '' ? null : Number(v); }
-  function readCheck(id) { const el = document.getElementById(id); return el ? el.checked : false; }
-  function readText(id) { const el = document.getElementById(id); return el ? el.value : ''; }
-  function readNumOrNull(id) { const el = document.getElementById(id); const v = el ? el.value : ''; return v === '' ? null : num(v); }
-  // бонус-выражение: читается только если стоит галочка «Добавить бонус» (иначе пусто)
-  function readBonus() {
-    const cb = document.getElementById('f-usebonus');
-    if (cb && !cb.checked) return '';
-    return readText('f-bonus').trim();
-  }
 
   function typeFields(card) {
     switch (card.type) {
       case 'counter':
         // «Текущее» убрано из редактора: при создании оно стартует с максимума (см. applyFields),
-        // дальше игроки меняют его кнопками ⁺/⁻ на самой карточке
-        return numField('f-max', App.t('max'), card.max == null ? '' : card.max, '—') +
+        // дальше игроки меняют его кнопками ⁺/⁻ на самой карточке.
+        // v25: максимум — поле-выражение («{Мана} + 2»); у новой карточки дефолтный
+        // «0» не показываем, иначе чип приклеивается после него («0{Мана}»)
+        return exprFieldHTML('f-max', App.t('max'), (card._new && card.max === 0) ? '' : card.max, '') +
           dieField('f-die', card.die) +
           // галочка бонуса и само поле — только пока выбран кубик (f-diegate скрывается без кубика)
           '<div id="f-diegate">' + bonusToggleFields(card.bonus) + '</div>' +
@@ -1914,7 +2038,9 @@ window.App = window.App || {};
       '<option value="own"' + (ch.mode !== 'link' ? ' selected' : '') + '>' + esc(App.t('chargesOwn')) + '</option>' +
       '<option value="link"' + (ch.mode === 'link' ? ' selected' : '') + '>' + esc(App.t('chargesLink')) + '</option>' +
       '</select></div>';
-    html += '<div class="field" id="f-chownwrap"><label>' + esc(App.t('max')) + '</label><input id="f-chmax" type="number" value="' + (ch.max == null ? '' : ch.max) + '" placeholder="3"></div>';
+    // v25: максимум собственных зарядов — поле-выражение («{Мана} / 2» и т.п.);
+    // у новой карточки дефолтный «0» не показываем (см. счётчик)
+    html += '<div id="f-chownwrap">' + exprFieldHTML('f-chmax', App.t('max'), (card._new && ch.max === 0) ? '' : ch.max, '') + '</div>';
     html += '<div class="field" id="f-chlinkwrap"><label>' + esc(App.t('linkTo')) + '</label><select id="f-chlink">' + linkOpts + '</select></div>';
     html += '<div class="field" id="f-chcostwrap"><label>' + esc(App.t('costPerUse')) + '</label><input id="f-chcost" type="number" value="' + (num(ch.cost) || 1) + '" placeholder="1"></div>';
     html += '<div class="field check" id="f-chblockwrap"><input id="f-chblock" type="checkbox"' + (ch.blockEmpty ? ' checked' : '') + '><label for="f-chblock">' + esc(App.t('blockEmpty')) + '</label></div>';
@@ -1923,20 +2049,11 @@ window.App = window.App || {};
   }
 
   function formulaFields(card) {
-    editScratch.tokens = tokenizeFormula(card.expression || '');
     editScratch.formulaCard = card;
     return '<div class="field"><label>' + esc(App.t('expression')) + '</label>' +
-      '<div class="f-tokens" id="f-tokens"></div>' +
+      '<div class="f-expr" id="f-expr" contenteditable="true" spellcheck="false"></div>' +
       '<div class="f-buttons">' +
-        '<button type="button" class="small f-op" data-op="+">+</button>' +
-        '<button type="button" class="small f-op" data-op="-">−</button>' +
-        '<button type="button" class="small f-op" data-op="*">×</button>' +
-        '<button type="button" class="small f-op" data-op="/">÷</button>' +
-        '<button type="button" class="small f-op" data-op="(">(</button>' +
-        '<button type="button" class="small f-op" data-op=")">)</button>' +
-        '<button type="button" class="small f-op" data-op="num">' + esc(App.t('number')) + '</button>' +
         '<button type="button" class="small" id="f-addref">+ ' + esc(App.t('addParam')) + '</button>' +
-        '<button type="button" class="small" id="f-addbonus">+ ' + esc(App.t('bonusOf')) + '</button>' +
       '</div>' +
       '<div class="f-preview" id="f-preview">= —</div>' +
       '<div class="formula-help">' + esc(App.t('formulaTip')) + '</div>' +
@@ -2093,143 +2210,269 @@ window.App = window.App || {};
     if (card.type === 'inventory') bindInventoryEditor();
     if (card.type === 'formula') bindFormulaEditor();
     if (card.type === 'spell') bindChargesToggle();
+    bindExprFields();   // v25: поля-выражения (максимум/бонус/значение) — чипы-параметры
     bindBonusToggle();
     bindValueToggle();
     bindDieToggle();
     bindDieGate();
   }
 
-  // ===== Formula token editor =====
-  function opSymbol(v) {
-    return ({ '+': '+', '-': '−', '*': '×', '/': '÷', '(': '(', ')': ')' })[v] || v;
-  }
-  function tokenizeFormula(str) {
-    const tokens = [];
-    let i = 0;
-    while (i < str.length) {
-      const c = str[i];
-      if (/\s/.test(c)) { i++; continue; }
-      if (c === '{') {
-        const end = str.indexOf('}', i);
-        if (end === -1) break;
-        const inner = str.slice(i + 1, end).trim();
-        const m = inner.match(/^(.*?)\s*\.\s*(бонус|bonus)$/i);
-        if (m) tokens.push({ t: 'ref', name: m[1].trim(), part: 'bonus' });
-        else tokens.push({ t: 'ref', name: inner, part: 'value' });
-        i = end + 1;
-      } else if (/[0-9.]/.test(c)) {
-        let j = i;
-        while (j < str.length && /[0-9.]/.test(str[j])) j++;
-        tokens.push({ t: 'num', v: str.slice(i, j) });
-        i = j;
-      } else if ('+-*/()'.indexOf(c) !== -1) {
-        tokens.push({ t: 'op', v: c });
-        i++;
-      } else {
-        i++;
-      }
-    }
-    return tokens;
-  }
-  function serializeFormula(tokens) {
-    return tokens.map(function (t) {
-      if (t.t === 'ref') return '{' + t.name + (t.part === 'bonus' ? '.бонус' : '') + '}';
-      if (t.t === 'num') return t.v;
-      if (t.t === 'op') return t.v;
-      return '';
-    }).join(' ');
-  }
-  function tokenHtml(t, i, cardNames) {
-    let inner = '';
-    if (t.t === 'num') {
-      inner = '<input type="number" class="tok-num" data-i="' + i + '" value="' + esc(t.v) + '">';
-    } else if (t.t === 'op') {
-      if (t.v === '(' || t.v === ')') {
-        // скобка — просто метка, менять нечего
-        inner = '<span class="tok-paren">' + opSymbol(t.v) + '</span>';
-      } else {
-        const opOpts = ['+', '-', '*', '/'].map(function (o) {
-          return '<option value="' + o + '"' + (o === t.v ? ' selected' : '') + '>' + opSymbol(o) + '</option>';
-        }).join('');
-        inner = '<select class="tok-opsel" data-i="' + i + '">' + opOpts + '</select>';
-      }
-    } else if (t.t === 'ref') {
-      const opts = cardNames.map(function (n) {
-        return '<option value="' + esc(n) + '"' + (n === t.name ? ' selected' : '') + '>' + esc(n) + '</option>';
-      }).join('');
-      inner = '<span class="tok-ref"><select class="tok-refsel" data-i="' + i + '">' + opts + '</select>' +
-        '<button type="button" class="tok-part" data-i="' + i + '" title="' + esc(App.t('valueOf')) + ' / ' + esc(App.t('bonusOf')) + '">' + (t.part === 'bonus' ? esc(App.t('bonusOf')) : esc(App.t('valueOf'))) + '</button></span>';
-    }
-    return '<span class="tok" data-i="' + i + '">' + inner +
-      '<span class="tok-tools">' +
-        '<button type="button" class="tok-mv" data-dir="-1" title="◀">◀</button>' +
-        '<button type="button" class="tok-mv" data-dir="1" title="▶">▶</button>' +
-        '<button type="button" class="tok-del" title="✕">×</button>' +
-      '</span></span>';
-  }
-  function renderFormulaTokens() {
-    const area = document.getElementById('f-tokens');
-    const tokens = editScratch.tokens || [];
+  // ===== Formula editor (v21): свободный ввод + чипы-параметры =====
+  // Поле выражения — contenteditable: операторы и числа печатаются с клавиатуры,
+  // ссылки на карточки — «несъедобные» чипы (имя, знач./бонус, ◀▶, ✕).
+  // Формат хранения card.expression прежний: строка вида {Имя} / {Имя.бонус}.
+  function refNames() {
     const ch = activeChar();
-    const cardNames = ch ? ch.cards.map(function (c) { return c.name; }) : [];
-    area.innerHTML = tokens.map(function (t, i) { return tokenHtml(t, i, cardNames); }).join('');
-    area.querySelectorAll('.tok').forEach(function (wrap) {
-      const i = Number(wrap.dataset.i);
-      const t = tokens[i];
-      const del = wrap.querySelector('.tok-del');
-      if (del) del.addEventListener('click', function () { tokens.splice(i, 1); renderFormulaTokens(); updateFormulaPreview(); });
-      wrap.querySelectorAll('.tok-mv').forEach(function (mv) {
-        mv.addEventListener('click', function () {
-          const j = i + Number(mv.dataset.dir);
-          if (j < 0 || j >= tokens.length) return;
-          const tmp = tokens[i]; tokens[i] = tokens[j]; tokens[j] = tmp;
-          renderFormulaTokens();
+    // v22: валюта/инвентарь/заметки не участвуют в формулах — в пикер попадают
+    // только счётчики, навыки, формулы и заклинания
+    return ch ? ch.cards.filter(function (c) { return FORMULA_REF_TYPES.indexOf(c.type) !== -1; })
+      .map(function (c) { return c.name; }) : [];
+  }
+  // обмен двух узлов местами с сохранением текстовых узлов (операторов) между ними
+  function swapNodes(a, b) {
+    const marker = document.createElement('span');
+    a.parentNode.insertBefore(marker, a);
+    b.parentNode.insertBefore(a, b);
+    marker.parentNode.insertBefore(b, marker);
+    marker.parentNode.removeChild(marker);
+  }
+  // чип-ссылка: кнопка имени (кастомный тёмный дропдаун с поиском) + знач./бонус + ◀▶ + ✕
+  function makeRefChip(name, isBonus) {
+    const chip = document.createElement('span');
+    chip.className = 'tok tok-ref';
+    chip.contentEditable = 'false';       // текстовое поле не лезет внутрь чипа
+    chip.dataset.name = name;
+    chip.dataset.part = isBonus ? 'bonus' : 'value';
+    const nameBtn = document.createElement('button');
+    nameBtn.type = 'button';
+    nameBtn.className = 'tok-name';
+    nameBtn.addEventListener('click', function (e) {
+      e.stopPropagation();
+      if (refMenuAnchor === nameBtn) closeRefMenu();   // повторный клик — просто закрыть
+      else openRefMenu(nameBtn, { chip: chip });
+    });
+    chip.appendChild(nameBtn);
+    const partBtn = document.createElement('button');
+    partBtn.type = 'button';
+    partBtn.className = 'tok-part';
+    partBtn.title = App.t('refPartTip');
+    partBtn.addEventListener('click', function () {
+      chip.dataset.part = chip.dataset.part === 'bonus' ? 'value' : 'bonus';
+      partBtn.textContent = chip.dataset.part === 'bonus' ? App.t('bonusOf') : App.t('valueOf');
+      updateFormulaPreview();
+      updateExprPreviews();
+    });
+    chip.appendChild(partBtn);
+    const tools = document.createElement('span');
+    tools.className = 'tok-tools';
+    [-1, 1].forEach(function (dir) {
+      const mv = document.createElement('button');
+      mv.type = 'button';
+      mv.className = 'tok-mv';
+      mv.dataset.dir = String(dir);
+      mv.textContent = dir < 0 ? '◀' : '▶';
+      mv.title = dir < 0 ? '◀' : '▶';
+      mv.addEventListener('click', function () {
+        const sibling = dir < 0 ? chip.previousElementSibling : chip.nextElementSibling;
+        if (sibling) {
+          swapNodes(chip, sibling);
+          refreshChips(chip.closest('.f-expr'));
           updateFormulaPreview();
-        });
+          updateExprPreviews();
+        }
       });
-      const num = wrap.querySelector('.tok-num');
-      if (num) num.addEventListener('input', function () { t.v = num.value; updateFormulaPreview(); });
-      const opSel = wrap.querySelector('.tok-opsel');
-      if (opSel) opSel.addEventListener('change', function () { t.v = opSel.value; updateFormulaPreview(); });
-      const sel = wrap.querySelector('.tok-refsel');
-      if (sel) sel.addEventListener('change', function () { t.name = sel.value; editScratch.lastRefName = sel.value; updateFormulaPreview(); });
-      const partBtn = wrap.querySelector('.tok-part');
-      if (partBtn) partBtn.addEventListener('click', function () { t.part = (t.part === 'bonus' ? 'value' : 'bonus'); partBtn.textContent = (t.part === 'bonus' ? App.t('bonusOf') : App.t('valueOf')); updateFormulaPreview(); });
+      tools.appendChild(mv);
+    });
+    const del = document.createElement('button');
+    del.type = 'button';
+    del.className = 'tok-del';
+    del.textContent = '×';
+    del.addEventListener('click', function () {
+      const area = chip.closest('.f-expr');
+      chip.parentNode.removeChild(chip);
+      refreshChips(area);
+      updateFormulaPreview();
+      updateExprPreviews();
+    });
+    tools.appendChild(del);
+    chip.appendChild(tools);
+    return chip;
+  }
+  // проставить чипам: имя, признак битой ссылки, доступность стрелок, надпись знач./бонус
+  // (v25: поле может быть не только у формулы — работаем с любым .f-expr)
+  function refreshChips(area) {
+    if (!area) return;
+    const names = refNames();
+    area.querySelectorAll('.tok-ref').forEach(function (chip) {
+      chip.querySelector('.tok-name').textContent = chip.dataset.name;
+      chip.querySelector('.tok-part').textContent = chip.dataset.part === 'bonus' ? App.t('bonusOf') : App.t('valueOf');
+      chip.classList.toggle('broken', names.indexOf(chip.dataset.name) === -1);
+      chip.querySelector('.tok-mv[data-dir="-1"]').disabled = !chip.previousElementSibling;
+      chip.querySelector('.tok-mv[data-dir="1"]').disabled = !chip.nextElementSibling;
     });
   }
-  function insertFormulaToken(kind) {
-    const tokens = editScratch.tokens || [];
-    if (kind === 'num') tokens.push({ t: 'num', v: '1' });
-    else if (kind === 'ref' || kind === 'ref-bonus') {
-      // список параметров убран: подставляем последний выбранный (или первую карточку-другую),
-      // сменить можно прямо в чипе его выпадающим списком
-      const ch = activeChar();
-      const name = (editScratch.lastRefName &&
-        ch.cards.some(function (c) { return c.name === editScratch.lastRefName; }))
-        ? editScratch.lastRefName
-        : (ch.cards.find(function (c) { return c.id !== editScratch.formulaCard.id; }) || ch.cards[0] || {}).name;
-      if (!name) return;
-      tokens.push({ t: 'ref', name: name, part: kind === 'ref-bonus' ? 'bonus' : 'value' });
-    } else {
-      tokens.push({ t: 'op', v: kind });
+  function refreshAllChips() {
+    refreshChips(document.getElementById('f-expr'));
+  }
+  // строка выражения → содержимое поля: {Имя} / {Имя.бонус} → чип, остальное — текст как есть
+  function renderExprInto(area, str) {
+    area.innerHTML = '';
+    const re = /\{([^{}]*)\}/g;
+    let last = 0;
+    let m;
+    while ((m = re.exec(str))) {
+      if (m.index > last) area.appendChild(document.createTextNode(str.slice(last, m.index)));
+      const inner = m[1].trim();
+      const m2 = inner.match(/^(.*?)\s*\.\s*(бонус|bonus)$/i);
+      area.appendChild(makeRefChip(m2 ? m2[1].trim() : inner, !!m2));
+      last = m.index + m[0].length;
     }
-    renderFormulaTokens();
-    updateFormulaPreview();
+    if (last < str.length) area.appendChild(document.createTextNode(str.slice(last)));
+  }
+  // содержимое поля → строка выражения (формат хранения не менялся с v1);
+  // v25: рекурсивно — браузер может завернуть строки в <div>, текст внутри не теряем
+  function serializeExpr(area) {
+    if (!area) return '';
+    function ser(node) {
+      let out = '';
+      node.childNodes.forEach(function (n) {
+        if (n.nodeType === 3) out += n.textContent;
+        else if (n.classList && n.classList.contains('tok-ref')) {
+          out += '{' + n.dataset.name + (n.dataset.part === 'bonus' ? '.бонус' : '') + '}';
+        } else if (n.nodeType === 1) out += ser(n);
+      });
+      return out;
+    }
+    return ser(area);
   }
   function previewValue(card, part) {
     if (part === 'bonus') return cardBonus(card);
     switch (card.type) {
       case 'counter': return num(card.current);
-      case 'skill': return card.value == null ? 0 : num(card.value);
+      case 'skill': return skillValueNum(card);
       case 'spell': return chargesCurrent(card);
       case 'formula': return card._value != null ? card._value : 0;
       default: return 0;
     }
   }
+  // последняя позиция курсора в поле выражения (чтобы вставка чипа из пикера
+  // шла туда, где курсор был, а не в начало поля после фокуса на поиске).
+  // v25: полей несколько (бонус, максимум, значение…) — помним и поле, и диапазон
+  let lastExpr = null;   // { area, range }
+  function trackExprCaret() {
+    const sel = window.getSelection();
+    if (!sel.rangeCount || !sel.anchorNode) return;
+    let n = sel.anchorNode;
+    if (n.nodeType !== 1) n = n.parentNode;
+    const area = n && n.closest ? n.closest('.f-expr') : null;
+    if (area) lastExpr = { area: area, range: sel.getRangeAt(0).cloneRange() };
+  }
+  let exprCaretBound = false;   // selectionchange-слежение за кареткой полей ставится один раз
+  function ensureExprCaretTracking() {
+    if (exprCaretBound) return;
+    exprCaretBound = true;
+    document.addEventListener('selectionchange', trackExprCaret);
+  }
+  // вставка узла в позицию курсора в конкретном поле (курсора нет — в конец)
+  function insertNodeAtCaret(node, area) {
+    if (lastExpr && lastExpr.area === area && area.contains(lastExpr.range.commonAncestorContainer)) {
+      const r = lastExpr.range;
+      r.deleteContents();
+      r.insertNode(node);
+    } else {
+      area.appendChild(node);
+    }
+    // каретка — сразу после вставленного чипа
+    const sel = window.getSelection();
+    const r2 = document.createRange();
+    r2.setStartAfter(node);
+    r2.collapse(true);
+    sel.removeAllRanges();
+    sel.addRange(r2);
+    lastExpr = { area: area, range: r2 };
+    area.focus();
+  }
+
+  // ===== Пикер карточки (замена нативного select: у options на ПК белый фон) =====
+  // Тёмная панель со строкой поиска — единый вид на ПК и мобилке.
+  let refMenuAnchor = null;
+  // anchor — кнопка, к которой прижимается панель; opts.chip — переименовать чип,
+  // opts.area — вставить новый чип в позицию курсора этого поля
+  function openRefMenu(anchor, opts) {
+    closeRefMenu();
+    refMenuAnchor = anchor;
+    // v25.1: саму редактируемую карточку из выборки убираем — ссылка на саму себя
+    // всё равно даёт цикл («Здоровье» в максимуме «Здоровье»)
+    const selfCard = editScratch.editCard || editScratch.formulaCard;
+    const names = refNames().filter(function (n) { return !selfCard || n !== selfCard.name; });
+    const menu = document.createElement('div');
+    menu.className = 'refmenu';
+    menu.id = 'refmenu';
+    const search = document.createElement('input');
+    search.type = 'text';
+    search.className = 'refmenu-search';
+    search.placeholder = App.t('refSearch');
+    menu.appendChild(search);
+    const list = document.createElement('div');
+    list.className = 'refmenu-list';
+    menu.appendChild(list);
+    function renderList(q) {
+      const query = (q || '').toLowerCase();
+      list.innerHTML = '';
+      names.forEach(function (n) {
+        if (query && n.toLowerCase().indexOf(query) === -1) return;
+        const b = document.createElement('button');
+        b.type = 'button';
+        b.textContent = n;
+        if (opts.chip && n === opts.chip.dataset.name) b.classList.add('sel');
+        b.addEventListener('click', function () {
+          if (opts.chip) opts.chip.dataset.name = n;
+          else if (opts.area) insertNodeAtCaret(makeRefChip(n, false), opts.area);
+          closeRefMenu();
+          refreshChips(opts.area);
+          updateFormulaPreview();
+          updateExprPreviews();
+        });
+        list.appendChild(b);
+      });
+      if (!list.children.length) {
+        const empty = document.createElement('div');
+        empty.className = 'refmenu-empty';
+        empty.textContent = App.t('refNotFound');
+        list.appendChild(empty);
+      }
+    }
+    renderList('');
+    search.addEventListener('input', function () { renderList(search.value); });
+    document.body.appendChild(menu);
+    // прижать к анкору: не вылезать за правый край, при нехватке места снизу — раскрыть вверх
+    const r = anchor.getBoundingClientRect();
+    let left = Math.min(r.left, window.innerWidth - menu.offsetWidth - 8);
+    let top = r.bottom + 4;
+    if (top + menu.offsetHeight > window.innerHeight - 8) top = Math.max(8, r.top - menu.offsetHeight - 4);
+    menu.style.left = Math.max(8, left) + 'px';
+    menu.style.top = top + 'px';
+    setTimeout(function () { search.focus(); }, 0);
+    // закрытие: клик/тап мимо (кроме самой панели и её кнопки-анкора) + resize
+    document.addEventListener('pointerdown', onRefMenuDocDown, true);
+    window.addEventListener('resize', closeRefMenu);
+  }
+  function onRefMenuDocDown(e) {
+    const menu = document.getElementById('refmenu');
+    if (menu && !menu.contains(e.target) && !(refMenuAnchor && refMenuAnchor.contains(e.target))) closeRefMenu();
+  }
+  function closeRefMenu() {
+    const menu = document.getElementById('refmenu');
+    if (menu) menu.parentNode.removeChild(menu);
+    document.removeEventListener('pointerdown', onRefMenuDocDown, true);
+    window.removeEventListener('resize', closeRefMenu);
+    refMenuAnchor = null;
+  }
   function updateFormulaPreview() {
     const el = document.getElementById('f-preview');
     if (!el) return;
-    const str = serializeFormula(editScratch.tokens || []).trim();
+    refreshAllChips();
+    const str = serializeExpr(document.getElementById('f-expr')).trim();
     if (!str) { el.innerHTML = '= —'; return; }
     const card = editScratch.formulaCard;
     const ch = activeChar();
@@ -2246,16 +2489,20 @@ window.App = window.App || {};
     }
   }
   function bindFormulaEditor() {
-    const area = document.getElementById('f-tokens');
-    if (area) renderFormulaTokens();
-    const m = document.getElementById('modal');
-    m.querySelectorAll('.f-op').forEach(function (b) {
-      b.addEventListener('click', function () { insertFormulaToken(b.dataset.op); });
-    });
+    const area = document.getElementById('f-expr');
+    if (area) {
+      renderExprInto(area, (editScratch.formulaCard && editScratch.formulaCard.expression) || '');
+      area.addEventListener('input', updateFormulaPreview);
+      lastExpr = null;   // прежний диапазон мог относиться к прошлой карточке
+      ensureExprCaretTracking();
+    }
     const addRef = document.getElementById('f-addref');
-    if (addRef) addRef.addEventListener('click', function () { insertFormulaToken('ref'); });
-    const addBonus = document.getElementById('f-addbonus');
-    if (addBonus) addBonus.addEventListener('click', function () { insertFormulaToken('ref-bonus'); });
+    if (addRef) {
+      addRef.addEventListener('click', function () {
+        if (refMenuAnchor === addRef) closeRefMenu();  // повторный клик — закрыть
+        else openRefMenu(addRef, { area: area });
+      });
+    }
     updateFormulaPreview();
   }
 
@@ -2268,9 +2515,12 @@ window.App = window.App || {};
       charges.linkId = link && link.value ? link.value : null;
       charges.cost = num(readNum('f-chcost')) || 1;
     } else {
-      charges.max = readNumOrNull('f-chmax');
-      // при создании заряды стартуют с максимума (см. правило счётчиков)
-      if (card._new && charges.max != null) charges.current = num(charges.max);
+      // v25: максимум — выражение («{Мана} + 2»); при создании заряды стартуют с него
+      charges.max = exprOrNull(readExpr('f-chmax'));
+      if (card._new && charges.max != null) {
+        const cm = chargesMaxNum(card);
+        charges.current = cm == null ? num(charges.max) : num(cm);
+      }
     }
     return charges;
   }
@@ -2278,25 +2528,29 @@ window.App = window.App || {};
   function applyFields(card) {
     switch (card.type) {
       case 'counter':
-        card.max = readNumOrNull('f-max');
-        // при создании счётчика текущее значение = максимуму (нет максимума — остаётся стартовым)
-        if (card._new && card.max != null) card.current = num(card.max);
+        // v25: максимум — выражение; при создании счётчика текущее = максимуму
+        // (нет максимума — остаётся стартовым)
+        card.max = exprOrNull(readExpr('f-max'));
+        if (card._new && card.max != null) {
+          const mx = counterMaxNum(card);
+          card.current = mx == null ? num(card.max) : num(mx);
+        }
         card.bonus = readBonus();
         card.die = readDie('f-die');
         card.restores = readCheck('f-restores');
         break;
       case 'skill': {
-        // три независимые галочки: Кубик / Значение / Бонус
+        // три независимые галочки: Кубик / Значение / Бонус (значение и бонус — выражения)
         const dCb = document.getElementById('f-usedie');
         card.die = (dCb ? dCb.checked : !!card.die) ? (readDie('f-die') || 20) : null;
         const vCb = document.getElementById('f-usevalue');
-        if (vCb) card.value = vCb.checked ? num(readNum('f-value')) : null;
+        if (vCb) card.value = vCb.checked ? exprOrNull(readExpr('f-value')) : null;
         const bCb = document.getElementById('f-usebonus');
-        if (bCb) card.bonus = bCb.checked ? readText('f-bonus').trim() : '';
+        if (bCb) card.bonus = bCb.checked ? readExpr('f-bonus').trim() : '';
         break;
       }
       case 'formula':
-        card.expression = serializeFormula(editScratch.tokens || []).trim();
+        card.expression = serializeExpr(document.getElementById('f-expr')).trim();
         card.bonus = readBonus();
         card.die = readDie('f-die');
         break;
@@ -2328,6 +2582,7 @@ window.App = window.App || {};
   function openCardEditor(cardId) {
     const card = findCard(cardId);
     if (!card) return;
+    editScratch.editCard = card;   // для живого предпросмотра в полях-выражениях
     let body = '<div class="field"><label>' + esc(App.t('name')) + '</label><input id="f-name" type="text" value="' + esc(card.name) + '" placeholder="' + esc(nameExample(card.type)) + '"></div>';
     body += typeFields(card);
     openModal(typeLabel(card.type), body, [
@@ -2343,11 +2598,21 @@ window.App = window.App || {};
     if (!name) { toast(App.t('uniqueNameError')); return false; }
     if (isNameUsed(name, card.id)) { toast(App.t('uniqueNameError')); return false; }
     const oldName = card.name;
+    // v25: ссылки теперь живут не только в формулах — переименовываем их
+    // во всех полях-выражениях (бонус, максимум, значение, максимум зарядов)
+    const renameExpr = function (v) {
+      if (v == null || typeof v === 'number' || String(v).indexOf('{') === -1) return v;
+      return App.formula.renameRefs(String(v), oldName, name);
+    };
     mutate(function () {
       if (oldName !== name) {
         const ch = activeChar();
         ch.cards.forEach(function (c) {
-          if (c.type === 'formula') c.expression = App.formula.renameRefs(c.expression || '', oldName, name);
+          if (c.type === 'formula') c.expression = renameExpr(c.expression || '');
+          c.bonus = renameExpr(c.bonus);
+          c.max = renameExpr(c.max);
+          c.value = renameExpr(c.value);
+          if (c.charges) c.charges.max = renameExpr(c.charges.max);
         });
       }
       card.name = name;
