@@ -6,9 +6,16 @@ window.App = window.App || {};
   // ===== Constants =====
   const STORAGE_KEY = 'custplay-v1';
   const LEGACY_KEY = 'dnd-tracker-v1';
-  const CARD_TYPES = ['counter', 'skill', 'formula', 'spell', 'currency', 'inventory', 'note'];
+  const CARD_TYPES = ['counter', 'skill', 'spell', 'currency', 'inventory', 'note'];
   // v22: типы, которые можно использовать в формулах — без валюты/инвентаря/заметок
-  const FORMULA_REF_TYPES = ['counter', 'skill', 'formula', 'spell'];
+  const FORMULA_REF_TYPES = ['counter', 'skill', 'spell'];
+  // Свертывание в ярлык (v29, со стенда «текущее свертывание И, З, В»): только типы
+  // с готовой иконкой; иконки в icons/labels/. Счётчик/навык/заклинание — позже.
+  const FOLDABLE_ICONS = { currency: 'кошель', inventory: 'сундук', note: 'книга' };
+  const LABEL_W = 108, LABEL_H = 112;   // размер ярлыка
+  // Иконка «мусорка» для ВСЕХ кнопок «Удалить» (вместо крестика ✕): инлайн-SVG
+  // в currentColor — красится как текст кнопки, как остальные глифы тулз
+  const TRASH_SVG = '<svg class="trash-ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 6h18"/><path d="M8 6V4a1 1 0 0 1 1-1h6a1 1 0 0 1 1 1v2"/><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/><path d="M10 11v6"/><path d="M14 11v6"/></svg>';
   const MIN_W = 220, MIN_H = 110;   // минимальный размер карточки: чтобы влезали кнопки/содержимое
 
   // ===== Helpers =====
@@ -35,7 +42,7 @@ window.App = window.App || {};
     return window.matchMedia('(min-width: 721px)').matches;
   }
   function nameExample(type) {
-    return ({ counter: 'Здоровье', skill: 'Акробатика', formula: 'КБ', spell: 'Огненный шар', currency: 'Деньги', inventory: 'Снаряжение', note: 'Заметка' })[type] || '';
+    return ({ counter: 'Здоровье', skill: 'Акробатика', spell: 'Огненный шар', currency: 'Деньги', inventory: 'Снаряжение', note: 'Заметка' })[type] || '';
   }
 
   // ===== State =====
@@ -100,10 +107,7 @@ window.App = window.App || {};
   let redoStack = [];
   const MAX_UNDO = 15;   // v20d: 15 действий достаточно (каждый снимок = копия всего состояния)
   let editMode = false;
-  let editScratch = { units: null, items: null, formulaCard: null, editCard: null };
-
-  let formulaMemo = {};
-  let formulaVisiting = new Set();
+  let editScratch = { units: null, items: null, editCard: null };
 
   function snapshot() {
     return JSON.parse(JSON.stringify({ characters: state.characters, activeCharacterId: state.activeCharacterId }));
@@ -114,9 +118,9 @@ window.App = window.App || {};
     redoStack = [];
   }
   function commit() {
-    computeFormulas();
     save();
     render();
+    if (layerCardId) refreshLayer();   // слой ярлыка догоняет данные (кнопки −/＋ и т.п.)
   }
   function mutate(fn) {
     pushUndo();
@@ -333,7 +337,7 @@ window.App = window.App || {};
     const canDel = ch.pages.length > 1;
     menu.innerHTML =
       '<button type="button" data-act="rename">✎ ' + esc(App.t('renamePage')) + '</button>' +
-      '<button type="button" data-act="del"' + (canDel ? '' : ' disabled') + '>✕ ' + esc(App.t('deletePage')) + '</button>';
+      '<button type="button" data-act="del"' + (canDel ? '' : ' disabled') + '>' + TRASH_SVG + ' ' + esc(App.t('deletePage')) + '</button>';
     const r = kebab.getBoundingClientRect();
     menu.style.left = Math.round(r.left) + 'px';
     menu.style.top = Math.round(r.bottom + 4) + 'px';
@@ -392,6 +396,16 @@ window.App = window.App || {};
     const ch = activeChar();
     return ch ? ch.cards.find(function (c) { return c.id === cardId; }) : null;
   }
+  // ===== Свертывание в ярлык (И, З, В) =====
+  function foldable(card) { return !!FOLDABLE_ICONS[card.type]; }
+  // Свернутость у ПК и телефона РАЗДЕЛЬНАЯ: на телефоне ярлык — состояние ПО УМОЛЧАНИЮ
+  // (экономит место), на ПК карточка по умолчанию развернута. Поворот экрана не дергает карточки.
+  function isCollapsed(card) {
+    return isDesktop() ? !!card.collapsed : card.collapsedM !== false;
+  }
+  // фактический прямоугольник на холсте (у ярлыка — размер ярлыка): границы, пересечения
+  function effW(c) { return isCollapsed(c) ? LABEL_W : (c.w || 300); }
+  function effH(c) { return isCollapsed(c) ? LABEL_H : (c.h || 150); }
   function findCardByName(name) {
     const ch = activeChar();
     if (!ch) return null;
@@ -410,7 +424,6 @@ window.App = window.App || {};
     switch (type) {
       case 'counter': return { current: 0, max: 0, bonus: '', die: null, restores: false };
       case 'skill': return { value: null, die: 20, bonus: '' };
-      case 'formula': return { expression: '', bonus: '', die: null };
       case 'spell': return { description: '', charges: { mode: 'own', current: 0, max: 0, linkId: null, cost: 1, blockEmpty: false }, die: null, bonus: '', restores: false };
       case 'currency': return {
         units: [
@@ -444,7 +457,6 @@ window.App = window.App || {};
       case 'currency': return { w: 300, h: 170 };
       case 'spell': return { w: 300, h: 175 };       // описание 2 строки + заряды
       case 'skill': return { w: 300, h: 95 };        // шапка с кубиком (значение — опционально, лезет в 95)
-      case 'formula': return { w: 300, h: 95 };      // шапка + значение (выражение переехало в подсказку «!»)
       default: return { w: 300, h: 120 };            // counter: шапка + строка счётчика
     }
   }
@@ -456,7 +468,6 @@ window.App = window.App || {};
     let w = MIN_W, h = MIN_H;
     if (type === 'counter') h = 100;            // шапка + строка счётчика
     if (type === 'skill') h = card.value != null ? 95 : 75;   // шапка (+ строка значения, если есть)
-    if (type === 'formula') h = 95;             // шапка + значение (выражение переехало в подсказку «!»)
     if (type === 'spell') {
       const sk = chargeSkeleton(card.charges ? chargeMaxUnits(card) : null);
       if (sk) {
@@ -503,11 +514,18 @@ window.App = window.App || {};
     ensurePages(ch);
     ch.cards.forEach(function (card) {
       // v8: «Стат» → «Навык»; v15: «Перк» → «Заклинание» (отличие было только в кубике),
-      // у перка мог не быть charges — подставляем собственные
+      // у перка мог не быть charges — подставляем собственные;
+      // v26: «Формула» → «Навык» (тип удалён: у навыка то же поле-выражение «значение»
+      // плюс независимые галочки) — выражение переезжает в значение, кубик/бонус сохраняются
       if (card.type === 'stat') card.type = 'skill';
       if (card.type === 'perk') {
         card.type = 'spell';
         if (!card.charges) card.charges = { mode: 'own', current: 0, max: 0, linkId: null, cost: 1, blockEmpty: false };
+      }
+      if (card.type === 'formula') {
+        card.type = 'skill';
+        card.value = (card.expression && String(card.expression).trim() !== '') ? card.expression : null;
+        delete card.expression;
       }
       if (card.x == null || card.y == null) autoPlace(ch, card);
       const mn = minSize(card);
@@ -555,7 +573,7 @@ window.App = window.App || {};
     return ch;
   }
 
-  // ===== Formulas =====
+  // ===== Values / expressions =====
   function chargesCurrent(card) {
     const ch = card.charges || {};
     if (ch.mode === 'link') {
@@ -607,7 +625,8 @@ window.App = window.App || {};
   }
   // все строковые поля карточки, где могут быть ссылки {Имя} (переименование/удаление)
   function cardExprFields(c) {
-    return [c.expression, c.bonus, c.max, c.value, c.charges && c.charges.max]
+    // поля-выражения всех карточек уже включают c.value; expression удалён вместе с типом «формула»
+    return [c.bonus, c.max, c.value, c.charges && c.charges.max]
       .filter(function (v) { return v != null && typeof v !== 'number' && String(v).indexOf('{') !== -1; })
       .map(String);
   }
@@ -615,45 +634,9 @@ window.App = window.App || {};
     switch (card.type) {
       case 'counter': return num(card.current);
       case 'skill': return skillValueNum(card);
-      case 'formula': return evalFormula(card.id);
       case 'spell': return chargesCurrent(card);
       default: return 0;
     }
-  }
-
-  function evalFormula(cardId) {
-    if (formulaMemo[cardId] !== undefined) return formulaMemo[cardId];
-    const card = findCard(cardId);
-    if (!card || card.type !== 'formula') throw new Error('not a formula');
-    if (formulaVisiting.has(cardId)) { const e = new Error('cycle'); e.cycle = true; throw e; }
-    formulaVisiting.add(cardId);
-    const resolveRef = function (name, part) {
-      const target = findCardByName(name);
-      if (!target) throw new Error(name);
-      return part === 'bonus' ? cardBonus(target) : cardValue(target);
-    };
-    const val = App.formula.evaluate(card.expression || '0', resolveRef);
-    formulaVisiting.delete(cardId);
-    formulaMemo[cardId] = val;
-    return val;
-  }
-
-  function computeFormulas() {
-    formulaMemo = {};
-    formulaVisiting = new Set();
-    const ch = activeChar();
-    if (!ch) return;
-    ch.cards.forEach(function (c) {
-      if (c.type === 'formula') {
-        try {
-          c._value = evalFormula(c.id);
-          c._error = null;
-        } catch (e) {
-          c._error = (e && e.cycle) ? App.t('cycleError') : (App.t('brokenRef') + ': ' + (e.message || ''));
-          c._value = null;
-        }
-      }
-    });
   }
 
   // ===== Currency =====
@@ -938,7 +921,6 @@ window.App = window.App || {};
     if (!ch || !card) return;
     mutate(function () {
       const copy = JSON.parse(JSON.stringify(card));
-      delete copy._value; delete copy._error;
       copy.id = uid();           // новый id копии ОБЯЗАТЕЛЕН: id ищется/удаляется/анимируется по data-id,
                                  // общий id ломает удаление дубля, заряды и Ctrl+Z (баг v17-дублей)
       renewIds([copy], null);    // внутренние id (units/items); linkId НЕ ремапим — цель внешняя
@@ -1008,6 +990,7 @@ window.App = window.App || {};
     state.characters = s.characters;
     state.activeCharacterId = s.activeCharacterId;
     save(); render();
+    if (layerCardId) refreshLayer();   // слой не должен переживать свои данные
   }
   function redo() {
     if (!redoStack.length) return;
@@ -1016,6 +999,7 @@ window.App = window.App || {};
     state.characters = s.characters;
     state.activeCharacterId = s.activeCharacterId;
     save(); render();
+    if (layerCardId) refreshLayer();
   }
 
   // ===== Rendering =====
@@ -1115,28 +1099,41 @@ window.App = window.App || {};
   }
 
   function cardView(card, desktop) {
-    const broken = (card.type === 'formula' && card._error) ? ' broken' : '';
     const sel = (desktop && editMode && selIds.has(card.id)) ? ' selected' : '';
+    const folded = foldable(card) && isCollapsed(card);
     let style = '';
     if (desktop && card.x != null) {
       // при сужении окна карточки визуально поджимаются внутрь, но сохранённые координаты
       // НЕ перезаписываются: расширил окно — карточки восстановили положение
-      const dx = Math.max(0, Math.min(card.x, canvasRight() - card.w));
+      const dx = Math.max(0, Math.min(card.x, canvasRight() - effW(card)));
       const dy = Math.max(0, card.y);
+      // inline w/h — ВСЕГДА (и у ярлыка): разворот без render вернет сохраненный размер,
+      // а класс .collapsed перебивает их через !important
       style += 'left:' + Math.round(dx) + 'px;top:' + Math.round(dy) + 'px;width:' + Math.round(card.w) + 'px;height:' + Math.round(card.h) + 'px;';
     }
-    const resize = (editMode && desktop) ? '<span class="resize-handle" title="↘"></span>' : '';
-    return '<div class="card type-' + card.type + broken + sel + '" data-id="' + card.id + '" style="' + style + '">' + cardHead(card, desktop) + cardBody(card) + resize + '</div>';
+    const resize = (editMode && desktop && !folded) ? '<span class="resize-handle" title="↘"></span>' : '';
+    // язычок и иконка/подпись живут в DOM у ВСЕХ сворачиваемых карточек: видимость
+    // переключает класс .collapsed — сворот без перерисовки сохранит CSS-переход
+    const label = foldable(card) ?
+      '<div class="artifact" aria-hidden="true"><img src="icons/labels/' + esc(FOLDABLE_ICONS[card.type]) + '.png" alt=""></div>' +
+      '<div class="card-title-small">' + esc(card.name) + '</div>' +
+      '<button class="fold-tab" title="' + esc(App.t(folded ? 'unfoldCard' : 'foldCard')) + '" aria-label="' + esc(App.t(folded ? 'unfoldCard' : 'foldCard')) + '"></button>' : '';
+    return '<div class="card type-' + card.type + (folded ? ' collapsed' : '') + sel + '" data-id="' + card.id + '" style="' + style + '">' + cardHead(card, desktop) + cardBody(card) + resize + label + '</div>';
   }
 
-  function cardHead(card, desktop) {
-    const tools = editMode ?
-      '<div class="tools">' +
+  function cardHead(card, desktop, toolsMode) {
+    // toolsMode: не задан — как раньше (тулзы только в правке); true — тулзы всегда
+    // (слой ярлыка); false — тулзы скрыты (в слое они уже есть в шапке ПАНЕЛИ,
+    // дублирующие мёртвые кнопки в копии карточки не нужны)
+    let tools = '';
+    if (toolsMode !== false && (editMode || toolsMode)) {
+      tools = '<div class="tools">' +
         (desktop ? '' : '<button class="card-up" title="↑">▲</button><button class="card-down" title="↓">▼</button>') +
         '<button class="card-edit" title="' + esc(App.t('edit')) + '">✎</button>' +
         '<button class="card-dup" title="' + esc(App.t('duplicate')) + '">⧉</button>' +
-        '<button class="card-del" title="' + esc(App.t('delete')) + '">✕</button>' +
-      '</div>' : '';
+        '<button class="card-del" title="' + esc(App.t('delete')) + '">' + TRASH_SVG + '</button>' +
+      '</div>';
+    }
     const handle = (editMode && desktop) ? '<span class="handle" title="⋮⋮">⋮⋮</span>' : '';
     // вариант F: кубик в шапке + тег бонуса. В режиме правки НЕ показываем (в правке не бросают) —
     // иначе тулзы (✎⧉✕) не влезают на минимальной ширине
@@ -1146,9 +1143,11 @@ window.App = window.App || {};
       roller = '<button class="headroll" data-act="roll" title="' + esc(App.t('roll')) + ' ' + esc(dieLabel(card.die)) + '">' + esc(dieLabel(card.die)) + '</button>' +
         (b ? '<span class="inc">' + (b > 0 ? '+' : '−') + Math.abs(b) + '</span>' : '');
     }
-    // восклицательный знак в кружке у формул: навёл курсор — подсказка с самой формулой (и текущим результатом).
+    // восклицательный знак в кружке: у карточек, чьё значение — выражение (бывшие формулы,
+    // теперь навыки с параметрами): навёл курсор — подсказка с выражением и результатом.
     // Скрываем в режиме правки — дальше тулзы не влезают (как и кубик в шапке)
-    const finfo = (card.type === 'formula' && !editMode) ? '<span class="finf" data-id="' + esc(card.id) + '" title="Формула">!</span>' : '';
+    const finfo = (!editMode && typeof card.value === 'string' && card.value.trim() !== '')
+      ? '<span class="finf" data-id="' + esc(card.id) + '" title="' + esc(App.t('expression')) + '">!</span>' : '';
     // 🔗 у заклинаний с привязанными зарядами: клик — плашка «от какого счётчика зависят заряды»
     const linktag = (!editMode && card.type === 'spell' && card.charges && card.charges.mode === 'link')
       ? '<span class="linktag" title="' + esc(App.t('charges')) + '">🔗</span>' : '';
@@ -1159,7 +1158,6 @@ window.App = window.App || {};
     switch (card.type) {
       case 'counter': return counterBody(card);
       case 'skill': return skillBody(card);
-      case 'formula': return formulaBody(card);
       case 'spell': return spellBody(card);
       case 'currency': return currencyBody(card);
       case 'inventory': return inventoryBody(card);
@@ -1197,14 +1195,6 @@ window.App = window.App || {};
     const bonus = cardBonus(card);
     return '<div class="card-body"><div class="stat-line"><span class="stat-value' + (val < 0 ? ' under' : '') + '">' + fmt(val) + '</span>' +
       (bonus ? '<span class="stat-bonus">(' + (bonus > 0 ? '+' : '') + bonus + ')</span>' : '') + '</div></div>';
-  }
-
-  function formulaBody(card) {
-    let valueHtml;
-    if (card._error) valueHtml = '<div class="err">' + esc(card._error) + '</div>';
-    else valueHtml = '<div class="stat-line"><span class="stat-value">' + fmt(card._value) + '</span></div>';
-    // выражение в карточке больше не показываем — оно в подсказке значка «!» в шапке
-    return '<div class="card-body">' + valueHtml + '</div>';
   }
 
   /* ===== Заряды-фигуры (v17, по мотивам стенда «3 гекса / 24 заряда») =====
@@ -1555,6 +1545,20 @@ window.App = window.App || {};
     if (del) del.addEventListener('click', function () { deleteCard(card.id); });
     if (up) up.addEventListener('click', function () { moveCard(card.id, -1); });
     if (down) down.addEventListener('click', function () { moveCard(card.id, 1); });
+    // Язычок: клик — свернуть/развернуть (единственный способ). Клик по САМОЙ карточке
+    // ничего не сворачивает (как решили).
+    const fold = el.querySelector('.fold-tab');
+    if (fold) fold.addEventListener('click', function (e) { e.stopPropagation(); toggleFold(card.id); });
+    // Ярлык: клик/тап (не по язычку) — второй слой с содержимым, в любом режиме.
+    // card в замыкании мог протухнуть после undo (state пересобирается) — берем свежую
+    if (foldable(card)) {
+      el.addEventListener('click', function (e) {
+        if (e.target.closest('.fold-tab')) return;
+        const cur = findCard(card.id);
+        if (!cur || !isCollapsed(cur)) return;
+        openLabelLayer(card.id);
+      });
+    }
     // Телефон: долгий тап (полсекунды) по карточке в правке — «Перенести на лист…»
     if (editMode && !isDesktop()) {
       let lp = null;
@@ -1716,14 +1720,24 @@ window.App = window.App || {};
 
       const handle = e.target.closest ? e.target.closest('.handle') : null;
       const resize = e.target.closest ? e.target.closest('.resize-handle') : null;
-      if (!handle && !resize) return;   // клик по телу — только подъём (как раньше)
+      // у ярлыка нет ручки (шапка скрыта) — тащим за тело; ресайза у ярлыка нет
+      const collapsedCard = cardEl.classList.contains('collapsed');
+      if (!handle && !resize && !collapsedCard) return;   // клик по телу — только подъём (как раньше)
+      if (resize && collapsedCard) return;
       const card = findCard(cardEl.dataset.id);
       if (!card) return;
       e.preventDefault();
 
-      // двигаем выделенную карточку — едет вся выделенная группа; иначе группа = одна карточка
-      if (!selIds.has(card.id)) setSelection([card.id]);
-      const group = Array.from(selIds).map(findCard).filter(Boolean);
+      // двигаем выделенную карточку — едет вся выделенная группа; иначе группа = одна карточка.
+      // Ярлык: фиолетовое выделение НЕ включаем (решение юзера), НО если ярлык уже
+      // в выделении (рамкой или Ctrl) — тащим всю выделенную группу, как обычную карточку
+      // (иначе «выделил 3 ярлыка, тащу один — едет только он»)
+      let group;
+      if (collapsedCard && !selIds.has(card.id)) group = [card];
+      else {
+        if (!selIds.has(card.id)) setSelection([card.id]);
+        group = Array.from(selIds).map(findCard).filter(Boolean);
+      }
       group.forEach(function (c) { const gEl = cardElOf(c.id); if (gEl) gEl.classList.add('dragging'); });
       const mn = minSize(card);
       dragState = {
@@ -1732,7 +1746,7 @@ window.App = window.App || {};
         moved: false,
         minW: mn.w, minH: mn.h,
         group: group.map(function (c) {
-          return { card: c, el: cardElOf(c.id), ox: c.x || 0, oy: c.y || 0, ow: c.w || 300, oh: c.h || 150 };
+          return { card: c, el: cardElOf(c.id), ox: c.x || 0, oy: c.y || 0, ow: effW(c), oh: effH(c) };
         })
       };
       document.body.style.userSelect = 'none';
@@ -1756,7 +1770,7 @@ window.App = window.App || {};
         // двигаем от «самой левой верхней» карточки группы, чтобы границы соблюдались всей группой
         const minX = Math.min.apply(null, dragState.group.map(function (g) { return g.ox; }));
         const minY = Math.min.apply(null, dragState.group.map(function (g) { return g.oy; }));
-        const boxW = Math.max.apply(null, dragState.group.map(function (g) { return g.ox + g.card.w; })) - minX;
+        const boxW = Math.max.apply(null, dragState.group.map(function (g) { return g.ox + effW(g.card); })) - minX;
         let ldx = snap(minX + dx) - minX;   // примагничивание к сетке
         let ldy = snap(minY + dy) - minY;
         ldx = Math.max(-minX, Math.min(ldx, canvasRight() - (minX + boxW)));   // левая/правая границы
@@ -1804,9 +1818,9 @@ window.App = window.App || {};
           if (!g.el) return;
           const nx = parseFloat(g.el.style.left), ny = parseFloat(g.el.style.top);
           place.push({
-            x: Number.isNaN(nx) ? (g.card.x || 0) : Math.max(0, Math.min(snap(Math.round(nx)), canvasRight() - g.card.w)),
+            x: Number.isNaN(nx) ? (g.card.x || 0) : Math.max(0, Math.min(snap(Math.round(nx)), canvasRight() - effW(g.card))),
             y: Number.isNaN(ny) ? (g.card.y || 0) : Math.max(0, snap(Math.round(ny))),
-            w: g.card.w || 300, h: g.card.h || 150
+            w: effW(g.card), h: effH(g.card)
           });
         });
       } else {
@@ -1824,7 +1838,7 @@ window.App = window.App || {};
       // 2) пересечение с любой другой карточкой страницы — откат и подсказка
       const hit = place.some(function (r) {
         return others.some(function (c) {
-          const cx = c.x || 0, cy = c.y || 0, cw = c.w || 300, chh = c.h || 150;
+          const cx = c.x || 0, cy = c.y || 0, cw = effW(c), chh = effH(c);
           return r.x < cx + cw && cx < r.x + r.w && r.y < cy + chh && cy < r.y + r.h;
         });
       });
@@ -1895,6 +1909,216 @@ window.App = window.App || {};
       [{ label: App.t('close'), cls: 'primary' }]);
   }
 
+  // ===== Второй слой ярлыка (свернутые И, З, В) =====
+  // Креста НЕТ: закрытие кликом/тапом мимо панели или Esc (решение юзера).
+  // Валюта/инвентарь — живая копия карточки (настоящие cardHead/cardBody): кнопки −/＋
+  // работают, тулзы ✎⧉✕ в шапке активны В ЛЮБОМ режиме (и на телефоне).
+  // Заметка — большое окно текста, правка доступна сразу в любом режиме.
+  let layerCardId = null;
+
+  function openLabelLayer(cardId) {
+    const card = findCard(cardId);
+    if (!card || !foldable(card) || !isCollapsed(card)) return;
+    const ov = document.getElementById('labelLayer');
+    layerCardId = cardId;
+    ov.innerHTML = '';
+    if (card.type === 'note') {
+      // Заметка — отдельная панель (шапка + большое окно текста); вариант юзера, не трогаем
+      const panel = document.createElement('div');
+      panel.className = 'layer-panel layer-note-panel';
+      panel.appendChild(buildLayerHead(card));
+      const ta = document.createElement('textarea');
+      ta.className = 'layer-note';
+      ta.value = card.text || '';
+      panel.appendChild(ta);
+      ov.appendChild(panel);
+    } else {
+      // Валюта/инвентарь — ТОЧНАЯ копия развернутой карточки, без доп рамок:
+      // единственное отличие — активные кнопки правки (✎⧉✕ + ресайз) в шапке
+      ov.appendChild(buildLayerCard(card));
+    }
+    ov.classList.remove('hidden');
+  }
+
+  // Тулзы слоя, активные В ЛЮБОМ режиме (и на телефоне). Редактор — ТРЕТИЙ слой:
+  // слой НЕ закрываем, модалка открывается поверх; после сохранения commit →
+  // refreshLayer покажет изменения прямо в открытом слое
+  function wireLayerTools(head, card) {
+    head.querySelector('.card-edit').addEventListener('click', function () {
+      const ov = document.getElementById('labelLayer');
+      const ta = ov.querySelector('.layer-note');
+      if (ta) {   // заметка: несохранённый текст пишем ДО редактора, иначе он покажет старое
+        const cur = findCard(card.id);
+        const txt = ta.value;
+        if (cur && (cur.text || '') !== txt) mutate(function () { cur.text = txt; });
+      }
+      openCardEditor(card.id);
+    });
+    // дубль: слой закрываем — иначе новая карточка появится ПОД затемнением
+    // и юзер её не увидит; удаление не закрываем: после подтверждения
+    // refreshLayer сам закроет слой (карточки больше нет), при отмене слой остаётся
+    head.querySelector('.card-dup').addEventListener('click', function () { closeLabelLayer(); duplicateCard(card.id); });
+    head.querySelector('.card-del').addEventListener('click', function () { deleteCard(card.id); });
+  }
+
+  function buildLayerHead(card) {
+    const head = document.createElement('div');
+    head.className = 'layer-head';
+    head.innerHTML =
+      '<span class="card-name">' + esc(card.name) + '</span>' +
+      '<div class="tools">' +
+        '<button class="card-edit" title="' + esc(App.t('edit')) + '">✎</button>' +
+        '<button class="card-dup" title="' + esc(App.t('duplicate')) + '">⧉</button>' +
+        '<button class="card-del" title="' + esc(App.t('delete')) + '">' + TRASH_SVG + '</button>' +
+      '</div>';
+    wireLayerTools(head, card);
+    return head;
+  }
+
+  // Копия карточки в слое. data-id НЕ ставим: глобальные помощники ищут по
+  // '.card[data-id]' и нашли бы карточку холста. Кнопки тела — handleAction по card.id.
+  function buildLayerCard(card) {
+    const el = document.createElement('div');
+    el.className = 'card type-' + card.type + ' layer-card';
+    const desktop = isDesktop();
+    const mn = minSize(card);
+    if (desktop) {
+      el.style.width = Math.max(mn.w, card.w || 300) + 'px';
+      el.style.height = Math.max(mn.h, card.h || 150) + 'px';
+    }
+    const head = document.createElement('div');
+    head.className = 'card-head';
+    head.innerHTML =
+      '<span class="card-name">' + esc(card.name) + '</span>' +
+      '<div class="tools">' +
+        '<button class="card-edit" title="' + esc(App.t('edit')) + '">✎</button>' +
+        '<button class="card-dup" title="' + esc(App.t('duplicate')) + '">⧉</button>' +
+        '<button class="card-del" title="' + esc(App.t('delete')) + '">' + TRASH_SVG + '</button>' +
+      '</div>';
+    wireLayerTools(head, card);
+    el.appendChild(head);
+    // cardBody уже возвращает обёртку .card-body — вставляем как есть
+    const body = document.createElement('div');
+    body.innerHTML = cardBody(card);
+    while (body.firstChild) el.appendChild(body.firstChild);
+    el.querySelectorAll('[data-act]').forEach(function (btn) {
+      btn.addEventListener('click', function (e) { handleAction(card.id, btn.dataset, e); });
+    });
+    // описания предметов инвентаря: клик — окно полного текста ПОВЕРХ слоя (как редактор)
+    el.querySelectorAll('.item-row.has-desc').forEach(function (row) {
+      const it = (card.items || []).find(function (x) { return x.id === row.dataset.item; });
+      if (!it || !(it.description || '').trim()) return;
+      const descEl = row.querySelector('.idesc');
+      if (!descEl) return;
+      descEl.classList.add('readable');
+      descEl.addEventListener('click', function (e) {
+        e.stopPropagation();
+        openTextModal(it.name, it.description);
+      });
+    });
+    // ресайз — активная кнопка правки: уголок копии меняет размер НАСТОЯЩЕЙ карточки
+    if (desktop) {
+      const rh = document.createElement('span');
+      rh.className = 'resize-handle';
+      rh.title = '↘';
+      rh.addEventListener('pointerdown', function (e) { startLayerResize(e, card, el); });
+      el.appendChild(rh);
+    }
+    return el;
+  }
+
+  // Ресайз из слоя: тянем уголок — размер пишется в карточку ПО ОТПУСКАНИИ
+  // (один pushUndo на всё действие, как у ресайза на холсте; во время тяки меняем только стиль)
+  function startLayerResize(e, card, el) {
+    e.preventDefault();
+    e.stopPropagation();
+    const startX = e.clientX, startY = e.clientY;
+    const ow = card.w || 300, oh = card.h || 150;
+    const mn = minSize(card);
+    let nw = ow, nh = oh;
+    document.body.style.userSelect = 'none';
+    const move = function (ev) {
+      nw = Math.max(mn.w, Math.min(snap(Math.round(ow + ev.clientX - startX)), Math.max(mn.w, canvasRight() - (card.x || 0))));
+      nh = Math.max(mn.h, snap(Math.round(oh + ev.clientY - startY)));
+      el.style.width = nw + 'px';
+      el.style.height = nh + 'px';
+    };
+    const up = function () {
+      window.removeEventListener('pointermove', move);
+      window.removeEventListener('pointerup', up);
+      document.body.style.userSelect = '';
+      if (nw === ow && nh === oh) return;
+      const c = findCard(card.id);
+      if (!c) return;
+      pushUndo();
+      c.w = nw;
+      c.h = nh;
+      commit();
+    };
+    window.addEventListener('pointermove', move);
+    window.addEventListener('pointerup', up);
+  }
+
+  // После любого mutate (commit) слой догоняет данные — холст и слой синхронны
+  function refreshLayer() {
+    if (!layerCardId) return;
+    const card = findCard(layerCardId);
+    if (!card || !foldable(card) || !isCollapsed(card)) { closeLabelLayer(); return; }
+    const ov = document.getElementById('labelLayer');
+    // заметка: текст в окне слоя может быть ещё не сохранён — тело не трогаем,
+    // но имя после редактора обновляем
+    const ta = ov.querySelector('.layer-note');
+    if (ta) {
+      const nm = ov.querySelector('.layer-head .card-name');
+      if (nm) nm.textContent = card.name;
+      return;
+    }
+    const old = ov.querySelector('.layer-card');
+    if (old) old.replaceWith(buildLayerCard(card));
+    else closeLabelLayer();
+  }
+
+  function closeLabelLayer() {
+    const ov = document.getElementById('labelLayer');
+    if (ov.classList.contains('hidden')) return;
+    // заметка: несохранённый правки текст пишем при закрытии (undo/redo работают)
+    const ta = ov.querySelector('.layer-note');
+    if (ta && layerCardId) {
+      const card = findCard(layerCardId);
+      const txt = ta.value;
+      if (card && (card.text || '') !== txt) mutate(function () { card.text = txt; });
+    }
+    layerCardId = null;
+    ov.classList.add('hidden');
+    ov.innerHTML = '';
+  }
+
+  // Сворачивание/разворот — ТОЛЬКО язычок. Состояние пишем через pushUndo+save
+  // (Ctrl+Z работает), но render() не зовём: класс переключается на живом узле,
+  // CSS-переход сжатия/разворота отыгрывает. Любая следующая перерисовка построит
+  // карточку из данных как надо.
+  function toggleFold(cardId) {
+    const card = findCard(cardId);
+    if (!card || !foldable(card)) return;
+    const el = cardElOf(cardId);
+    pushUndo();
+    if (isDesktop()) card.collapsed = !isCollapsed(card);
+    else card.collapsedM = !isCollapsed(card);
+    save();
+    if (el) {
+      const folded = isCollapsed(card);
+      // .folding — переход только на время анимации (ресайз за уголок не страдает)
+      el.classList.add('folding');
+      setTimeout(function () { el.classList.remove('folding'); }, 380);
+      el.classList.toggle('collapsed', folded);
+      const tab = el.querySelector('.fold-tab');
+      if (tab) {
+        tab.title = App.t(folded ? 'unfoldCard' : 'foldCard');
+        tab.setAttribute('aria-label', tab.title);
+      }
+    }
+  }
+
   // ===== Form helpers =====
   function readNum(id) { const el = document.getElementById(id); return el ? el.value : ''; }
   function readDie(id) { const el = document.getElementById(id); const v = el ? el.value : ''; return v === '' ? null : Number(v); }
@@ -1925,8 +2149,7 @@ window.App = window.App || {};
     const area = document.getElementById(idPrefix + '-expr');
     return area ? serializeExpr(area) : '';
   }
-  // живой предпросмотр «= N» под каждым полем-выражением (кроме самой формулы —
-  // у неё свой updateFormulaPreview со своим циклом-чеком)
+  // живой предпросмотр «= N» под каждым полем-выражением
   function updateExprPreviews() {
     document.querySelectorAll('.f-expr').forEach(function (area) {
       if (area.id === 'f-expr') return;
@@ -1935,7 +2158,7 @@ window.App = window.App || {};
       // заодно дорисовываем чипы (имя, знач./бонус): при повторном открытии
       // редактора они отрисовываются из data-expr без единого input-события
       refreshChips(area);
-      const card = editScratch.editCard || editScratch.formulaCard;
+      const card = editScratch.editCard;
       const str = serializeExpr(area).trim();
       if (!str) { prev.innerHTML = '= —'; return; }
       try {
@@ -2017,7 +2240,6 @@ window.App = window.App || {};
       case 'skill':
         // три независимые галочки: Кубик / Значение / Бонус — каждая сама за себя
         return dieToggleFields(card.die) + valueToggleFields(card.value) + bonusToggleFields(card.bonus);
-      case 'formula': return formulaFields(card);
       case 'spell': return spellFields(card);
       case 'currency': return currencyFields(card);
       case 'inventory': return inventoryFields(card);
@@ -2046,20 +2268,6 @@ window.App = window.App || {};
     html += '<div class="field check" id="f-chblockwrap"><input id="f-chblock" type="checkbox"' + (ch.blockEmpty ? ' checked' : '') + '><label for="f-chblock">' + esc(App.t('blockEmpty')) + '</label></div>';
     if (showRestores) html += checkField('f-restores', App.t('restores'), !!card.restores);
     return html;
-  }
-
-  function formulaFields(card) {
-    editScratch.formulaCard = card;
-    return '<div class="field"><label>' + esc(App.t('expression')) + '</label>' +
-      '<div class="f-expr" id="f-expr" contenteditable="true" spellcheck="false"></div>' +
-      '<div class="f-buttons">' +
-        '<button type="button" class="small" id="f-addref">+ ' + esc(App.t('addParam')) + '</button>' +
-      '</div>' +
-      '<div class="f-preview" id="f-preview">= —</div>' +
-      '<div class="formula-help">' + esc(App.t('formulaTip')) + '</div>' +
-      '</div>' +
-      dieField('f-die', card.die) +
-      '<div id="f-diegate">' + bonusToggleFields(card.bonus) + '</div>';
   }
 
   function spellFields(card) {
@@ -2208,7 +2416,6 @@ window.App = window.App || {};
   function postInitEditor(card) {
     if (card.type === 'currency') bindCurrencyEditor();
     if (card.type === 'inventory') bindInventoryEditor();
-    if (card.type === 'formula') bindFormulaEditor();
     if (card.type === 'spell') bindChargesToggle();
     bindExprFields();   // v25: поля-выражения (максимум/бонус/значение) — чипы-параметры
     bindBonusToggle();
@@ -2217,14 +2424,14 @@ window.App = window.App || {};
     bindDieGate();
   }
 
-  // ===== Formula editor (v21): свободный ввод + чипы-параметры =====
+  // ===== Чипы-параметры (v21, из редактора формул; с v25 — общий механизм полей-выражений) =====
   // Поле выражения — contenteditable: операторы и числа печатаются с клавиатуры,
   // ссылки на карточки — «несъедобные» чипы (имя, знач./бонус, ◀▶, ✕).
-  // Формат хранения card.expression прежний: строка вида {Имя} / {Имя.бонус}.
+  // Хранение в поле — строка вида «2 + {Имя}» / «{Имя.бонус}».
   function refNames() {
     const ch = activeChar();
     // v22: валюта/инвентарь/заметки не участвуют в формулах — в пикер попадают
-    // только счётчики, навыки, формулы и заклинания
+    // только счётчики, навыки и заклинания (v26: формул-карточек больше нет)
     return ch ? ch.cards.filter(function (c) { return FORMULA_REF_TYPES.indexOf(c.type) !== -1; })
       .map(function (c) { return c.name; }) : [];
   }
@@ -2259,7 +2466,6 @@ window.App = window.App || {};
     partBtn.addEventListener('click', function () {
       chip.dataset.part = chip.dataset.part === 'bonus' ? 'value' : 'bonus';
       partBtn.textContent = chip.dataset.part === 'bonus' ? App.t('bonusOf') : App.t('valueOf');
-      updateFormulaPreview();
       updateExprPreviews();
     });
     chip.appendChild(partBtn);
@@ -2291,7 +2497,6 @@ window.App = window.App || {};
       const area = chip.closest('.f-expr');
       chip.parentNode.removeChild(chip);
       refreshChips(area);
-      updateFormulaPreview();
       updateExprPreviews();
     });
     tools.appendChild(del);
@@ -2351,7 +2556,6 @@ window.App = window.App || {};
       case 'counter': return num(card.current);
       case 'skill': return skillValueNum(card);
       case 'spell': return chargesCurrent(card);
-      case 'formula': return card._value != null ? card._value : 0;
       default: return 0;
     }
   }
@@ -2395,6 +2599,7 @@ window.App = window.App || {};
 
   // ===== Пикер карточки (замена нативного select: у options на ПК белый фон) =====
   // Тёмная панель со строкой поиска — единый вид на ПК и мобилке.
+  // v26: раньше пикер жил в редакторе формул, с v25 обслуживает поля-выражения всех карточек.
   let refMenuAnchor = null;
   // Позиционирование панели у анкора: не вылезать за правый край, при нехватке
   // места снизу — раскрыть вверх, в любом случае целиком в видимой области.
@@ -2421,7 +2626,7 @@ window.App = window.App || {};
     refMenuAnchor = anchor;
     // v25.1: саму редактируемую карточку из выборки убираем — ссылка на саму себя
     // всё равно даёт цикл («Здоровье» в максимуме «Здоровье»)
-    const selfCard = editScratch.editCard || editScratch.formulaCard;
+    const selfCard = editScratch.editCard;
     const names = refNames().filter(function (n) { return !selfCard || n !== selfCard.name; });
     const menu = document.createElement('div');
     menu.className = 'refmenu';
@@ -2448,7 +2653,6 @@ window.App = window.App || {};
           else if (opts.area) insertNodeAtCaret(makeRefChip(n, false), opts.area);
           closeRefMenu();
           refreshChips(opts.area);
-          updateFormulaPreview();
           updateExprPreviews();
         });
         list.appendChild(b);
@@ -2484,44 +2688,6 @@ window.App = window.App || {};
     window.removeEventListener('resize', placeRefMenu);
     refMenuAnchor = null;
   }
-  function updateFormulaPreview() {
-    const el = document.getElementById('f-preview');
-    if (!el) return;
-    refreshAllChips();
-    const str = serializeExpr(document.getElementById('f-expr')).trim();
-    if (!str) { el.innerHTML = '= —'; return; }
-    const card = editScratch.formulaCard;
-    const ch = activeChar();
-    try {
-      const val = App.formula.evaluate(str, function (name, part) {
-        const target = ch ? ch.cards.find(function (c) { return c.name === name; }) : null;
-        if (!target) throw new Error(name);
-        if (card && target.id === card.id) throw new Error('cycle');
-        return previewValue(target, part);
-      });
-      el.innerHTML = '= ' + fmt(val);
-    } catch (e) {
-      el.innerHTML = '= <span class="err">' + esc(App.t('brokenRef')) + '</span>';
-    }
-  }
-  function bindFormulaEditor() {
-    const area = document.getElementById('f-expr');
-    if (area) {
-      renderExprInto(area, (editScratch.formulaCard && editScratch.formulaCard.expression) || '');
-      area.addEventListener('input', updateFormulaPreview);
-      lastExpr = null;   // прежний диапазон мог относиться к прошлой карточке
-      ensureExprCaretTracking();
-    }
-    const addRef = document.getElementById('f-addref');
-    if (addRef) {
-      addRef.addEventListener('click', function () {
-        if (refMenuAnchor === addRef) closeRefMenu();  // повторный клик — закрыть
-        else openRefMenu(addRef, { area: area });
-      });
-    }
-    updateFormulaPreview();
-  }
-
   function readCharges(card) {
     const charges = card.charges || { mode: 'own' };
     charges.mode = document.getElementById('f-chmode').value;
@@ -2565,11 +2731,6 @@ window.App = window.App || {};
         if (bCb) card.bonus = bCb.checked ? readExpr('f-bonus').trim() : '';
         break;
       }
-      case 'formula':
-        card.expression = serializeExpr(document.getElementById('f-expr')).trim();
-        card.bonus = readBonus();
-        card.die = readDie('f-die');
-        break;
       case 'spell':
         card.description = readText('f-desc');
         card.charges = readCharges(card);
@@ -2624,7 +2785,6 @@ window.App = window.App || {};
       if (oldName !== name) {
         const ch = activeChar();
         ch.cards.forEach(function (c) {
-          if (c.type === 'formula') c.expression = renameExpr(c.expression || '');
           c.bonus = renameExpr(c.bonus);
           c.max = renameExpr(c.max);
           c.value = renameExpr(c.value);
@@ -2798,9 +2958,10 @@ window.App = window.App || {};
   }
 
   // ===== Export / import =====
+  // временные поля (_new) не сохраняются в файл
   function stripTransient(ch) {
     const copy = JSON.parse(JSON.stringify(ch));
-    copy.cards.forEach(function (c) { delete c._value; delete c._error; delete c._new; });
+    copy.cards.forEach(function (c) { delete c._new; });
     return copy;
   }
   function safeName(s) { return s.replace(/[\\/:*?"<>|]+/g, '_').trim() || 'character'; }
@@ -2866,8 +3027,9 @@ window.App = window.App || {};
     toast(App.t('exported'));
   }
 
-  // проверка и нормализация импортируемого персонажа: старые типы (stat → навык, perk → заклинание),
-  // незнакомые карточки отбрасываем, битые поля подставляем. Кидает ошибку для кривого файла.
+  // проверка и нормализация импортируемого персонажа: старые типы (stat → навык,
+  // perk → заклинание, formula → навык), незнакомые карточки отбрасываем, битые поля подставляем.
+  // Кидает ошибку для кривого файла.
   function normalizeImport(src) {
     if (!src || typeof src !== 'object' || !Array.isArray(src.cards)) throw new Error('bad');
     const ch = { id: uid(), name: String(src.name || App.t('newCharName')), pages: [], cards: [] };
@@ -2880,10 +3042,15 @@ window.App = window.App || {};
     }
     src.cards.forEach(function (card) {
       if (!card || typeof card !== 'object') return;
-      let type = card.type === 'stat' ? 'skill' : card.type === 'perk' ? 'spell' : card.type;
+      let type = card.type === 'stat' ? 'skill' : card.type === 'perk' ? 'spell' : card.type === 'formula' ? 'skill' : card.type;
       if (CARD_TYPES.indexOf(type) === -1) return;   // незнакомый тип — не импортируем
       const c = JSON.parse(JSON.stringify(card));
       c.type = type;
+      // v26: «Формула» → «Навык» — выражение переезжает в значение
+      if (card.type === 'formula') {
+        c.value = (c.expression && String(c.expression).trim() !== '') ? c.expression : null;
+        delete c.expression;
+      }
       c.name = String(c.name || App.t('newCharName'));
       if (!c.id || typeof c.id !== 'string') c.id = uid();
       if (c.charges && typeof c.charges === 'object') {
@@ -3076,7 +3243,8 @@ window.App = window.App || {};
     toastTimer = setTimeout(function () { t.classList.add('hidden'); }, 2200);
   }
 
-  // всплывающая подсказка значка «(!)» у формул и «🔗» у привязанных заклинаний:
+  // всплывающая подсказка значка «(!)» у навыков с выражением в значении (бывшие формулы)
+  // и «🔗» у привязанных заклинаний:
   // клик — показать плашку ВНУТРИ карточки на уровне шапки, клик в другом месте — спрятать
   function initFormulaInfo() {
     const closeAll = function () {
@@ -3097,7 +3265,10 @@ window.App = window.App || {};
       pop.id = 'finfPop';
       pop.className = 'finf-pop';
       if (finf) {
-        pop.textContent = (card.expression || '—') + (card._error ? '' : ' = ' + fmt(card._value));
+        // v26: «(!)» теперь у навыков со строковым выражением в значении (бывшие формулы)
+        let val = null;
+        try { val = skillValueNum(card); } catch (e) { val = null; }
+        pop.textContent = card.value + (val == null ? '' : ' = ' + fmt(val));
       } else if (linktag && card.charges && card.charges.mode === 'link') {
         const tgt = findCard(card.charges.linkId);
         const name = tgt ? tgt.name : App.t('brokenRef');
@@ -3116,16 +3287,21 @@ window.App = window.App || {};
       save();
     }
     state.characters.forEach(layoutCharacter);
-    computeFormulas();   // считаем формулы и при старте: раньше до первого изменения показывали «—»
     initFreePlacement();
     initFormulaInfo();
     addUndoKeys();
     render();
     document.getElementById('fab').addEventListener('click', openAddMenu);
     document.getElementById('backdrop').addEventListener('click', closeModal);
+    // слой ярлыка: клик/тап мимо панели закрывает (креста нет — решение юзера)
+    const labelLayer = document.getElementById('labelLayer');
+    labelLayer.addEventListener('click', function (e) { if (e.target === labelLayer) closeLabelLayer(); });
     document.addEventListener('keydown', function (e) {
       if (e.key === 'Escape') {
+        // редактор — ТРЕТИЙ слой ПОВЕРХ слоя ярлыка: Esc сначала закрывает модалку,
+        // иначе открытие редактора из слоя «съедало» бы слой первым Esc
         if (!document.getElementById('modal').classList.contains('hidden')) closeModal();
+        else if (!document.getElementById('labelLayer').classList.contains('hidden')) closeLabelLayer();
         else document.getElementById('diceWidget').classList.add('hidden');
       }
     });

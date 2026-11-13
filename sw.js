@@ -2,7 +2,7 @@
    Стратегия: сеть-в-первую-очередь (обновления всегда свежие при интернете),
    при отсутствии сети — из кэша (офлайн-режим PWA).
    При выходе новой версии меняй CACHE_NAME (например, custplay-v2), кэш перезапишется. */
-const CACHE_NAME = 'custplay-v27';
+const CACHE_NAME = 'custplay-v31';
 const ASSETS = [
   './',
   './index.html',
@@ -12,6 +12,9 @@ const ASSETS = [
   './icons/icon-512.png',
   './icons/icon-180.png',
   './icons/icon-512-maskable.png',
+  './icons/labels/сундук.png',
+  './icons/labels/кошель.png',
+  './icons/labels/книга.png',
   './js/i18n.js',
   './js/dice.js',
   './js/formula.js',

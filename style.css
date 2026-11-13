@@ -182,6 +182,10 @@ html, body {
 .ctxmenu button:hover { background: var(--panel2); }
 .ctxmenu button:disabled { opacity: .4; cursor: default; }
 .ctxmenu button:disabled:hover { background: transparent; }
+/* Иконка «мусорка» (TRASH_SVG) в кнопках «Удалить»: в тулзах карточек 12px,
+   в контекстном меню («Удалить страницу») чуть крупнее и на базовой линии текста */
+.trash-ic { width: 12px; height: 12px; display: inline-block; vertical-align: -2px; }
+.ctxmenu .trash-ic { width: 14px; height: 14px; vertical-align: -3px; }
 /* пикер карточки для чипа-ссылки в формуле: тёмная панель + поиск (ПК и мобилка) */
 .refmenu {
   position: fixed;
@@ -1084,8 +1088,243 @@ button.active { border-color: var(--accent); color: var(--accent); }
 /* ---------- Centered card content ---------- */
 .card.type-counter .card-body,
 .card.type-skill .card-body,
-.card.type-formula .card-body,
 .card.type-spell .card-body {
   align-items: center;
   text-align: center;
+}
+
+/* ==========================================================
+   Свертывание в ярлык (И, З, В) — перенос со стенда
+   «текущее свертывание И, З, В». Язычок — зеркальная копия
+   ресайз-ручки в левом нижнем углу, чуть желтее (#6f6a50).
+   Виден и активен ВСЕГДА (игра и правка); клик по язычку —
+   единственный способ свернуть/развернуть.
+   ========================================================== */
+.fold-tab {
+  position: absolute;
+  left: 0;
+  bottom: 0;
+  width: 22px;
+  height: 22px;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  border-style: solid;
+  border-width: 0 0 22px 22px;
+  border-color: transparent transparent #6f6a50 transparent;
+  transform: scaleX(-1);
+  cursor: pointer;
+  z-index: 5;
+  opacity: .9;
+}
+/* на тач-экране язычок крупнее — 22px мелковато для пальца */
+@media (max-width: 720px) {
+  .fold-tab { width: 26px; height: 26px; border-width: 0 0 26px 26px; }
+}
+/* Иконка типа + подпись: живут в DOM всегда, видны только у ярлыка */
+.artifact {
+  position: absolute;
+  left: 50%;
+  top: 14px;
+  transform: translateX(-50%);
+  width: 44px;
+  height: 44px;
+  display: grid;
+  place-items: center;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity .2s ease;
+}
+.artifact img {
+  width: 40px;
+  height: 40px;
+  object-fit: contain;
+  filter: drop-shadow(0 2px 3px rgba(8, 8, 14, .55));
+}
+.card-title-small { display: none; }
+/* Ярлык: карточка сжалась НА МЕСТЕ до 108×112; нижний левый угол срезан
+   clip-path по линии сгиба — «угол карточки = загнутый язычок», поэтому
+   рамка/тень старого скругленного угла там не рисуются вовсе.
+   Тень через drop-shadow: box-shadow обрезался бы clip-path. */
+.card.collapsed {
+  width: 108px !important;    /* !important: перебивает inline w/h — сворот/разворот без render */
+  height: 112px !important;
+  padding: 0;
+  overflow: hidden;
+  cursor: pointer;
+  clip-path: polygon(0 0, 100% 0, 100% 100%, 22px 100%, 0 calc(100% - 22px));
+  box-shadow: none;
+  filter: drop-shadow(0 5px 10px rgba(9, 9, 16, .28));
+  transition: background .22s, border-color .22s, transform .22s, filter .22s;
+}
+.card.collapsed:hover {
+  border-color: #716044;
+  transform: translateY(-2px);
+  filter: drop-shadow(0 8px 13px rgba(9, 9, 16, .36));
+}
+/* Переход сворота/разворота включается ТОЛЬКО на время анимации (класс .folding
+   в toggleFold): постоянный transition width/height на карточке сломал бы
+   плавный ресайз за уголок (стили менялись бы каждый кадр перетаскивания) */
+.card.folding { transition: width .32s ease, height .32s ease, background .22s, border-color .22s, transform .22s, filter .22s; }
+.card.collapsed .card-head,
+.card.collapsed .card-body,
+.card.collapsed .resize-handle { display: none !important; }
+.card.collapsed .artifact { opacity: .94; }
+.card.collapsed:hover .artifact { opacity: 1; }
+.card.collapsed .card-title-small {
+  display: flex;
+  position: absolute;
+  left: 7px;
+  right: 7px;
+  bottom: 26px;
+  min-height: 24px;
+  align-items: center;
+  justify-content: center;
+  text-align: center;
+  font-size: 10.5px;
+  line-height: 1.15;
+  color: var(--muted);
+  overflow-wrap: anywhere;
+  pointer-events: none;
+}
+/* у ярлыка язычок «загнут»: треугольник по другую сторону диагонали */
+.card.collapsed .fold-tab {
+  border-style: none;
+  border-width: 0;
+  transform: none;
+  background: #6f6a50;
+  clip-path: polygon(0 0, 100% 0, 100% 100%);
+  opacity: 1;
+  left: -1px;
+  bottom: -1px;
+}
+/* в колоночном режиме ярлык не растягивается на всю ширину:
+   .card.collapsed выше перебивает и @media .card { width: 100% } */
+
+/* ---------- Второй слой ярлыка ---------- */
+/* Креста НЕТ: закрытие кликом/тапом мимо панели или Esc (решение юзера) */
+.label-layer {
+  position: fixed;
+  inset: 0;
+  z-index: 95;   /* карточки поднимаются максимум до 99 внутри .canvas (z 0); модалка 100/101 */
+  background: rgba(0, 0, 0, .5);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 18px;
+}
+.label-layer.hidden { display: none; }
+.layer-panel {
+  background: var(--bg2);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  box-shadow: var(--shadow);
+  display: flex;
+  flex-direction: column;
+  max-width: min(92vw, 560px);
+  max-height: 88vh;
+  min-width: 280px;
+  overflow: hidden;
+}
+.layer-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 10px 12px;
+  border-bottom: 1px solid var(--border);
+  flex: 0 0 auto;
+}
+.layer-head .card-name {
+  font-weight: 600;
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+/* тулзы слоя — вид кнопок как в шапке карточек в правке, но активны В ЛЮБОМ режиме */
+.layer-head .tools { display: flex; gap: 2px; }
+.layer-head .tools button {
+  padding: 2px 6px;
+  font-size: 12px;
+  background: transparent;
+  border-color: transparent;
+  color: var(--muted);
+}
+.layer-head .tools button:hover { color: var(--text); background: var(--panel2); }
+/* Заметка: большое окно текста; ползунок прикреплён к правому краю карточки,
+   отступ текста от него сохраняется (кастомный тонкий скроллбар занимает
+   свою полосу и не наезжает на паддинг — та же механика у .full-text ниже) */
+.layer-note-panel { width: min(560px, 92vw); height: min(70vh, 620px); }
+.layer-note {
+  flex: 1 1 auto;
+  min-height: 0;
+  width: 100%;
+  border: 0;
+  border-radius: 0;
+  background: var(--bg2);
+  color: var(--text);
+  font: inherit;
+  font-size: 14px;
+  line-height: 1.5;
+  padding: 10px 14px;
+  resize: none;
+  outline: none;
+  display: block;
+  overflow-y: auto;
+  scrollbar-width: thin;
+  scrollbar-color: #4a4a63 transparent;
+}
+.layer-note::-webkit-scrollbar { width: 10px; }
+.layer-note::-webkit-scrollbar-track { background: transparent; }
+.layer-note::-webkit-scrollbar-thumb {
+  background: #4a4a63;
+  border-radius: 6px;
+  border: 2px solid transparent;
+  background-clip: padding-box;
+}
+.layer-note::-webkit-scrollbar-thumb:hover { background-color: #5d5d7d; }
+/* Единая механика скроллбара: окно полного текста (просмотр описаний/заметок) */
+.full-text {
+  scrollbar-width: thin;
+  scrollbar-color: #4a4a63 transparent;
+  padding-right: 12px;
+}
+.full-text::-webkit-scrollbar { width: 10px; }
+.full-text::-webkit-scrollbar-track { background: transparent; }
+.full-text::-webkit-scrollbar-thumb {
+  background: #4a4a63;
+  border-radius: 6px;
+  border: 2px solid transparent;
+  background-clip: padding-box;
+}
+/* Валюта/инвентарь: ТОЧНАЯ копия развернутой карточки — в overlay лежит сама
+   карточка (класс .layer-card), БЕЗ панели-обёртки и двойной рамки.
+   Единственное отличие от карточки на холсте — активные кнопки правки
+   (✎⧉✕ в шапке + ресайз-ручка). Не влезает по высоте — скроллится тело. */
+.layer-card {
+  flex: 0 0 auto;
+  max-height: 88vh;
+}
+.layer-card .card-body {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  /* ползунок прикреплён к правому краю карточки, отступ текста сохранён —
+     та же механика, что у окна заметки (единообразно с .full-text) */
+  scrollbar-width: thin;
+  scrollbar-color: #4a4a63 transparent;
+  padding-right: 14px;
+}
+.layer-card .card-body::-webkit-scrollbar { width: 10px; }
+.layer-card .card-body::-webkit-scrollbar-track { background: transparent; }
+.layer-card .card-body::-webkit-scrollbar-thumb {
+  background: #4a4a63;
+  border-radius: 6px;
+  border: 2px solid transparent;
+  background-clip: padding-box;
+}
+.layer-card .card-body::-webkit-scrollbar-thumb:hover { background-color: #5d5d7d; }
+@media (max-width: 720px) {
+  /* на телефоне копия занимает ширину строки (как карточки в колоночном виде) */
+  .layer-card { max-width: 560px; }
 }
