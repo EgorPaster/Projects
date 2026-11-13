@@ -708,6 +708,13 @@ button.active { border-color: var(--accent); color: var(--accent); }
 .field.check { display: flex; align-items: center; gap: 8px; color: var(--text); font-size: 14px; }
 .field.check label { display: inline; margin: 0; }
 .field.check input { width: auto; flex: 0 0 auto; margin: 0; }
+/* v32: список выбора в редакторе заклинания («При нехватке основного ресурса»):
+   колонка радио-пунктов + отдельный блок выбора резервного счётчика под ним */
+.radio-col { display: flex; flex-direction: column; gap: 4px; margin-top: 4px; }
+.radio-col .radio-row { display: flex; align-items: center; gap: 6px; margin: 0; font-size: 13px; color: var(--text); cursor: pointer; }
+.radio-col .radio-row input { width: auto; flex: 0 0 auto; margin: 0; }
+#f-chreservewrap { margin-top: 8px; padding-left: 16px; }
+#f-chreservewrap > label { display: block; margin-bottom: 4px; font-size: 12px; color: var(--muted); }
 .formula-help { color: var(--muted); font-size: 12px; margin-top: 4px; }
 .err { color: var(--danger); font-size: 13px; }
 
@@ -1326,5 +1333,14 @@ button.active { border-color: var(--accent); color: var(--accent); }
 .layer-card .card-body::-webkit-scrollbar-thumb:hover { background-color: #5d5d7d; }
 @media (max-width: 720px) {
   /* на телефоне копия занимает ширину строки (как карточки в колоночном виде) */
-  .layer-card { max-width: 560px; }
+  .layer-card { max-width: 100%; max-height: 92vh; }
+  /* поле слоя уже: 18px по бокам отнимали у карточки 36px на узком экране */
+  .label-layer { padding: 12px 10px; }
+  /* запас снизу: значок «−−» свисает на 3px ниже последней строки и без запаса
+     добавлял карточке ползунок, который ей не нужен (замер v33: тело 91 / прокрутка 94) */
+  .layer-card .card-body { padding-bottom: 8px; }
+  /* три ярлыка в ряд заполняют ширину экрана: 100% контента холста минус два
+     зазора по 10px, делим на три. Жёсткие 108px из .card.collapsed стоят выше
+     по файлу — обе ширины с !important, поэтому побеждает эта. */
+  .card.collapsed { width: calc((100% - 20px) / 3) !important; }
 }

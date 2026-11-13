@@ -424,7 +424,7 @@ window.App = window.App || {};
     switch (type) {
       case 'counter': return { current: 0, max: 0, bonus: '', die: null, restores: false };
       case 'skill': return { value: null, die: 20, bonus: '' };
-      case 'spell': return { description: '', charges: { mode: 'own', current: 0, max: 0, linkId: null, cost: 1, blockEmpty: false }, die: null, bonus: '', restores: false };
+      case 'spell': return { description: '', charges: { mode: 'own', current: 0, max: 0, linkId: null, cost: 1, emptyMode: 'block' }, die: null, bonus: '', restores: false };
       case 'currency': return {
         units: [
           { id: uid(), name: 'Серебро', base: 1 },
@@ -520,12 +520,19 @@ window.App = window.App || {};
       if (card.type === 'stat') card.type = 'skill';
       if (card.type === 'perk') {
         card.type = 'spell';
-        if (!card.charges) card.charges = { mode: 'own', current: 0, max: 0, linkId: null, cost: 1, blockEmpty: false };
+        if (!card.charges) card.charges = { mode: 'own', current: 0, max: 0, linkId: null, cost: 1, emptyMode: 'block' };
       }
       if (card.type === 'formula') {
         card.type = 'skill';
         card.value = (card.expression && String(card.expression).trim() !== '') ? card.expression : null;
         delete card.expression;
+      }
+      // v32: галочка «запретить использование без ресурса» → выбор действия при нехватке.
+      // Старые карты: блокировка была ВКЛ → «Запретить», ВЫКЛ → «Уйти в минус»
+      // (поведение сохраняется один в один)
+      if (card.charges && card.charges.emptyMode == null) {
+        card.charges.emptyMode = card.charges.blockEmpty ? 'block' : 'negative';
+        delete card.charges.blockEmpty;
       }
       if (card.x == null || card.y == null) autoPlace(ch, card);
       const mn = minSize(card);
@@ -725,15 +732,32 @@ window.App = window.App || {};
   // ===== Card actions =====
   function useCharge(card) {
     const ch = card.charges || {};
+    // v32: действие при нехватке основного ресурса (миграция blockEmpty → emptyMode;
+    // fallback — старая логика на случай старых снапшотов undo). Резерв тратится ТИХО
+    // (решение юзера: без каскадов и без уведомлений); если резерва не хватило —
+    // как «Запретить» (штатный toast)
+    const emptyMode = ch.emptyMode || (ch.blockEmpty ? 'block' : 'negative');
+    const spendReserve = function (amount) {
+      const res = findCard(ch.reserveId);
+      if (!res || res.type !== 'counter' || num(res.current) < amount) return false;
+      mutate(function () { res.current = num(res.current) - amount; });
+      return true;
+    };
     if (ch.mode === 'link') {
       const target = findCard(ch.linkId);
       if (!target || target.type !== 'counter') return;
       const cost = num(ch.cost) || 1;
-      if (ch.blockEmpty && num(target.current) < cost) { toast(App.tf('insufficientLinked', { name: target.name })); return; }
-      mutate(function () { target.current = num(target.current) - cost; });
+      if (num(target.current) >= cost) { mutate(function () { target.current = num(target.current) - cost; }); return; }
+      // нехватка основного
+      if (emptyMode === 'reserve' && spendReserve(cost)) return;
+      if (emptyMode !== 'negative') { toast(App.tf('insufficientLinked', { name: target.name })); return; }
+      mutate(function () { target.current = num(target.current) - cost; });   // уйти в минус
       return;
     }
-    if (ch.blockEmpty && num(ch.current) <= 0) { toast(App.t('insufficient')); return; }
+    if (num(ch.current) > 0) { mutate(function () { ch.current = num(ch.current) - 1; }); return; }
+    // нехватка основного (собственные заряды тратятся по 1)
+    if (emptyMode === 'reserve' && spendReserve(1)) return;
+    if (emptyMode !== 'negative') { toast(App.t('insufficient')); return; }
     mutate(function () { ch.current = num(ch.current) - 1; });
   }
 
@@ -1307,12 +1331,14 @@ window.App = window.App || {};
 
   function chargesInfo(card) {
     const ch = card.charges || {};
+    // v32: галочка «показывать тег х/N вместо анимации» — принудительный тег
+    const forceTag = !!ch.tag;
     const useBtn = '<button class="small primary use-btn" data-act="use">' + esc(App.t('use')) + '</button>';
     if (ch.mode === 'link') {
       const target = findCard(ch.linkId);
       if (target && target.type === 'counter') {
         // счётчик без предела — тег вместо фигур (как при зарядов больше 24)
-        if (target.max == null) return '<div class="charges-row">' + chargeBadgeHTML(card) + useBtn + '</div>';
+        if (target.max == null || forceTag) return '<div class="charges-row">' + chargeBadgeHTML(card) + useBtn + '</div>';
         const tip = App.tf('linkPipTip', { cost: num(ch.cost) || 1, name: target.name });
         const figs = chargeFiguresHTML(card, tip);
         // ячеек больше 24 — тег вместо фигур
@@ -1324,6 +1350,7 @@ window.App = window.App || {};
       return '<div class="charges-row"><span class="meta">' + esc(App.tf('linkedCharges', { name: nm })) + ': ' + remain + '</span>' +
         useBtn + '</div>';
     }
+    if (forceTag) return '<div class="charges-row">' + chargeBadgeHTML(card) + useBtn + '</div>';
     const figs = chargeFiguresHTML(card, App.t('pipFill'));
     return '<div class="charges-row">' + (figs || chargeBadgeHTML(card)) + useBtn + '</div>';
   }
@@ -2265,7 +2292,25 @@ window.App = window.App || {};
     html += '<div id="f-chownwrap">' + exprFieldHTML('f-chmax', App.t('max'), (card._new && ch.max === 0) ? '' : ch.max, '') + '</div>';
     html += '<div class="field" id="f-chlinkwrap"><label>' + esc(App.t('linkTo')) + '</label><select id="f-chlink">' + linkOpts + '</select></div>';
     html += '<div class="field" id="f-chcostwrap"><label>' + esc(App.t('costPerUse')) + '</label><input id="f-chcost" type="number" value="' + (num(ch.cost) || 1) + '" placeholder="1"></div>';
-    html += '<div class="field check" id="f-chblockwrap"><input id="f-chblock" type="checkbox"' + (ch.blockEmpty ? ' checked' : '') + '><label for="f-chblock">' + esc(App.t('blockEmpty')) + '</label></div>';
+    // v32: выбор действия при нехватке основного ресурса — вместо галочки
+    // «Запретить использование без ресурса» (переезжает в список первым пунктом)
+    const em = ch.emptyMode || (ch.blockEmpty ? 'block' : 'negative');
+    // резервный ресурс — счётчик (не сама карточка и не основной ресурс)
+    const reserveOpts = counters.filter(function (c) { return c.id !== ch.linkId; }).map(function (c) {
+      return '<option value="' + c.id + '"' + (ch.reserveId === c.id ? ' selected' : '') + '>' + esc(c.name) + '</option>';
+    }).join('');
+    html += '<div class="field" id="f-chemptywrap"><label>' + esc(App.t('onEmpty')) + '</label>' +
+      '<div class="radio-col" id="f-chempty">' +
+        '<label class="radio-row"><input type="radio" name="f-chempty" value="block"' + (em === 'block' ? ' checked' : '') + '>' + esc(App.t('emptyBlock')) + '</label>' +
+        '<label class="radio-row"><input type="radio" name="f-chempty" value="negative"' + (em === 'negative' ? ' checked' : '') + '>' + esc(App.t('emptyNegative')) + '</label>' +
+        '<label class="radio-row"><input type="radio" name="f-chempty" value="reserve"' + (em === 'reserve' ? ' checked' : '') + '>' + esc(App.t('emptyReserve')) + '</label>' +
+      '</div>' +
+      // появляется ТОЛЬКО при выборе «Взять из резервного ресурса»
+      '<div id="f-chreservewrap" style="display:none"><label>' + esc(App.t('reserveResource')) + '</label><select id="f-chreserve">' + reserveOpts + '</select></div>' +
+      '</div>';
+    // v32: отображение — анимация (фигуры) или тег «х/N» (тег и так включается
+    // сам при зарядов больше 24 или без предела)
+    html += checkField('f-chtag', App.t('chgTag'), !!ch.tag);
     if (showRestores) html += checkField('f-restores', App.t('restores'), !!card.restores);
     return html;
   }
@@ -2362,8 +2407,17 @@ window.App = window.App || {};
       const isOwn = mode.value !== 'link';
       ['f-chownwrap'].forEach(function (id) { const el = document.getElementById(id); if (el) el.style.display = isOwn ? '' : 'none'; });
       ['f-chlinkwrap', 'f-chcostwrap'].forEach(function (id) { const el = document.getElementById(id); if (el) el.style.display = isOwn ? 'none' : ''; });
+      // v32: выбор резервного ресурса показываем ТОЛЬКО при «Взять из резервного ресурса»
+      const resWrap = document.getElementById('f-chreservewrap');
+      if (resWrap) {
+        const checked = document.querySelector('input[name="f-chempty"]:checked');
+        resWrap.style.display = (checked && checked.value === 'reserve') ? '' : 'none';
+      }
     }
     mode.addEventListener('change', upd);
+    // радио-список меняет видимость резерва сразу, без перерисовки формы
+    const emWrap = document.getElementById('f-chempty');
+    if (emWrap) emWrap.addEventListener('change', upd);
     upd();
   }
 
@@ -2691,7 +2745,19 @@ window.App = window.App || {};
   function readCharges(card) {
     const charges = card.charges || { mode: 'own' };
     charges.mode = document.getElementById('f-chmode').value;
-    charges.blockEmpty = readCheck('f-chblock');
+    // v32: действие при нехватке основного ресурса (заменило галочку blockEmpty —
+    // старые карты мигрируются в layoutCharacter, здесь ключ уже не пишем)
+    const emEl = document.querySelector('input[name="f-chempty"]:checked');
+    charges.emptyMode = emEl ? emEl.value : 'block';
+    if (charges.emptyMode === 'reserve') {
+      const rs = document.getElementById('f-chreserve');
+      charges.reserveId = rs && rs.value ? rs.value : null;
+    } else {
+      charges.reserveId = null;
+    }
+    delete charges.blockEmpty;
+    // v32: тег «х/N» вместо анимации фигур
+    charges.tag = readCheck('f-chtag');
     if (charges.mode === 'link') {
       const link = document.getElementById('f-chlink');
       charges.linkId = link && link.value ? link.value : null;
@@ -3056,7 +3122,7 @@ window.App = window.App || {};
       if (c.charges && typeof c.charges === 'object') {
         c.charges.mode = (c.charges.mode === 'link') ? 'link' : 'own';
       } else if (type === 'spell') {
-        c.charges = { mode: 'own', current: 0, max: 0, linkId: null, cost: 1, blockEmpty: false };
+        c.charges = { mode: 'own', current: 0, max: 0, linkId: null, cost: 1, emptyMode: 'block' };
       }
       ch.cards.push(c);
     });
