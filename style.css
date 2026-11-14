@@ -887,11 +887,16 @@ button.active { border-color: var(--accent); color: var(--accent); }
 /* ---------- Responsive ---------- */
 @media (max-width: 720px) {
   .card { width: 100%; }
-  .canvas { gap: 10px; padding: 10px; }
+  /* v42: по горизонтали зазора нет — два счётчика встают вплотную и занимают
+     весь ряд (50% + 50%); вертикальный зазор для остальных карточек остаётся */
+  .canvas { row-gap: 10px; column-gap: 0; padding: 10px; }
+  .card.type-counter { width: 50%; }
   .counter-val { font-size: 30px; }
   .counter-step { padding: 4px; gap: 4px; }
   .step-btn { height: 40px; font-size: 22px; }
-  .step-input { height: 40px; flex-basis: 56px; width: 56px; font-size: 16px; }
+  /* поле шага может сжиматься: на узких экранах (320) два счётчика в ряд дают
+     карточку ~142 px, иначе «+» вылезал за панель */
+  .step-input { height: 40px; flex: 0 1 56px; width: 56px; min-width: 34px; font-size: 16px; }
   .chg-row { --charge-size: 19px; --charge-gap: 4px; }
   #topbar { padding: 6px 8px; gap: 5px; }
   .brand { font-size: 15px; }
