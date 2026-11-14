@@ -56,7 +56,7 @@ window.App = window.App || {};
       version: 1,
       activeCharacterId: null,
       characters: [],
-      settings: { language: 'ru' },
+      settings: { language: 'ru', critSuccess: '20', critFail: '1' },
       log: []
     };
   }
@@ -530,7 +530,7 @@ window.App = window.App || {};
       case 'note': return { w: 300, h: 220 };
       case 'inventory': return { w: 300, h: 200 };
       case 'currency': return { w: 300, h: 170 };
-      case 'spell': return { w: 300, h: 175 };       // описание 2 строки + заряды
+      case 'spell': return { w: 300, h: 140 };       // v52: 2 ряда треугольников + описание (минимум уточняется в minSize)
       case 'skill': return { w: 300, h: 110 };        // v50: шапка + (описание) + значение + кубик
       case 'counter': return { w: 155, h: 120 };     // v40: компактный квадрат со степпером
       default: return { w: 300, h: 120 };
@@ -552,8 +552,11 @@ window.App = window.App || {};
       if (sk) {
         // фигуры: ширина 300, чтобы кнопка «Применить» не налезала на ячейки при сжатии
         w = 300;
-        // два ряда фигур (гексы + треугольники) + описание; значения подогнаны тестом
-        h = (card.description || '').trim() ? 162 : 118;
+        // v52: один ряд треугольников — ниже, два ряда — выше
+        const rows = sk.bottom ? 2 : 1;
+        h = rows === 2
+          ? ((card.description || '').trim() ? 162 : 118)
+          : ((card.description || '').trim() ? 132 : 88);
       } else h = MIN_H;   // тег вместо фигур — компактная карточка
     }
     if (type === 'inventory') {                 // предметы + строка итога веса
@@ -807,6 +810,33 @@ window.App = window.App || {};
   // История остаётся в журнале бросков, на карточке результата нет.
   let rollToastTimer = null;
   let rollToastHideTimer = null;
+  // v55: крит-значения из настроек («20» / «10,20»), пусто — обычный бросок
+  function critValues(str) {
+    return String(str == null ? '' : str).split(',').map(function (x) { return parseInt(x, 10); })
+      .filter(function (n) { return Number.isFinite(n); });
+  }
+  function critKind(rolled) {
+    const s = state.settings || {};
+    if (critValues(s.critSuccess).indexOf(rolled) !== -1) return 'success';
+    if (critValues(s.critFail).indexOf(rolled) !== -1) return 'fail';
+    return '';
+  }
+  // v57: звёзды крит-успеха — вылетают ИЗ ЦЕНТРА наружу, зеркало осколков провала.
+  // dx/dy — конечная точка полёта, rot — доворот звезды за время полёта.
+  const CRIT_STARS = [
+    [-138, -34, 110, 20, '.02s'], [134, -42, -96, 17, '.06s'],
+    [-150, 14, 160, 14, '.10s'], [146, 22, -142, 22, '.01s'],
+    [-112, 48, 74, 15, '.13s'], [108, 52, -68, 18, '.08s'],
+    [-154, -8, 200, 12, '.15s'], [152, -6, -208, 13, '.12s'],
+    [-72, -62, 128, 16, '.04s'], [74, -58, -118, 15, '.09s'],
+    [-34, 66, 90, 13, '.16s'], [36, 64, -84, 12, '.18s']
+  ];
+  function critStarsHTML() {
+    return '<div class="rt-stars" aria-hidden="true">' + CRIT_STARS.map(function (s, i) {
+      return '<i class="rt-star" style="--dx:' + s[0] + 'px;--dy:' + s[1] + 'px;--rot:' + s[2] +
+        'deg;--size:' + s[3] + 'px;--delay:' + s[4] + '">' + (i % 2 ? '✧' : '✦') + '</i>';
+    }).join('') + '</div>';
+  }
   function showRollToast(rolled, bonus, total) {
     let host = document.getElementById('rollToast');
     if (!host) {
@@ -816,14 +846,37 @@ window.App = window.App || {};
     }
     clearInterval(rollToastTimer);
     clearTimeout(rollToastHideTimer);
-    // перезапись с анимацией только при реальном броске (и если анимации включены)
-    host.innerHTML = bonus
-      ? '<div class="rt-row"><span class="rt-die">' + rolled + '</span><span class="rt-bonus">' + (bonus > 0 ? '+' : '−') + Math.abs(bonus) + '</span><span class="rt-eq">=</span><span class="rt-total">' + total + '</span></div>'
-      : '<div class="rt-row"><span class="rt-total">' + total + '</span></div>';
-    host.classList.remove('rt-hide');
-    if (animOn()) popOnce(host, 'rt-pop');
+    const kind = critKind(rolled);
+    // Крит по логике НРИ — «всё или ничего»: бонус уже не важен, показываем только
+    // выпавшее число, без «+N =». Иначе игрок считает 20+5=25 и спорит с правилами.
+    host.innerHTML =
+      (kind
+        ? '<div class="rt-row"><span class="rt-total">' + rolled + '</span></div>'
+        : (bonus
+          ? '<div class="rt-row"><span class="rt-die">' + rolled + '</span><span class="rt-bonus">' + (bonus > 0 ? '+' : '−') + Math.abs(bonus) + '</span><span class="rt-eq">=</span><span class="rt-total">' + total + '</span></div>'
+          : '<div class="rt-row"><span class="rt-total">' + total + '</span></div>')) +
+      // провал — осколки снаружи к центру, успех — звёзды из центра наружу
+      (kind === 'fail' ? '<div class="rt-shards" aria-hidden="true">' +
+        '<i class="rt-shard" style="--dx:-118px;--dy:-46px;--rot:-62deg;--size:12px;--delay:.02s"></i>' +
+        '<i class="rt-shard" style="--dx:112px;--dy:-52px;--rot:74deg;--size:11px;--delay:.05s"></i>' +
+        '<i class="rt-shard" style="--dx:-132px;--dy:6px;--rot:132deg;--size:9px;--delay:.08s"></i>' +
+        '<i class="rt-shard" style="--dx:126px;--dy:18px;--rot:-118deg;--size:13px;--delay:.01s"></i>' +
+        '<i class="rt-shard" style="--dx:-86px;--dy:44px;--rot:42deg;--size:8px;--delay:.11s"></i>' +
+        '<i class="rt-shard" style="--dx:88px;--dy:46px;--rot:156deg;--size:11px;--delay:.07s"></i>' +
+        '<i class="rt-shard" style="--dx:-146px;--dy:-20px;--rot:210deg;--size:7px;--delay:.14s"></i>' +
+        '<i class="rt-shard" style="--dx:146px;--dy:-16px;--rot:-35deg;--size:8px;--delay:.12s"></i>' +
+        '<i class="rt-shard" style="--dx:24px;--dy:-62px;--rot:95deg;--size:7px;--delay:.04s"></i>' +
+        '<i class="rt-shard" style="--dx:-26px;--dy:62px;--rot:-90deg;--size:9px;--delay:.09s"></i>' +
+        '</div>'
+        : (kind === 'success' ? critStarsHTML() : ''));
+    host.classList.remove('rt-hide', 'success', 'fail', 'play');
+    if (kind) host.classList.add(kind);
+    if (animOn()) {
+      if (kind) { void host.offsetWidth; host.classList.add('play'); }
+      else popOnce(host, 'rt-pop');
+    }
     rollToastTimer = setTimeout(function () { host.classList.add('rt-hide'); }, 1800);
-    rollToastHideTimer = setTimeout(function () { host.innerHTML = ''; }, 2200);
+    rollToastHideTimer = setTimeout(function () { host.innerHTML = ''; host.classList.remove('success', 'fail', 'play'); }, 2200);
   }
   function rollCard(card) {
     if (!card.die) return;
@@ -883,20 +936,14 @@ window.App = window.App || {};
     else if (act === 'card-menu') openCardMenu(card.id, e && e.currentTarget);
     else if (act === 'roll') rollCard(card);
     else if (act === 'use') useCharge(card);
+    else if (act === 'chg-drum') openChargeDrum(card);
     else if (act === 'pip') {
-      // клик по фигуре заряда: заряды заполняются до этой ячейки (и опустошаются после неё)
+      // клик по треугольнику: заряды заполняются до этой ячейки (и опустошаются после неё).
+      // Порядок — сверху вниз: 1..6 верхний ряд, 7..12 нижний
       if (card.charges && card.charges.mode !== 'link') {
         const max = chargesMaxNum(card);
         const cur = num(card.charges.current);
-        let next;
-        if (ds.hex != null) {
-          // гекс: заполняем до кратного шести
-          next = (Math.max(0, num(ds.hex) || 0) + 1) * CHG_PER_HEX;
-        } else {
-          // треугольник: до конца заполненных гексов + свой индекс + 1
-          const base = cur - (cur % CHG_PER_HEX);
-          next = base + Math.max(0, num(ds.i) || 0) + 1;
-        }
+        let next = Math.max(0, num(ds.i) || 0) + 1;
         if (max != null) next = Math.min(next, num(max));
         if (next === cur) return;   // клик мимо запаса (сверх максимума) — ничего не меняем
         mutate(function () { card.charges.current = next; });
@@ -1395,18 +1442,17 @@ window.App = window.App || {};
     return html ? '<div class="card-body">' + html + '</div>' : '';
   }
 
-  /* ===== Заряды-фигуры (v17, по мотивам стенда «3 гекса / 24 заряда») =====
-     1 гекс = 6 зарядов, максимум 3 гекса + 6 треугольников = 24.
-     Предел больше 24 (или без предела) — фигуры заменяет текстовый тег. */
-  const CHG_PER_HEX = 6;
-  const CHG_HEX_MAX = 3;
-  const CHG_TRI_MAX = 6;
+  /* ===== Заряды-фигуры (v52: только треугольники, 2 ряда по 6) =====
+     12 треугольников максимум: верхний ряд 6, нижний 6. Если максимум меньше 12 —
+     рисуем ровно столько ячеек, сколько зарядов (макс 8 → 6 + 2).
+     Предел больше 12 (или без предела) — фигуры заменяет текстовый тег. */
+  const CHG_TRI_MAX = 12;
+  const CHG_ROW = 6;
   // цвета как на стенде: собственные заряды — золотые, связанные (от счётчика) — фиолетовые
   const CHG_PAL = {
     own:  { fill: '#B58A43', stroke: '#F4C65E' },
     link: { fill: '#7669C9', stroke: '#C1B7FF' }
   };
-  const CHG_HEX_PTS = '30,3 53,16 53,39 30,52 7,39 7,16';
   const CHG_TRI_PTS = '30,4 55,50 5,50';
 
   function chgOwnPalette(card) {
@@ -1436,71 +1482,68 @@ window.App = window.App || {};
     }
     return chargesMaxNum(card);
   }
-  // скелет ячеек: треугольных слотов всегда шесть; гексовых — сколько реально
-  // может набраться от максимума (макс 8 → 1 гекс). null — фигуры не показываем
-  // (предел неизвестен, нулевой или выше 24 — вместо них тег с числом)
+  // скелет ячеек: сколько треугольников и как они раскладываются по двум рядам.
+  // null — фигуры не показываем (предел неизвестен, нулевой или выше 12 — тогда тег)
   function chargeSkeleton(maxUnits) {
-    if (maxUnits == null || maxUnits <= 0 || maxUnits > CHG_HEX_MAX * CHG_PER_HEX + CHG_TRI_MAX) return null;
-    // гексовых слотов — сколько реально может набраться (макс 8 → 1 гекс);
-    // треугольных хватает для одной группы: при максимуме меньше 6 — ровно
-    // столько (макс 5 → 5 ячеек), иначе все шесть (макс 6 → 6 ячеек и 1 гекс)
-    const hexSlots = Math.min(CHG_HEX_MAX, Math.floor(maxUnits / CHG_PER_HEX));
-    const triSlots = maxUnits < CHG_PER_HEX ? Math.min(CHG_TRI_MAX, Math.floor(maxUnits)) : CHG_TRI_MAX;
-    return { hexSlots: hexSlots, triSlots: triSlots };
+    if (maxUnits == null || maxUnits <= 0 || maxUnits > CHG_TRI_MAX) return null;
+    const slots = Math.min(CHG_TRI_MAX, Math.floor(maxUnits));
+    const top = Math.min(CHG_ROW, slots);
+    return { slots: slots, top: top, bottom: slots - top };
   }
-  // сколько ячеек каждого ряда заполнено при данном числе единиц
+  // сколько ячеек заполнено: сверху вниз, слева направо (1..6 верх, 7..12 низ)
   function chargeFill(units, sk) {
     const u = Math.max(0, Math.floor(num(units) || 0));
-    const hexFilled = Math.min(sk.hexSlots, Math.floor(u / CHG_PER_HEX));
-    const cap = sk.hexSlots * CHG_PER_HEX;
-    const triFilled = u > cap ? Math.min(sk.triSlots, u - cap) : Math.min(sk.triSlots, u % CHG_PER_HEX);
-    return { hexes: hexFilled, tris: triFilled };
+    const filled = Math.min(sk.slots, u);
+    return {
+      top: Math.min(sk.top, filled),
+      bottom: Math.max(0, Math.min(sk.bottom, filled - sk.top))
+    };
   }
 
-  function chgBtnHTML(kind, filled, palette, attrs, title) {
-    return '<button type="button" class="charge ' + kind + (filled ? ' filled' : '') + '"' + attrs +
+  function chgBtnHTML(filled, palette, attrs, title) {
+    return '<button type="button" class="charge triangle' + (filled ? ' filled' : '') + '"' + attrs +
       ' style="--chg-fill:' + palette.fill + ';--chg-stroke:' + palette.stroke + '"' +
       (title ? ' title="' + esc(title) + '"' : '') + '>' +
-      '<svg viewBox="0 0 60 54" aria-hidden="true"><polygon points="' + (kind === 'hex' ? CHG_HEX_PTS : CHG_TRI_PTS) + '"/></svg>' +
+      '<svg viewBox="0 0 60 54" aria-hidden="true"><polygon points="' + CHG_TRI_PTS + '"/></svg>' +
       (filled ? '<span class="shine" aria-hidden="true"></span>' : '') +
       '</button>';
   }
 
-  // два ряда фигур: гексы сверху, треугольники снизу
+  // два ряда треугольников: верхний (до 6) и нижний (до 6)
   function chargeFiguresHTML(card, tip) {
     const sk = chargeSkeleton(chargeMaxUnits(card));
     if (!sk) return null;
     const pal = chgOwnPalette(card);
     const fill = chargeFill(chargeUnits(card) || 0, sk);
     const clickable = !(card.charges && card.charges.mode === 'link');
-    let hexes = '';
-    for (let i = 0; i < sk.hexSlots; i++) {
-      const attrs = clickable ? ' data-act="pip" data-hex="' + i + '"' : ' data-act="pip"';
-      hexes += chgBtnHTML('hex', i < fill.hexes, pal, attrs, clickable ? App.t('pipFill') : tip);
+    const attrsFor = function (idx) {
+      return clickable ? ' data-act="pip" data-i="' + idx + '"' : ' data-act="pip"';
+    };
+    const title = clickable ? App.t('pipFill') : tip;
+    let top = '', bottom = '';
+    for (let i = 0; i < sk.top; i++) {
+      top += chgBtnHTML(i < fill.top, pal, attrsFor(i), title);
     }
-    // гексы — группа, отцентрованная над рядом треугольников: при 6 треугольниках
-    // и 3 гексах это ровно промежутки 2–3, 3–4, 4–5 (как в стенде); при меньшем
-    // максимуме группа сжимается к центру ряда
-    const hexShift = Math.max(0, sk.triSlots - sk.hexSlots) / 2;
-    const hexRowStyle = ' style="margin-left: calc(' + hexShift + ' * (var(--charge-size) + var(--charge-gap)))"';
-    let tris = '';
-    for (let i = 0; i < sk.triSlots; i++) {
-      const attrs = clickable ? ' data-act="pip" data-i="' + i + '"' : ' data-act="pip"';
-      tris += chgBtnHTML('triangle', i < fill.tris, pal, attrs, clickable ? App.t('pipFill') : tip);
+    for (let i = 0; i < sk.bottom; i++) {
+      bottom += chgBtnHTML(i < fill.bottom, pal, attrsFor(sk.top + i), title);
     }
     return '<div class="chg-area">' +
-      (sk.hexSlots ? '<div class="chg-row chg-hexes"' + hexRowStyle + '>' + hexes + '</div>' : '') +
-      (sk.triSlots ? '<div class="chg-row chg-tris">' + tris + '</div>' : '') +
+      (sk.top ? '<div class="chg-row chg-tris">' + top + '</div>' : '') +
+      (sk.bottom ? '<div class="chg-row chg-tris">' + bottom + '</div>' : '') +
       '</div>';
   }
 
-  // тег с числом вместо фигур (предел > 24 или без предела), цвет — как у ячеек
+  // тег с числом вместо фигур (предел > 12 или без предела), цвет — как у ячеек
   function chargeBadgeHTML(card) {
     const m = card.charges && card.charges.mode === 'link' ? 'link' : 'own';
     const cur = Math.floor(num(chargeUnits(card)) || 0);
     const maxU = chargeMaxUnits(card);
     const txt = cur + (maxU != null ? ' / ' + Math.floor(maxU) : '');
-    return '<span class="chg-badge ' + m + '">' + txt + '</span>';
+    // v53: у СВОИХ зарядов тег открывает барабан (тап по «Х / N»);
+    // у связанных — как раньше, плашка-подсказка «пополните счётчик»
+    const act = m === 'link' ? ' data-act="pip"' : ' data-act="chg-drum"';
+    return '<button type="button" class="chg-badge ' + m + '"' + act +
+      ' title="' + esc(App.t('charges')) + '">' + txt + '</button>';
   }
 
   function chargesInfo(card) {
@@ -1511,11 +1554,11 @@ window.App = window.App || {};
     if (ch.mode === 'link') {
       const target = findCard(ch.linkId);
       if (target && target.type === 'counter') {
-        // счётчик без предела — тег вместо фигур (как при зарядов больше 24)
+        // счётчик без предела — тег вместо фигур (как при зарядов больше 12)
         if (target.max == null || forceTag) return '<div class="charges-row">' + chargeBadgeHTML(card) + useBtn + '</div>';
         const tip = App.tf('linkPipTip', { cost: num(ch.cost) || 1, name: target.name });
         const figs = chargeFiguresHTML(card, tip);
-        // ячеек больше 24 — тег вместо фигур
+        // ячеек больше 12 — тег вместо фигур
         return '<div class="charges-row">' + (figs || chargeBadgeHTML(card)) + useBtn + '</div>';
       }
       // потерянная ссылка — старый текстовый вид
@@ -1535,13 +1578,115 @@ window.App = window.App || {};
       chargesInfo(card) + '</div>';
   }
 
+  /* ===== Барабан зарядов (v53) =====
+     Тап по тегу «Х / N» у СВОИХ зарядов открывает колесо выбора 0..N.
+     Оверлей фиксированный (вне холста), поэтому не зависит от мобильного zoom.
+     У связанных зарядов барабана нет — там значение принадлежит счётчику. */
+  let drumState = null;
+  function closeChargeDrum(apply) {
+    const ov = document.getElementById('chgDrum');
+    if (!ov) return;
+    const st = drumState;
+    drumState = null;
+    document.removeEventListener('keydown', st ? st.onKey : null);
+    ov.remove();
+    if (!apply || !st) return;
+    const card = findCard(st.cardId);
+    if (!card || !card.charges) return;
+    if (Math.floor(num(card.charges.current)) === st.value) return;
+    mutate(function () { card.charges.current = st.value; });
+  }
+  function openChargeDrum(card) {
+    closeChargeDrum(false);
+    const maxU = chargeMaxUnits(card);
+    const upTo = maxU != null ? Math.max(1, Math.floor(maxU)) : Math.max(99, Math.floor(num(card.charges.current) || 0));
+    const cur = Math.max(0, Math.min(upTo, Math.floor(num(card.charges.current) || 0)));
+    const ITEM = 36;
+    const ov = document.createElement('div');
+    ov.className = 'chg-drum-overlay';
+    ov.id = 'chgDrum';
+    ov.innerHTML =
+      '<div class="chg-drum-panel" role="dialog" aria-modal="true">' +
+        '<div class="chg-drum" id="chgDrumWheel"><div class="chg-drum-band"></div><ul class="chg-drum-list"></ul></div>' +
+      '</div>';
+    document.body.appendChild(ov);
+    const wheel = ov.querySelector('#chgDrumWheel');
+    const list = ov.querySelector('.chg-drum-list');
+    const items = [];
+    for (let i = 0; i <= upTo; i++) {
+      const li = document.createElement('li');
+      li.className = 'chg-drum-item';
+      li.textContent = i;
+      list.appendChild(li);
+      items.push(li);
+    }
+    const posFor = function (v) { return -(v * ITEM + ITEM / 2); };
+    const valueFromY = function (y) { return Math.round((-y - ITEM / 2) / ITEM); };
+    const mark = function (v) { items.forEach(function (it, i) { it.classList.toggle('sel', i === v); }); };
+    const st = { cardId: card.id, value: cur, onKey: null };
+    drumState = st;
+    function setVal(v, animate) {
+      v = Math.max(0, Math.min(upTo, Math.round(v)));
+      st.value = v;
+      list.style.transition = animate ? 'transform .32s cubic-bezier(.2,.9,.3,1.15)' : 'none';
+      list.style.transform = 'translateY(' + posFor(v) + 'px)';
+      mark(v);
+    }
+    setVal(cur, false);
+
+    let dragging = false, didMove = false, startY = 0, startTr = 0, lastY = 0, lastT = 0, vel = 0;
+    const yNow = function () { return new DOMMatrixReadOnly(getComputedStyle(list).transform).m42; };
+    const onMove = function (e) {
+      if (!dragging) return;
+      if (Math.abs(e.clientY - startY) > 4) didMove = true;
+      let y = startTr + (e.clientY - startY);
+      const maxY = posFor(0), minY = posFor(upTo);
+      if (y > maxY) y = maxY + (y - maxY) * 0.18;          // резинка на краях
+      else if (y < minY) y = minY + (y - minY) * 0.18;
+      list.style.transform = 'translateY(' + y + 'px)';
+      const now = performance.now(), dt = now - lastT;
+      if (dt > 0) vel = (e.clientY - lastY) / dt;
+      lastY = e.clientY;
+      lastT = now;
+    };
+    const onUp = function () {
+      if (!dragging) return;
+      dragging = false;
+      setVal(valueFromY(yNow() + vel * 90), true);         // инерция + примагничивание
+    };
+    wheel.addEventListener('pointerdown', function (e) {
+      dragging = true;
+      didMove = false;
+      list.style.transition = 'none';
+      startY = e.clientY; lastY = e.clientY; lastT = performance.now(); vel = 0;
+      startTr = yNow();
+      e.preventDefault();
+    });
+    window.addEventListener('pointermove', onMove);
+    window.addEventListener('pointerup', onUp);
+    window.addEventListener('pointercancel', onUp);
+    wheel.addEventListener('wheel', function (e) {
+      e.preventDefault();
+      setVal(st.value + (e.deltaY > 0 ? -1 : 1), true);
+    }, { passive: false });
+    // тап по полосе (не сдвигая колесо) — подтвердить; тап мимо панели — отмена
+    wheel.addEventListener('click', function () { if (didMove) return; closeChargeDrum(true); });
+    ov.addEventListener('click', function (e) { if (e.target === ov) closeChargeDrum(false); });
+    st.onKey = function (e) {
+      if (e.key === 'Escape') { e.stopPropagation(); closeChargeDrum(false); }
+      else if (e.key === 'ArrowDown') { e.preventDefault(); setVal(st.value - 1, true); }
+      else if (e.key === 'ArrowUp') { e.preventDefault(); setVal(st.value + 1, true); }
+    };
+    document.addEventListener('keydown', st.onKey);
+  }
+
   /* ===== Анимации зарядов: дублёры-призраки поверх карточки =====
      Состояние меняется сразу (undo/журнал не ждут), картинка догоняет сама. */
   const chgPrev = {};   // cardId -> прежнее число единиц
 
-  function chgGhost(kind, filled, pal, r) {
+  function chgGhost(filled, pal, r) {
     const tpl = document.createElement('template');
-    tpl.innerHTML = chgBtnHTML(kind, filled, pal, '', '');
+    tpl.innerHTML = chgBtnHTML(filled, pal, '', '');
     const el = tpl.content.firstElementChild;
     el.style.position = 'fixed';
     el.style.left = Math.round(r.left) + 'px';
@@ -1565,65 +1710,15 @@ window.App = window.App || {};
     const sk = chargeSkeleton(chargeMaxUnits(card));
     if (!sk) return;
     const pal = chgOwnPalette(card);
-    const hexCap = sk.hexSlots * CHG_PER_HEX;
     const prevF = chargeFill(prevU, sk), newF = chargeFill(newU, sk);
-    const hexRow = el.querySelector('.chg-hexes');
-    const triRow = el.querySelector('.chg-tris');
-    const hexEls = hexRow ? hexRow.querySelectorAll('.charge') : [];
-    const triEls = triRow ? triRow.querySelectorAll('.charge') : [];
-    const ghosts = [];
+    const prevN = prevF.top + prevF.bottom;
+    const newN = newF.top + newF.bottom;
+    // оба ряда — одна плоская лента: верхний ряд, затем нижний
+    const triEls = el.querySelectorAll('.chg-tris .charge');
 
-    if (newU > prevU && newU % CHG_PER_HEX === 0 && newU <= hexCap && hexEls.length) {
-      // слияние: бывшие треугольники слетаются в слот нового гекса
-      const hexEl = hexEls[newF.hexes - 1];
-      if (hexEl) {
-        const hr = hexEl.getBoundingClientRect();
-        const hx = hr.left + hr.width / 2, hy = hr.top + hr.height / 2;
-        for (let i = 0; i < prevF.tris; i++) {
-          const slot = triEls[i];
-          if (!slot) break;
-          const r = slot.getBoundingClientRect();
-          const g = chgGhost('triangle', true, pal, r);
-          g.style.setProperty('--dx', Math.round(hx - (r.left + r.width / 2)) + 'px');
-          g.style.setProperty('--dy', Math.round(hy - (r.top + r.height / 2)) + 'px');
-          g.classList.add('converting');
-          g.style.animationDelay = (i * 28) + 'ms';
-          ghosts.push(g);
-        }
-        hexEl.classList.add('just-merged');
-        window.setTimeout(function () { hexEl.classList.remove('just-merged'); }, 600);
-        chgClearLater(ghosts, prevF.tris * 28 + 780);
-      }
-    } else if (prevU > newU && prevU % CHG_PER_HEX === 0 && prevU <= hexCap && hexEls.length) {
-      // распад гекса: он вспыхивает и схлопывается, треугольники разлетаются в свои ячейки.
-      // Ячейки-цели скрыты на время полёта (chg-pending): призрак приземлился — слот проявился,
-      // иначе треугольники видны сразу и призраки залетают в уже существующие
-      const hexEl = hexEls[Math.floor(prevU / CHG_PER_HEX) - 1];
-      if (hexEl) {
-        const hr = hexEl.getBoundingClientRect();
-        const hx = hr.left + hr.width / 2, hy = hr.top + hr.height / 2;
-        const hexGhost = chgGhost('hex', true, pal, hr);
-        hexGhost.classList.add('unmerging-source');
-        for (let i = 0; i < newF.tris; i++) {
-          const slot = triEls[i];
-          if (!slot) break;
-          slot.classList.add('chg-pending');
-          const r = slot.getBoundingClientRect();
-          const g = chgGhost('triangle', true, pal, r);
-          g.style.setProperty('--dx', Math.round(hx - (r.left + r.width / 2)) + 'px');
-          g.style.setProperty('--dy', Math.round(hy - (r.top + r.height / 2)) + 'px');
-          g.classList.add('unmerging');
-          g.style.animationDelay = (i * 28) + 'ms';
-          // приземление призрака (полёт .68s + задержка ряда): проявляем слот, дублёра убираем
-          window.setTimeout(function (s, gh) {
-            return function () { s.classList.remove('chg-pending'); gh.remove(); };
-          }(slot, g), i * 28 + 700);
-        }
-        chgClearLater([hexGhost], newF.tris * 28 + 740);
-      }
-    } else if (newU > prevU) {
-      // обычное заполнение: pop новых треугольников (+ вспышка дорисовавшихся гексов)
-      for (let i = prevF.tris; i < newF.tris; i++) {
+    if (newN > prevN) {
+      // заполнение: pop новых треугольников
+      for (let i = prevN; i < newN; i++) {
         const it = triEls[i];
         if (!it) break;
         it.classList.remove('just-appeared');
@@ -1631,17 +1726,11 @@ window.App = window.App || {};
         it.classList.add('just-appeared');
         window.setTimeout(function (n) { return function () { n.classList.remove('just-appeared'); }; }(it), 420);
       }
-      for (let h = 0; h < sk.hexSlots; h++) {
-        if (h >= prevF.hexes && h < newF.hexes && hexEls[h]) {
-          hexEls[h].classList.add('just-merged');
-          window.setTimeout(function (n) { return function () { n.classList.remove('just-merged'); }; }(hexEls[h]), 600);
-        }
-      }
-    } else if (newU < prevU) {
-      // обычная трата: угасает последний бывший треугольник
-      const slot = triEls[prevF.tris - 1];
+    } else if (newN < prevN) {
+      // трата: угасает последний бывший треугольник
+      const slot = triEls[prevN - 1];
       if (slot) {
-        const g = chgGhost('triangle', true, pal, slot.getBoundingClientRect());
+        const g = chgGhost(true, pal, slot.getBoundingClientRect());
         g.classList.add('just-removed');
         chgClearLater([g], 360);
       }
@@ -2399,8 +2488,11 @@ window.App = window.App || {};
       try {
         const val = evalCardExpr(card, str, field);
         prev.innerHTML = '= ' + fmt(val);
+        prev.title = '';
       } catch (e) {
-        prev.innerHTML = '= <span class="err">' + esc(App.t('brokenRef')) + '</span>';
+        // v51: в строке ошибку показываем коротким знаком, полный текст — в title
+        prev.innerHTML = '= <span class="err">⚠</span>';
+        prev.title = App.t('brokenRef');
       } finally {
         if (liveValue) card.value = savedValue;
         if (liveName) card.name = savedName;
@@ -3193,6 +3285,15 @@ window.App = window.App || {};
       '<select id="s-lang"><option value="ru"' + (lang === 'ru' ? ' selected' : '') + '>Русский</option>' +
       '<option value="en"' + (lang === 'en' ? ' selected' : '') + '>English</option></select></div>' +
       '<div class="field check"><input id="s-anim" type="checkbox"' + (state.settings.diceAnimation !== false ? ' checked' : '') + '><label for="s-anim">' + esc(App.t('diceAnimation')) + '</label></div>' +
+      '<div class="field"><label>' + esc(App.t('critValues')) + '</label>' +
+        // v57: оба списка в одну строку — как «кубик + количество» в карточке навыка
+        '<div class="f-row">' +
+          '<span class="f-lbl">' + esc(App.t('critOk')) + '</span>' +
+          '<input id="s-crit" class="f-ndice f-crit" type="text" value="' + esc(state.settings.critSuccess == null ? '20' : state.settings.critSuccess) + '" placeholder="20">' +
+          '<span class="f-lbl">' + esc(App.t('critFailShort')) + '</span>' +
+          '<input id="s-critfail" class="f-ndice f-crit" type="text" value="' + esc(state.settings.critFail == null ? '1' : state.settings.critFail) + '" placeholder="1">' +
+        '</div>' +
+        '<div class="formula-help">' + esc(App.t('critValuesHint')) + '</div></div>' +
       '<div class="field"><label>' + esc(App.t('characters')) + '</label>' +
       '<select id="s-char">' + charOpts + '</select>' +
       '<div class="f-buttons">' +
@@ -3213,6 +3314,8 @@ window.App = window.App || {};
 
     document.getElementById('s-lang').addEventListener('change', function (e) { state.settings.language = e.target.value; save(); render(); });
     document.getElementById('s-anim').addEventListener('change', function (e) { state.settings.diceAnimation = e.target.checked; save(); });
+    document.getElementById('s-crit').addEventListener('change', function (e) { state.settings.critSuccess = e.target.value.trim(); save(); });
+    document.getElementById('s-critfail').addEventListener('change', function (e) { state.settings.critFail = e.target.value.trim(); save(); });
     document.getElementById('s-char').addEventListener('change', function (e) { state.activeCharacterId = e.target.value; save(); render(); });
     document.getElementById('s-newchar').addEventListener('click', function () {
       closeModal();

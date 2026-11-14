@@ -570,7 +570,7 @@ body.col-dragging .card { cursor: grabbing; }
 }
 /* видим всегда, когда внутри есть строка результата; пустой хост скрывает :empty */
 #rollToast:empty { display: none; }
-#rollToast .rt-row { display: flex; align-items: center; gap: 10px; font-variant-numeric: tabular-nums; white-space: nowrap; }
+#rollToast .rt-row { display: flex; align-items: center; justify-content: center; gap: 10px; font-variant-numeric: tabular-nums; white-space: nowrap; }
 #rollToast .rt-die   { color: var(--accent2); font-size: 22px; font-weight: 700; }
 #rollToast .rt-bonus {
   color: var(--accent);
@@ -589,9 +589,74 @@ body.col-dragging .card { cursor: grabbing; }
   100% { opacity: 1; text-shadow: 0 0 0 rgba(212, 169, 60, 0); }
 }
 #rollToast.rt-pop { animation: rtPop .35s ease-out; }
+/* ---------- Крит-анимации тоста (v55) ---------- */
+#rollToast { isolation: isolate; }
+/* успех: пульс + расходящееся кольцо + золотые искры */
+#rollToast.success { border-color: #f1c34d; box-shadow: 0 0 30px rgba(234,184,59,.28), 0 8px 28px rgba(0,0,0,.5); }
+#rollToast.success .rt-total { color: #ffe07a; text-shadow: 0 0 12px #ffd45c, 0 0 30px rgba(255,185,0,.5); }
+#rollToast.success.play { animation: rtCritPop .7s cubic-bezier(.18,.85,.25,1.18) both; }
+#rollToast.success.play::before { content: ""; position: absolute; inset: -2px; border: 2px solid #ffdc70; border-radius: 14px; z-index: -1; animation: rtRing .85s ease-out both; }
+/* v57: вместо статичных искр сверху — звёзды-частицы, вылетающие ИЗ ЦЕНТРА наружу.
+   Это зеркало осколков провала (те летят снаружи к центру), поэтому оба крита
+   читаются как одна пара: успех расходится, провал сходится. */
+#rollToast .rt-stars { position: absolute; inset: 0; z-index: 3; pointer-events: none; overflow: visible; }
+#rollToast .rt-star {
+  position: absolute; left: 50%; top: 50%;
+  font-size: var(--size); line-height: 1;
+  color: #ffe089;
+  text-shadow: 0 0 7px #ffd257, 0 0 18px #e8a91e, 0 0 34px rgba(255, 187, 51, .65);
+  opacity: 0;
+  transform: translate(-50%, -50%) scale(.2) rotate(0deg);
+}
+#rollToast .rt-star:nth-child(2n) { color: #fff3c4; text-shadow: 0 0 8px #ffe08d, 0 0 20px #f0b52c; }
+#rollToast .rt-star:nth-child(3n) { font-size: calc(var(--size) * .72); }
+#rollToast.success.play .rt-star { animation: rtStarOut .8s cubic-bezier(.2,.6,.35,1) var(--delay) both; }
+@keyframes rtStarOut {
+  0%   { opacity: 0; transform: translate(-50%, -50%) scale(.2) rotate(0deg); }
+  14%  { opacity: 1; }
+  70%  { opacity: .9; }
+  100% { opacity: 0; transform: translate(calc(-50% + var(--dx)), calc(-50% + var(--dy))) scale(1.05) rotate(var(--rot)); }
+}
+/* провал (без трещины): фиолетовая вспышка, короткий толчок, кольцо и «оседание» итога */
+#rollToast.fail { border-color: #a77bdb; box-shadow: 0 0 28px rgba(142,85,201,.3), 0 8px 28px rgba(0,0,0,.5); }
+#rollToast.fail .rt-total { color: #c69aff; text-shadow: 0 0 13px #a56aff, 0 0 28px rgba(138,75,202,.5); }
+#rollToast.fail.play { animation: rtJolt .52s cubic-bezier(.36,.07,.19,.97) both; }
+#rollToast.fail.play::before { content: ""; position: absolute; inset: -2px; border: 2px solid #b58ae9; border-radius: 14px; z-index: -1; animation: rtRingViolet .7s ease-out both; }
+#rollToast.fail.play .rt-total { animation: rtSink .62s cubic-bezier(.4,0,.7,1) both; }
+/* осколки при провале: летят СНАРУЖИ К ЦЕНТРУ — обратная траектория искр успеха */
+#rollToast .rt-shards { position: absolute; inset: 0; z-index: 3; pointer-events: none; overflow: visible; }
+#rollToast .rt-shard {
+  position: absolute; left: 50%; top: 50%;
+  width: var(--size); height: calc(var(--size) * 1.35);
+  opacity: 0;
+  background: linear-gradient(145deg, #f0dcff 0%, #bd8aef 38%, #7546a8 100%);
+  filter: drop-shadow(0 0 5px #b77aff) drop-shadow(0 0 10px #8549c4);
+  transform: translate(-50%, -50%) scale(.25) rotate(0deg);
+  clip-path: polygon(50% 0, 100% 34%, 68% 100%, 18% 78%, 0 25%);
+}
+#rollToast .rt-shard:nth-child(2n) { clip-path: polygon(42% 0, 100% 18%, 77% 100%, 28% 76%, 0 38%); background: linear-gradient(135deg, #f4e5ff, #a76cdb 65%, #633b91); }
+#rollToast .rt-shard:nth-child(3n) { clip-path: polygon(50% 0, 88% 28%, 100% 72%, 34% 100%, 0 24%); width: calc(var(--size) * .72); }
+#rollToast .rt-shard:nth-child(4n) { clip-path: polygon(20% 0, 100% 45%, 58% 100%, 0 68%); background: linear-gradient(145deg, #e6caff, #9861cc); }
+/* ease-in-out: осколки сначала висят снаружи (успеваешь их увидеть), потом ускоряются к центру */
+#rollToast.fail.play .rt-shard { animation: rtShardIn .8s cubic-bezier(.45,.05,.55,.95) var(--delay) both; }
+@keyframes rtShardIn {
+  0%   { opacity: 0; transform: translate(calc(-50% + var(--dx)), calc(-50% + var(--dy))) scale(1.05) rotate(var(--rot)); }
+  12%  { opacity: 1; }
+  58%  { opacity: .92; }
+  100% { opacity: 0; transform: translate(-50%, -50%) scale(.06) rotate(calc(var(--rot) * .2)); }
+}
+@keyframes rtCritPop { 0% { transform: translate(-50%,-50%) scale(.94); filter: brightness(.8); } 28% { transform: translate(-50%,-50%) scale(1.08); filter: brightness(1.6); } 55% { transform: translate(-50%,-50%) scale(.99); filter: brightness(1.2); } 100% { transform: translate(-50%,-50%) scale(1); filter: brightness(1); } }
+@keyframes rtRing { 0% { transform: scale(.92); opacity: 0; } 22% { opacity: .9; } 100% { transform: scale(1.45); opacity: 0; } }
+@keyframes rtJolt { 0%, 100% { transform: translate(-50%,-50%); } 14% { transform: translate(calc(-50% - 5px), -50%); } 28% { transform: translate(calc(-50% + 5px), -50%); } 42% { transform: translate(calc(-50% - 3px), -50%); } 58% { transform: translate(calc(-50% + 2px), -50%); } 72% { transform: translate(calc(-50% - 1px), -50%); } }
+@keyframes rtRingViolet { 0% { transform: scale(.92); opacity: 0; } 22% { opacity: .85; } 100% { transform: scale(1.45); opacity: 0; } }
+@keyframes rtSink { 0% { transform: translateY(0); opacity: 1; } 55% { transform: translateY(7px); opacity: .55; } 100% { transform: translateY(0); opacity: 1; } }
 @media (prefers-reduced-motion: reduce) {
   #rollToast.rt-hide { transition: none; }
   #rollToast.rt-pop { animation: none; }
+  #rollToast.success.play, #rollToast.fail.play,
+  #rollToast.success.play::before,
+  #rollToast.fail.play::before, #rollToast.fail.play .rt-total,
+  #rollToast.success.play .rt-star, #rollToast.fail.play .rt-shard { animation: none !important; }
 }
 
 /* Currency */
@@ -654,9 +719,6 @@ body.col-dragging .card { cursor: grabbing; }
   justify-content: flex-start;
   gap: var(--charge-gap);
 }
-/* гексы — группа, отцентрованная над рядом треугольников (сдвиг считается в app.js
-   от максимума карточки: при 24 это ровно промежутки 2–3, 3–4 и 4–5, как в стенде) */
-
 /* ячейка-цель распада: скрыта, пока в неё летит призрак (появляется при приземлении) */
 .charge.chg-pending { visibility: hidden; }
 
@@ -729,49 +791,7 @@ body.col-dragging .card { cursor: grabbing; }
   100% { transform: scale(.15); opacity: 0; }
 }
 
-/* прямая анимация: треугольники слетаются в новый гекс */
-.charge.converting {
-  animation: fly-to-hex .72s cubic-bezier(.55,0,.85,.35) forwards;
-  pointer-events: none;
-  z-index: 5;
-}
-@keyframes fly-to-hex {
-  0%   { transform: translate(0,0) scale(1); opacity: 1; }
-  65%  { transform: translate(var(--dx, 0px), var(--dy, 0px)) scale(.48); opacity: .85; }
-  100% { transform: translate(var(--dx, 0px), var(--dy, 0px)) scale(.05); opacity: 0; }
-}
-
-/* обратная анимация: из гекса вылетают треугольники в свои ячейки.
-   fill-mode: both обязателен: во время задержки (i*28мс) действует кадр 0% —
-   призрак невидим у гекса; иначе он проступает на месте слота-цели до старта полёта */
-.charge.unmerging {
-  animation: fly-from-hex .68s cubic-bezier(.2,.7,.3,1) both;
-  pointer-events: none;
-  z-index: 5;
-}
-@keyframes fly-from-hex {
-  0%   { transform: translate(var(--dx, 0px), var(--dy, 0px)) scale(.05); opacity: 0; }
-  35%  { opacity: 1; }
-  100% { transform: translate(0,0) scale(1); opacity: 1; }
-}
-
-/* гекс при распаде: вспышка и схлопывание */
-.charge.unmerging-source { animation: hex-shrink .55s ease-out forwards; pointer-events: none; }
-@keyframes hex-shrink {
-  0%   { transform: scale(1); opacity: 1; filter: drop-shadow(0 0 0 rgba(255,209,102,0)); }
-  35%  { transform: scale(1.15); opacity: 1; filter: drop-shadow(0 0 14px rgba(255,209,102,.95)); }
-  100% { transform: scale(.1); opacity: 0; filter: drop-shadow(0 0 0 rgba(255,209,102,0)); }
-}
-
-/* новый гекс после слияния: вспышка появления */
-.charge.just-merged { animation: hex-appear .55s cubic-bezier(.2,.8,.2,1.2) both; }
-@keyframes hex-appear {
-  0%   { transform: scale(.15); opacity: 0; filter: drop-shadow(0 0 12px rgba(255,209,102,.9)); }
-  55%  { transform: scale(1.15); opacity: 1; }
-  100% { transform: scale(1); opacity: 1; filter: drop-shadow(0 0 0 rgba(255,209,102,0)); }
-}
-
-/* тег вместо фигур, когда зарядов больше 24 (например, «26 / 26»).
+/* тег вместо фигур, когда зарядов больше 12 (например, «26 / 26»).
    Приклеен слева, на месте фигур; цвет — как у ячеек:
    золотой у собственных, фиолетовый у связанных. */
 .chg-badge {
@@ -789,8 +809,56 @@ body.col-dragging .card { cursor: grabbing; }
   white-space: nowrap;
   font-variant-numeric: tabular-nums;
 }
-.chg-badge.own  { color: var(--accent); border: 1px solid rgba(212,169,60,.32); background: rgba(212,169,60,.08); }
-.chg-badge.link { color: #b3a8ff; border: 1px solid rgba(122,108,255,.38); background: rgba(122,108,255,.10); }
+.chg-badge.own  { color: var(--accent); border: 1px solid rgba(212,169,60,.32); background: rgba(212,169,60,.08); cursor: pointer; }
+.chg-badge.own:hover { background: rgba(212,169,60,.16); border-color: rgba(212,169,60,.55); }
+.chg-badge.own:active { transform: scale(.97); }
+.chg-badge.link { color: #b3a8ff; border: 1px solid rgba(122,108,255,.38); background: rgba(122,108,255,.10); cursor: pointer; }
+
+/* ---------- Барабан зарядов (v53) ---------- */
+.chg-drum-overlay {
+  position: fixed; inset: 0; z-index: 96;
+  background: rgba(8,8,14,.55);
+  display: flex; align-items: center; justify-content: center;
+  padding: 20px;
+}
+.chg-drum-panel {
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  box-shadow: var(--shadow);
+  padding: 12px;
+  display: flex; flex-direction: column; align-items: center; gap: 10px;
+}
+.chg-drum {
+  position: relative; width: 120px; height: 144px;
+  overflow: hidden; border-radius: 12px;
+  background: #191926;
+  border: 1px solid var(--border);
+  cursor: grab; touch-action: none;
+  -webkit-mask-image: linear-gradient(to bottom, transparent 0%, #000 22%, #000 78%, transparent 100%);
+  mask-image: linear-gradient(to bottom, transparent 0%, #000 22%, #000 78%, transparent 100%);
+}
+.chg-drum:active { cursor: grabbing; }
+.chg-drum-band {
+  position: absolute; left: 0; right: 0; top: 50%; height: 36px;
+  transform: translateY(-50%);
+  background: rgba(212,169,60,.10);
+  border-top: 1px solid rgba(212,169,60,.35);
+  border-bottom: 1px solid rgba(212,169,60,.35);
+  pointer-events: none; z-index: 1;
+}
+.chg-drum-list {
+  position: absolute; left: 0; width: 100%; top: 50%;
+  margin: 0; padding: 0; list-style: none;
+  will-change: transform;
+}
+.chg-drum-item {
+  height: 36px; display: flex; align-items: center; justify-content: center;
+  font-size: 20px; font-weight: 700; color: rgba(232,230,240,.22);
+  transition: color .15s ease, font-size .15s ease;
+  user-select: none;
+}
+.chg-drum-item.sel { color: var(--accent); font-size: 26px; }
 
 /* ---------- FAB ---------- */
 .fab {
@@ -971,6 +1039,7 @@ body.col-dragging .card { cursor: grabbing; }
   /* поле шага может сжиматься: на узких экранах (320) карточка ~142 px,
      иначе «+» вылезал за панель */
   .step-input { height: 40px; flex: 0 1 56px; width: 56px; min-width: 34px; font-size: 16px; }
+  /* v52: ряд треугольников; на телефоне фигуры мельче */
   .chg-row { --charge-size: 19px; --charge-gap: 4px; }
   #topbar { padding: 6px 8px; gap: 5px; }
   /* v49: кнопки-иконки в шапке одинаковой ширины (кебаб ⋮ был уже кубика ⚄) */
@@ -1049,11 +1118,24 @@ body.col-dragging .card { cursor: grabbing; }
   cursor: text;
 }
 .f-expr:focus { outline: none; border-color: var(--accent); }
-/* v50: строка выражения — поле, «+ Параметр» и «= N» в одну линию */
-.f-row { display: flex; align-items: center; gap: 8px; }
-.f-row > .f-expr { flex: 1 1 auto; min-width: 0; }
+/* v50: строка выражения — поле, «+ Параметр» и «= N» в одну линию.
+   v50.1: flex-wrap + базис поля 160px — на узком экране (телефон) поле уходит
+   на первую строку целиком, а кнопка и результат — на вторую; иначе поле
+   сжималось до одной буквы и чипы вставали столбиком.
+   Длинный текст ошибки в предпросмотре обрезается, полный — в title. */
+.f-row { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; }
+.f-row > .f-expr { flex: 1 1 160px; min-width: 0; }
 .f-row > .f-addref { flex: 0 0 auto; padding: 6px 8px; font-size: 12px; white-space: nowrap; }
-.f-row > .f-preview { flex: 0 0 auto; margin: 0; min-width: 54px; text-align: right; white-space: nowrap; }
+.f-row > .f-preview {
+  flex: 0 1 auto;
+  margin: 0 0 0 auto;
+  min-width: 54px;
+  max-width: 100%;
+  text-align: right;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
 /* кубик + количество в одну линию (навык) */
 .f-row > .f-die { flex: 0 0 92px; }
 .f-row > .f-lbl { color: var(--muted); font-size: 12px; flex: 0 0 auto; }
@@ -1063,9 +1145,12 @@ body.col-dragging .card { cursor: grabbing; }
   text-align: center;
   font-variant-numeric: tabular-nums;
 }
-.tok { display: inline-flex; align-items: center; gap: 3px; background: var(--panel2); border: 1px solid var(--border); border-radius: 6px; padding: 2px 4px; }
+/* Крит-значения в настройках (v57): два поля в одну строку, как «кубик + количество»,
+   но тянутся по ширине — списки бывают длинными («10,20»), в 88px не читаются */
+.f-row > .f-crit { flex: 1 1 110px; width: auto; min-width: 88px; }
+.tok { display: inline-flex; align-items: center; gap: 3px; background: var(--panel2); border: 1px solid var(--border); border-radius: 6px; padding: 2px 4px; max-width: 100%; }
 .tok-ref { display: inline-flex; align-items: center; gap: 3px; }
-.tok-name { max-width: 140px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; background: transparent; border: none; color: var(--accent); font: inherit; padding: 0 2px; }
+.tok-name { max-width: 140px; min-width: 0; flex: 0 1 auto; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; background: transparent; border: none; color: var(--accent); font: inherit; padding: 0 2px; }
 .tok-name:focus { outline: none; }
 /* знач. / бонус — фиксированная минимальная ширина: при переключении тег не прыгает */
 .tok-part { font-size: 11px; padding: 1px 5px; min-width: 42px; text-align: center; }
