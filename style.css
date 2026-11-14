@@ -887,10 +887,10 @@ button.active { border-color: var(--accent); color: var(--accent); }
 /* ---------- Responsive ---------- */
 @media (max-width: 720px) {
   .card { width: 100%; }
-  /* v42: по горизонтали зазора нет — два счётчика встают вплотную и занимают
-     весь ряд (50% + 50%); вертикальный зазор для остальных карточек остаётся */
-  .canvas { row-gap: 10px; column-gap: 0; padding: 10px; }
-  .card.type-counter { width: 50%; }
+  /* v42/v43: два счётчика в ряд с таким же зазором, как был у трёх ярлыков
+     (10 px), и ряд закрывается ровно: 2×(50% − 5px) + 10px = 100% */
+  .canvas { gap: 10px; padding: 10px; }
+  .card.type-counter { width: calc((100% - 10px) / 2); }
   .counter-val { font-size: 30px; }
   .counter-step { padding: 4px; gap: 4px; }
   .step-btn { height: 40px; font-size: 22px; }
