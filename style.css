@@ -306,6 +306,20 @@ button.active { border-color: var(--accent); color: var(--accent); }
   padding: 0 2px;
 }
 .card-head .handle:active { cursor: grabbing; }
+/* Тач: ручки перетаскивания обязаны забирать жест себе. Иначе браузер считает
+   касание прокруткой, рвёт поток событий pointercancel'ом — и драг не работает
+   вовсе (главная причина, почему на телефоне в «ПК версии» карточки не двигались). */
+.card-head .handle,
+.resize-handle { touch-action: none; }
+/* Палец крупнее мыши: у ручки ⋮⋮ (13×21) расширяем зону нажатия, вид не меняем.
+   any-pointer — чтобы работало и на ноутбуке с сенсорным экраном (там основной
+   указатель мышь, а палец тоже есть). Псевдоэлемент — часть той же ручки,
+   поэтому closest('.handle') его видит. */
+@media (any-pointer: coarse) {
+  .card-head .handle { position: relative; }
+  .card-head .handle::before { content: ''; position: absolute; inset: -10px -8px; }
+  .resize-handle { width: 26px; height: 26px; }
+}
 .card-name {
   font-weight: 600;
   flex: 1;
@@ -316,6 +330,27 @@ button.active { border-color: var(--accent); color: var(--accent); }
 .card-head .tools { display: flex; gap: 2px; }
 .card-head .tools button { padding: 2px 6px; font-size: 12px; background: transparent; border-color: transparent; color: var(--muted); }
 .card-head .tools button:hover { color: var(--text); background: var(--panel2); }
+/* Кебаб (v40): у компактного счётчика вместо трёх кнопок ✎⧉🗑 — одна ⋮,
+   по клику меню с теми же действиями (на мобилке ещё ↑ ↓) */
+.card-head .kebab {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 2px;
+  flex: none;
+  padding: 5px 6px;
+  border: 0;
+  background: transparent;
+  cursor: pointer;
+}
+.card-head .kebab span {
+  width: 3px;
+  height: 3px;
+  border-radius: 50%;
+  background: var(--muted);
+}
+.card-head .kebab:hover span { background: var(--text); }
 
 .card-body { display: flex; flex-direction: column; gap: 6px; padding-top: 2px; }
 
@@ -326,28 +361,89 @@ button.active { border-color: var(--accent); color: var(--accent); }
   color: var(--muted);
 }
 
-/* Counter row */
-.counter-row {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-}
+/* Счётчик (v40): компактный квадрат — значение крупно по центру + степпер
+   «− [шаг] +». Фиксированные кнопки +/− и значки ++/−− убраны: их заменило
+   поле шага (ввёл 5 → «+» = +5). Бейджи .counter-more остались у валюты. */
+.counter-body { gap: 8px; }
 .counter-val {
-  font-size: 24px;
-  font-weight: 700;
-  min-width: 70px;
+  font-size: 26px;
+  font-weight: 800;
+  line-height: 1;
   text-align: center;
+  font-variant-numeric: tabular-nums;
 }
-.counter-val small { font-size: 13px; color: var(--muted); font-weight: 500; }
-.counter-btn {
-  flex: 0 0 40px;
-  height: 40px;
-  font-size: 20px;
-  font-weight: 700;
+.counter-val small { font-size: 14px; color: var(--muted); font-weight: 600; }
+/* Панель шага: кнопки по краям, поле ровно посередине */
+.counter-step {
+  display: flex;
+  align-items: stretch;
+  gap: 3px;
+  padding: 3px;
+  background: var(--panel2);
   border-radius: 8px;
+  width: 100%;
+  max-width: 220px;   /* в колоночном виде карточка широкая — панель не растягиваем */
 }
-.counter-btn.minus { color: var(--danger); }
-.counter-btn.plus { color: var(--ok); }
+.step-btn {
+  flex: 1 1 0;
+  min-width: 30px;
+  height: 30px;
+  padding: 0;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--text);
+  font-size: 19px;
+  font-weight: 700;
+  line-height: 1;
+}
+.step-btn:hover { background: var(--panel); }
+.step-btn:active { transform: scale(.94); }
+.step-btn.minus { color: var(--danger); }
+.step-btn.plus { color: var(--ok); }
+.step-input {
+  flex: 0 0 44px;
+  width: 44px;
+  height: 30px;
+  box-sizing: border-box;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  background: rgba(0, 0, 0, .28);
+  color: var(--text);
+  text-align: center;
+  font: 700 14px/1 "Segoe UI", system-ui, sans-serif;
+  font-variant-numeric: tabular-nums;
+  padding: 0 2px;
+}
+.step-input::placeholder { color: var(--muted); opacity: 1; }
+.step-input:focus { border-color: var(--accent); outline: none; }
+
+/* Название счётчика — по центру шапки (как в стенде): слева ручка, справа кебаб */
+.card.type-counter .card-name { text-align: center; }
+
+/* ☾ на фоне карточки-СЧЁТЧИКА, если включено «восстанавливается при отдыхе».
+   overflow: hidden — иначе в колоночном режиме луна торчит за карточку
+   (в свободном размещении карточка и так обрезает содержимое).
+   У заклинания ☾ остаётся в шапке — двойной индикатор не нужен. */
+.card.type-counter.restores { isolation: isolate; overflow: hidden; }
+.card.type-counter.restores::after {
+  content: "☾";
+  position: absolute;
+  right: -7px;
+  bottom: -27px;
+  z-index: 0;
+  pointer-events: none;
+  user-select: none;
+  color: rgba(245, 199, 118, .105);
+  font-family: Georgia, "Times New Roman", serif;
+  font-size: 112px;
+  line-height: 1;
+  transform: rotate(-13deg);
+  text-shadow: 0 0 22px rgba(245, 199, 118, .08);
+}
+/* содержимое — над луной (только эти два блока: ручки/язычок позиционированы сами) */
+.card.type-counter.restores .card-head,
+.card.type-counter.restores .card-body { position: relative; z-index: 1; }
 
 .stat-line { display: flex; align-items: baseline; gap: 6px; }
 .stat-value { font-size: 22px; font-weight: 700; }
@@ -792,8 +888,10 @@ button.active { border-color: var(--accent); color: var(--accent); }
 @media (max-width: 720px) {
   .card { width: 100%; }
   .canvas { gap: 10px; padding: 10px; }
-  .counter-val { font-size: 26px; }
-  .counter-btn { height: 46px; flex-basis: 48px; }
+  .counter-val { font-size: 30px; }
+  .counter-step { padding: 4px; gap: 4px; }
+  .step-btn { height: 40px; font-size: 22px; }
+  .step-input { height: 40px; flex-basis: 56px; width: 56px; font-size: 16px; }
   .chg-row { --charge-size: 19px; --charge-gap: 4px; }
   #topbar { padding: 6px 8px; gap: 5px; }
   .brand { font-size: 15px; }
@@ -809,6 +907,9 @@ button.active { border-color: var(--accent); color: var(--accent); }
    не могут перебить модалку (z 100/101) ни в колоночном, ни в свободном режиме */
 .canvas.free { display: block; position: relative; }
 .canvas.free .card { position: absolute; }
+/* ярлык тащат за ТЕЛО (ручки у него нет): на тач-экране жест должен принадлежать
+   карточке, иначе браузер превращает его в прокрутку и драг рвётся */
+.canvas.free .card.collapsed { touch-action: none; }
 .canvas.free .card-body { flex: 1 1 auto; min-height: 0; }
 /* заметка на свободном холсте: текст занимает ВСЮ карточку (растянул — больше влезает,
    прокрутка только когда текста больше, чем высоты); в колоночном/мобильном виде
@@ -831,6 +932,7 @@ button.active { border-color: var(--accent); color: var(--accent); }
   background: linear-gradient(135deg, transparent 50%, var(--muted) 50%);
   border-bottom-right-radius: var(--radius);
   opacity: .6;
+  z-index: 2;   /* над фоновой луной .card.restores::after */
 }
 .resize-handle:hover { opacity: 1; }
 .card.dragging { z-index: 60; }
@@ -846,16 +948,8 @@ button.active { border-color: var(--accent); color: var(--accent); }
   border-color: var(--accent2);
   box-shadow: 0 0 0 2px rgba(122, 108, 255, .45), var(--shadow);
 }
-/* рамка выделения по пустому месту */
-.select-band {
-  position: absolute;
-  z-index: 55;
-  border: 1px dashed var(--accent2);
-  background: rgba(122, 108, 255, .12);
-  pointer-events: none;
-  display: none;
-}
-.select-band.active { display: block; }
+/* рамка выделения по пустому месту убрана в v35: на тач-экране она конфликтовала
+   с прокруткой. Мультивыбор — только Ctrl/Cmd + клик по карточке (см. app.js) */
 /* заметка: клик — просмотр полного текста (прокрутка внутри карточки сохраняется) */
 .note-text.readable { cursor: pointer; }
 .note-text.readable:hover { color: var(--accent); }
@@ -1102,8 +1196,9 @@ button.active { border-color: var(--accent); color: var(--accent); }
 
 /* ==========================================================
    Свертывание в ярлык (И, З, В) — перенос со стенда
-   «текущее свертывание И, З, В». Язычок — зеркальная копия
-   ресайз-ручки в левом нижнем углу, чуть желтее (#6f6a50).
+   «текущее свертывание И, З, В». Язычок — ЗЕРКАЛЬНАЯ КОПИЯ
+   ресайз-ручки: тот же размер, тот же скос и то же скругление,
+   только цвет оливковый (#6f6a50) и угол левый нижний.
    Виден и активен ВСЕГДА (игра и правка); клик по язычку —
    единственный способ свернуть/развернуть.
    ========================================================== */
@@ -1111,22 +1206,31 @@ button.active { border-color: var(--accent); color: var(--accent); }
   position: absolute;
   left: 0;
   bottom: 0;
-  width: 22px;
-  height: 22px;
+  width: 18px;                 /* как у .resize-handle */
+  height: 18px;
   padding: 0;
   border: 0;
-  background: transparent;
-  border-style: solid;
-  border-width: 0 0 22px 22px;
-  border-color: transparent transparent #6f6a50 transparent;
-  transform: scaleX(-1);
+  /* скос тем же градиентом, что у ресайз-ручки, но зеркально (225°): край
+     ложится в скругление карточки и не торчит за угол. Радиус задан явно
+     по всем углам: иначе от общего button { border-radius: 8px } остаются
+     скругления, которых у ручки ресайза нет — срезался бы острый кончик */
+  background: linear-gradient(225deg, transparent 50%, #6f6a50 50%);
+  border-radius: 0 0 0 var(--radius);
   cursor: pointer;
   z-index: 5;
-  opacity: .9;
+  opacity: .6;
 }
-/* на тач-экране язычок крупнее — 22px мелковато для пальца */
+/* Общий button:hover красил всю кнопку в серый и она «раздувалась» в квадрат —
+   на стенде этого не было. Держим тот же градиент, на наведении только ярче. */
+.fold-tab:hover {
+  background: linear-gradient(225deg, transparent 50%, #6f6a50 50%);
+  border-color: transparent;
+  opacity: 1;
+}
+.fold-tab:active { transform: none; }
+/* на тач-экране язычок крупнее — 18px мелковато для пальца */
 @media (max-width: 720px) {
-  .fold-tab { width: 26px; height: 26px; border-width: 0 0 26px 26px; }
+  .fold-tab { width: 26px; height: 26px; }
 }
 /* Иконка типа + подпись: живут в DOM всегда, видны только у ярлыка */
 .artifact {
@@ -1194,16 +1298,20 @@ button.active { border-color: var(--accent); color: var(--accent); }
   overflow-wrap: anywhere;
   pointer-events: none;
 }
-/* у ярлыка язычок «загнут»: треугольник по другую сторону диагонали */
+/* у ярлыка язычок «загнут»: треугольник по другую сторону диагонали.
+   Размер 22/26 и заливка — это штатный вид ярлыка, его не меняем (v38) */
 .card.collapsed .fold-tab {
-  border-style: none;
-  border-width: 0;
-  transform: none;
+  width: 22px;
+  height: 22px;
+  border-radius: 0;
   background: #6f6a50;
   clip-path: polygon(0 0, 100% 0, 100% 100%);
   opacity: 1;
   left: -1px;
   bottom: -1px;
+}
+@media (max-width: 720px) {
+  .card.collapsed .fold-tab { width: 26px; height: 26px; }
 }
 /* в колоночном режиме ярлык не растягивается на всю ширину:
    .card.collapsed выше перебивает и @media .card { width: 100% } */
