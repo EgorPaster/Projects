@@ -887,15 +887,21 @@ button.active { border-color: var(--accent); color: var(--accent); }
 /* ---------- Responsive ---------- */
 @media (max-width: 720px) {
   .card { width: 100%; }
-  /* v42/v43: два счётчика в ряд с таким же зазором, как был у трёх ярлыков
-     (10 px), и ряд закрывается ровно: 2×(50% − 5px) + 10px = 100% */
-  .canvas { gap: 10px; padding: 10px; }
-  .card.type-counter { width: calc((100% - 10px) / 2); }
+  /* v44: по умолчанию 4 счётчика в ряд. Холст уменьшен целиком (zoom), поэтому
+     карточка сохраняет свои 155 px раскладки и просто рендерится мельче —
+     внутренняя верстка не ломается. Зазор 10 px: 4×(25% − 7.5px) + 3×10px = 100%.
+     Ярлыки — тоже 1 клетка, заклинание — 2 клетки (см. ниже). */
+  .canvas { gap: 10px; padding: 10px; zoom: 0.56; min-height: calc((100vh - 60px) / 0.56); }
+  .card.type-counter { width: calc((100% - 30px) / 4); }
+  .card.type-spell { width: calc((100% - 30px) / 2 + 10px); }
+  /* нативный зум страницы выключен (жест отдан под масштаб листа):
+     только вертикальная прокрутка, без пинч- и двойного тапа-зума */
+  html, body { touch-action: pan-y; }
   .counter-val { font-size: 30px; }
   .counter-step { padding: 4px; gap: 4px; }
   .step-btn { height: 40px; font-size: 22px; }
-  /* поле шага может сжиматься: на узких экранах (320) два счётчика в ряд дают
-     карточку ~142 px, иначе «+» вылезал за панель */
+  /* поле шага может сжиматься: на узких экранах (320) карточка ~142 px,
+     иначе «+» вылезал за панель */
   .step-input { height: 40px; flex: 0 1 56px; width: 56px; min-width: 34px; font-size: 16px; }
   .chg-row { --charge-size: 19px; --charge-gap: 4px; }
   #topbar { padding: 6px 8px; gap: 5px; }
@@ -1452,8 +1458,9 @@ button.active { border-color: var(--accent); color: var(--accent); }
   /* запас снизу: значок «−−» свисает на 3px ниже последней строки и без запаса
      добавлял карточке ползунок, который ей не нужен (замер v33: тело 91 / прокрутка 94) */
   .layer-card .card-body { padding-bottom: 8px; }
-  /* три ярлыка в ряд заполняют ширину экрана: 100% контента холста минус два
-     зазора по 10px, делим на три. Жёсткие 108px из .card.collapsed стоят выше
-     по файлу — обе ширины с !important, поэтому побеждает эта. */
-  .card.collapsed { width: calc((100% - 20px) / 3) !important; }
+  /* v44: ярлык — одна клетка той же сетки, что и счётчики (4 в ряд):
+     100% контента холста минус три зазора по 10px, делим на четыре.
+     Жёсткие 108px из .card.collapsed стоят выше по файлу — обе ширины
+     с !important, поэтому побеждает эта. */
+  .card.collapsed { width: calc((100% - 30px) / 4) !important; }
 }
