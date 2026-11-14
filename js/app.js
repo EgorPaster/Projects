@@ -33,6 +33,11 @@ window.App = window.App || {};
     });
   }
   function dieLabel(sides) { return sides ? 'd' + sides : ''; }
+  // v50: подпись кубика с количеством — «2d20» или «d20»
+  function cardDiceLabel(card) {
+    const n = Math.max(1, Math.round(num(card.nDice) || 1));
+    return (n > 1 ? n : '') + dieLabel(card.die);
+  }
   function bonusStr(b) {
     b = num(b);
     if (!b) return '';
@@ -420,10 +425,20 @@ window.App = window.App || {};
     menu.className = 'ctxmenu';
     menu.id = 'cardMenu';
     let html = '';
-    // на телефоне в колоночном виде карточки переставляются стрелками — они тоже тут
+    // v47: на телефоне — выбор ширины карточки в клетках (1–4) и перенос на лист.
+    // Стрелки ▲▼ убраны (освободили места); порядок карточек на телефоне будет
+    // меняться перетаскиванием — это следующий шаг.
     if (!isDesktop()) {
-      html += '<button type="button" data-m="up">▲ ' + esc(App.t('moveUp')) + '</button>' +
-              '<button type="button" data-m="down">▼ ' + esc(App.t('moveDown')) + '</button>';
+      const cur = cardSpan(card);
+      html += '<div class="menu-row"><span>' + esc(App.t('cardSize')) + '</span>' +
+        [1, 2, 3, 4].map(function (n) {
+          return '<button type="button" class="size-btn' + (n === cur ? ' on' : '') +
+            '" data-m="span" data-n="' + n + '" aria-label="' + n + '">' + n + '</button>';
+        }).join('') + '</div>';
+      const ch = activeChar();
+      if (ch && ch.pages.length > 1) {
+        html += '<button type="button" data-m="page">' + esc(App.t('moveToPage')) + '…</button>';
+      }
     }
     html += '<button type="button" data-m="edit">✎ ' + esc(App.t('edit')) + '</button>' +
             '<button type="button" data-m="dup">⧉ ' + esc(App.t('duplicate')) + '</button>' +
@@ -440,13 +455,13 @@ window.App = window.App || {};
     menu.addEventListener('click', function (e) {
       const b = e.target.closest('button');
       if (!b) return;
-      closeCardMenu();
       const m = b.dataset.m;
+      if (m === 'span') { setCardSpan(cardId, Number(b.dataset.n)); closeCardMenu(); return; }
+      closeCardMenu();
       if (m === 'edit') openCardEditor(cardId);
       else if (m === 'dup') duplicateCard(cardId);
       else if (m === 'del') deleteCard(cardId);
-      else if (m === 'up') moveCard(cardId, -1);
-      else if (m === 'down') moveCard(cardId, 1);
+      else if (m === 'page') openMoveToPage(cardId);
     });
     document.addEventListener('pointerdown', onCardMenuClose, true);
     window.addEventListener('resize', closeCardMenu);
@@ -483,7 +498,7 @@ window.App = window.App || {};
   function defaultsFor(type) {
     switch (type) {
       case 'counter': return { current: 0, max: 0, bonus: '', die: null, restores: false };
-      case 'skill': return { value: null, die: 20, bonus: '' };
+      case 'skill': return { value: null, die: 20, bonus: '', description: '', nDice: 1 };
       case 'spell': return { description: '', charges: { mode: 'own', current: 0, max: 0, linkId: null, cost: 1, emptyMode: 'block' }, die: null, bonus: '', restores: false };
       case 'currency': return {
         units: [
@@ -516,7 +531,7 @@ window.App = window.App || {};
       case 'inventory': return { w: 300, h: 200 };
       case 'currency': return { w: 300, h: 170 };
       case 'spell': return { w: 300, h: 175 };       // описание 2 строки + заряды
-      case 'skill': return { w: 300, h: 95 };        // шапка с кубиком (значение — опционально, лезет в 95)
+      case 'skill': return { w: 300, h: 110 };        // v50: шапка + (описание) + значение + кубик
       case 'counter': return { w: 155, h: 120 };     // v40: компактный квадрат со степпером
       default: return { w: 300, h: 120 };
     }
@@ -528,7 +543,10 @@ window.App = window.App || {};
     const type = card.type;
     let w = MIN_W, h = MIN_H;
     if (type === 'counter') { w = 150; h = 112; }   // v40: компактный квадрат + степпер
-    if (type === 'skill') h = card.value != null ? 95 : 75;   // шапка (+ строка значения, если есть)
+    if (type === 'skill') {
+      // v50: шапка + (значение 20) + (описание ~38), минимум 75
+      h = 75 + (card.value != null ? 20 : 0) + ((card.description || '').trim() ? 38 : 0);
+    }
     if (type === 'spell') {
       const sk = chargeSkeleton(card.charges ? chargeMaxUnits(card) : null);
       if (sk) {
@@ -599,6 +617,13 @@ window.App = window.App || {};
       const mn = minSize(card);
       card.w = card.w == null ? defaultSize(card.type).w : Math.max(mn.w, card.w);
       card.h = card.h == null ? defaultSize(card.type).h : Math.max(mn.h, card.h);
+      // v50: ширина карточки в мобильной сетке (1–4 клетки)
+      if (card.span == null) card.span = defaultSpan(card.type);
+      // v50: у навыка появились описание и количество кубиков
+      if (card.type === 'skill') {
+        if (card.nDice == null) card.nDice = 1;
+        if (card.description == null) card.description = '';
+      }
     });
     // v40: ВСЕ счётчики разом приводим к единому компактному размеру (один раз на
     // персонажа — флаг в данных). Позиции не трогаем: уменьшение карточки не может
@@ -803,10 +828,15 @@ window.App = window.App || {};
   function rollCard(card) {
     if (!card.die) return;
     const bonus = cardBonus(card);
-    const dieRoll = App.dice.roll(card.die);
+    // v50: у навыка может быть несколько кубиков (2d20 и т.п.) — бросаем все и суммируем
+    const n = Math.max(1, Math.round(num(card.nDice) || 1));
+    const rolls = [];
+    for (let i = 0; i < n; i++) rolls.push(App.dice.roll(card.die));
+    const dieRoll = rolls.reduce(function (a, b) { return a + b; }, 0);
     const total = dieRoll + bonus;
-    const detail = dieLabel(card.die) + bonusStr(bonus);
-    const text = card.name + ' (' + detail + '): ' + dieRoll + (bonus ? (bonus > 0 ? ' + ' : ' − ') + Math.abs(bonus) + ' = ' + total : '');
+    const detail = cardDiceLabel(card) + bonusStr(bonus);
+    const rollText = n > 1 ? rolls.join(' + ') + ' = ' + dieRoll : String(dieRoll);
+    const text = card.name + ' (' + detail + '): ' + rollText + (bonus ? (bonus > 0 ? ' + ' : ' − ') + Math.abs(bonus) + ' = ' + total : '');
     logRoll(text);
     commit();
     showRollToast(dieRoll, bonus, total);
@@ -1223,10 +1253,30 @@ window.App = window.App || {};
     else { canvas.style.width = ''; canvas.style.height = ''; }
   }
 
+  // ===== Мобильная сетка (v46): сколько клеток занимает карточка (1–4) =====
+  // Ширину на телефоне задаёт grid; на ПК поле ни на что не влияет (там свободное
+  // размещение и ручной ресайз).
+  function defaultSpan(type) {
+    if (type === 'counter') return 1;      // четыре счётчика в ряд
+    if (type === 'currency') return 1;     // валюта/ярлык — компактная клетка
+    return 2;                              // навык/заклинание/инвентарь/заметка
+  }
+  function cardSpan(card) {
+    const n = Math.round(num(card.span) || 0);
+    return (n >= 1 && n <= 4) ? n : defaultSpan(card.type);
+  }
+  // v47: выбор ширины карточки из кебаба (1–4 клетки мобильной сетки)
+  function setCardSpan(cardId, n) {
+    const card = findCard(cardId);
+    if (!card || !(n >= 1 && n <= 4)) return;
+    if (cardSpan(card) === n) return;
+    mutate(function () { card.span = n; });
+  }
+
   function cardView(card, desktop) {
     const sel = (desktop && editMode && selIds.has(card.id)) ? ' selected' : '';
     const folded = foldable(card) && isCollapsed(card);
-    let style = '';
+    let style = '--span:' + cardSpan(card) + ';';
     if (desktop && card.x != null) {
       // при сужении окна карточки визуально поджимаются внутрь, но сохранённые координаты
       // НЕ перезаписываются: расширил окно — карточки восстановили положение
@@ -1254,9 +1304,10 @@ window.App = window.App || {};
     // toolsMode: не задан — как раньше (тулзы только в правке); true — тулзы всегда
     // (слой ярлыка); false — тулзы скрыты (в слое они уже есть в шапке ПАНЕЛИ,
     // дублирующие мёртвые кнопки в копии карточки не нужны)
-    // v40: у счётчика в правке вместо трёх кнопок ✎⧉🗑 один кебаб ⋮ —
-    // карточка узкая (155 px), три кнопки в шапку не влезают
-    const kebabMode = editMode && card.type === 'counter' && !toolsMode;
+    // v47/v48: кебаб в правке — у счётчика всегда (узкая карточка), у остальных
+    // только на телефоне: три кнопки ✎⧉🗑 там заменяются меню, а долгий тап
+    // освобождается под перетаскивание карточки
+    const kebabMode = editMode && (card.type === 'counter' || !desktop) && !toolsMode;
     let tools = '';
     if (kebabMode) {
       tools = '<button type="button" class="kebab" data-act="card-menu"' +
@@ -1278,7 +1329,8 @@ window.App = window.App || {};
     let roller = '';
     if (card.die && !editMode && card.type !== 'counter') {
       const b = cardBonus(card);
-      roller = '<button class="headroll" data-act="roll" title="' + esc(App.t('roll')) + ' ' + esc(dieLabel(card.die)) + '">' + esc(dieLabel(card.die)) + '</button>' +
+      const dl = cardDiceLabel(card);
+      roller = '<button class="headroll" data-act="roll" title="' + esc(App.t('roll')) + ' ' + esc(dl) + '">' + esc(dl) + '</button>' +
         (b ? '<span class="inc">' + (b > 0 ? '+' : '−') + Math.abs(b) + '</span>' : '');
     }
     // восклицательный знак в кружке: у карточек, чьё значение — выражение (бывшие формулы,
@@ -1329,14 +1381,18 @@ window.App = window.App || {};
       '</div>';
   }
 
-  // Навык: тело пустое (только шапка с кубиком), но если задано значение —
-  // показывает строку значения как у бывшего «стата»
+  // Навык: описание (если включено) + строка значения, если задано
   function skillBody(card) {
-    if (card.value == null) return '';
-    const val = skillValueNum(card);
-    const bonus = cardBonus(card);
-    return '<div class="card-body"><div class="stat-line"><span class="stat-value' + (val < 0 ? ' under' : '') + '">' + fmt(val) + '</span>' +
-      (bonus ? '<span class="stat-bonus">(' + (bonus > 0 ? '+' : '') + bonus + ')</span>' : '') + '</div></div>';
+    let html = '';
+    const desc = (card.description || '').trim();
+    if (desc) html += '<div class="desc-text">' + esc(card.description) + '</div>';
+    if (card.value != null) {
+      const val = skillValueNum(card);
+      const bonus = cardBonus(card);
+      html += '<div class="stat-line"><span class="stat-value' + (val < 0 ? ' under' : '') + '">' + fmt(val) + '</span>' +
+        (bonus ? '<span class="stat-bonus">(' + (bonus > 0 ? '+' : '') + bonus + ')</span>' : '') + '</div>';
+    }
+    return html ? '<div class="card-body">' + html + '</div>' : '';
   }
 
   /* ===== Заряды-фигуры (v17, по мотивам стенда «3 гекса / 24 заряда») =====
@@ -1715,17 +1771,8 @@ window.App = window.App || {};
         openLabelLayer(card.id);
       });
     }
-    // Телефон: долгий тап (полсекунды) по карточке в правке — «Перенести на лист…»
-    if (editMode && !isDesktop()) {
-      let lp = null;
-      el.addEventListener('touchstart', function (e) {
-        if (e.target.closest('button, input')) return;
-        lp = setTimeout(function () { openMoveToPage(card.id); }, 500);
-      }, { passive: true });
-      ['touchend', 'touchmove', 'touchcancel'].forEach(function (evName) {
-        el.addEventListener(evName, function () { if (lp) { clearTimeout(lp); lp = null; } }, { passive: true });
-      });
-    }
+    // v48: долгий тап больше не «Перенести на лист» (это теперь пункт в кебабе) —
+    // он поднимает карточку для перестановки (см. initColumnDrag)
   }
 
   // Перенос карточки на другой лист списком (мобильный путь; на ПК карточку тащат на вкладку)
@@ -2082,11 +2129,26 @@ window.App = window.App || {};
     ov.classList.remove('hidden');
   }
 
-  // Тулзы слоя, активные В ЛЮБОМ режиме (и на телефоне). Редактор — ТРЕТИЙ слой:
-  // слой НЕ закрываем, модалка открывается поверх; после сохранения commit →
-  // refreshLayer покажет изменения прямо в открытом слое
+  // Тулзы шапки слоя. На телефоне — ТОЛЬКО кебаб (меню с теми же действиями
+  // плюс «Размер» и «На страницу…»): иначе в шапке оказывались и кебаб, и три
+  // кнопки с ПК-версии (баг v48).
+  function layerToolsHTML() {
+    if (!isDesktop()) {
+      return '<div class="tools">' +
+        '<button type="button" class="layer-menu" title="' + esc(App.t('menu')) + '" aria-label="' + esc(App.t('menu')) + '">' +
+          '<span></span><span></span><span></span></button></div>';
+    }
+    return '<div class="tools">' +
+      '<button class="card-edit" title="' + esc(App.t('edit')) + '">✎</button>' +
+      '<button class="card-dup" title="' + esc(App.t('duplicate')) + '">⧉</button>' +
+      '<button class="card-del" title="' + esc(App.t('delete')) + '">' + TRASH_SVG + '</button>' +
+      '</div>';
+  }
   function wireLayerTools(head, card) {
-    head.querySelector('.card-edit').addEventListener('click', function () {
+    const bEdit = head.querySelector('.card-edit');
+    const bDup = head.querySelector('.card-dup');
+    const bDel = head.querySelector('.card-del');
+    if (bEdit) bEdit.addEventListener('click', function () {
       const ov = document.getElementById('labelLayer');
       const ta = ov.querySelector('.layer-note');
       if (ta) {   // заметка: несохранённый текст пишем ДО редактора, иначе он покажет старое
@@ -2099,20 +2161,22 @@ window.App = window.App || {};
     // дубль: слой закрываем — иначе новая карточка появится ПОД затемнением
     // и юзер её не увидит; удаление не закрываем: после подтверждения
     // refreshLayer сам закроет слой (карточки больше нет), при отмене слой остаётся
-    head.querySelector('.card-dup').addEventListener('click', function () { closeLabelLayer(); duplicateCard(card.id); });
-    head.querySelector('.card-del').addEventListener('click', function () { deleteCard(card.id); });
+    if (bDup) bDup.addEventListener('click', function () { closeLabelLayer(); duplicateCard(card.id); });
+    if (bDel) bDel.addEventListener('click', function () { deleteCard(card.id); });
+    // v48: у свёрнутого ярлыка шапки на холсте нет — «Размер» и «На страницу…»
+    // доступны из второго слоя через это меню
+    const menu = head.querySelector('.layer-menu');
+    if (menu) menu.addEventListener('click', function (e) {
+      e.stopPropagation();
+      openCardMenu(card.id, menu);
+    });
   }
 
   function buildLayerHead(card) {
     const head = document.createElement('div');
     head.className = 'layer-head';
     head.innerHTML =
-      '<span class="card-name">' + esc(card.name) + '</span>' +
-      '<div class="tools">' +
-        '<button class="card-edit" title="' + esc(App.t('edit')) + '">✎</button>' +
-        '<button class="card-dup" title="' + esc(App.t('duplicate')) + '">⧉</button>' +
-        '<button class="card-del" title="' + esc(App.t('delete')) + '">' + TRASH_SVG + '</button>' +
-      '</div>';
+      '<span class="card-name">' + esc(card.name) + '</span>' + layerToolsHTML();
     wireLayerTools(head, card);
     return head;
   }
@@ -2131,12 +2195,7 @@ window.App = window.App || {};
     const head = document.createElement('div');
     head.className = 'card-head';
     head.innerHTML =
-      '<span class="card-name">' + esc(card.name) + '</span>' +
-      '<div class="tools">' +
-        '<button class="card-edit" title="' + esc(App.t('edit')) + '">✎</button>' +
-        '<button class="card-dup" title="' + esc(App.t('duplicate')) + '">⧉</button>' +
-        '<button class="card-del" title="' + esc(App.t('delete')) + '">' + TRASH_SVG + '</button>' +
-      '</div>';
+      '<span class="card-name">' + esc(card.name) + '</span>' + layerToolsHTML();
     wireLayerTools(head, card);
     el.appendChild(head);
     // cardBody уже возвращает обёртку .card-body — вставляем как есть
@@ -2208,11 +2267,14 @@ window.App = window.App || {};
     if (!card || !foldable(card) || !isCollapsed(card)) { closeLabelLayer(); return; }
     const ov = document.getElementById('labelLayer');
     // заметка: текст в окне слоя может быть ещё не сохранён — тело не трогаем,
-    // но имя после редактора обновляем
+    // но имя и текст после редактора обновляем. Иначе сценарий «ярлык → ✎ →
+    // напечатал → Сохранить → закрыл слой» откатывал текст: closeLabelLayer
+    // писал из textarea старое значение (баг, найден юзером).
     const ta = ov.querySelector('.layer-note');
     if (ta) {
       const nm = ov.querySelector('.layer-head .card-name');
       if (nm) nm.textContent = card.name;
+      if (ta.value !== (card.text || '')) ta.value = card.text || '';
       return;
     }
     const old = ov.querySelector('.layer-card');
@@ -2278,12 +2340,16 @@ window.App = window.App || {};
     const n = Number(s);
     return Number.isFinite(n) ? n : s;
   }
+  // v50: строка выражения — [поле][+ Параметр][= N] в ОДНУ линию (как просил юзер).
+  // Используется везде, где можно подставить параметр: значение/бонус навыка,
+  // максимум счётчика, максимум зарядов.
   function exprFieldHTML(idPrefix, label, value, tip) {
     return '<div class="field"><label>' + esc(label) + '</label>' +
-      '<div class="f-expr" id="' + idPrefix + '-expr" contenteditable="true" spellcheck="false" data-expr="' + esc(value == null ? '' : String(value)) + '"></div>' +
-      '<div class="f-buttons"><button type="button" class="small" id="' + idPrefix + '-addref">+ ' + esc(App.t('addParam')) + '</button></div>' +
-      // живой предпросмотр «= N» — как в редакторе формул
-      '<div class="f-preview" id="' + idPrefix + '-preview">= —</div>' +
+      '<div class="f-row">' +
+        '<div class="f-expr" id="' + idPrefix + '-expr" contenteditable="true" spellcheck="false" data-expr="' + esc(value == null ? '' : String(value)) + '"></div>' +
+        '<button type="button" class="small f-addref" id="' + idPrefix + '-addref">+ ' + esc(App.t('addParam')) + '</button>' +
+        '<span class="f-preview" id="' + idPrefix + '-preview">= —</span>' +
+      '</div>' +
       (tip ? '<div class="formula-help">' + esc(tip) + '</div>' : '') +
       '</div>';
   }
@@ -2320,6 +2386,16 @@ window.App = window.App || {};
           liveValue = true;
         }
       }
+      // новую карточку ещё нет в списке под новым именем — на время предпросмотра
+      // подставляем имя из поля, иначе «{Самоконтроль}» выглядел бы битой ссылкой
+      let liveName = false, savedName;
+      const nameEl = document.getElementById('f-name');
+      const typedName = nameEl ? nameEl.value.trim() : '';
+      if (card && typedName && typedName !== card.name) {
+        savedName = card.name;
+        card.name = typedName;
+        liveName = true;
+      }
       try {
         const val = evalCardExpr(card, str, field);
         prev.innerHTML = '= ' + fmt(val);
@@ -2327,6 +2403,7 @@ window.App = window.App || {};
         prev.innerHTML = '= <span class="err">' + esc(App.t('brokenRef')) + '</span>';
       } finally {
         if (liveValue) card.value = savedValue;
+        if (liveName) card.name = savedName;
       }
     });
   }
@@ -2364,11 +2441,29 @@ window.App = window.App || {};
       '<div id="f-bonuswrap"' + (has ? '' : ' style="display:none"') + '>' +
       exprFieldHTML('f-bonus', App.t('bonus'), val, '') + '</div>';
   }
-  // Галочка «Кубик»: поставил — появился выбор кубика (d20 по умолчанию), снял — скрылся
-  function dieToggleFields(die) {
+  // Галочка «Кубик»: поставил — появился выбор кубика (d20 по умолчанию) и количество, снял — скрылось
+  function dieToggleFields(die, nDice) {
+    const n = Math.max(1, Math.min(20, Math.round(num(nDice) || 1)));
+    let opts = '';
+    App.dice.TYPES.forEach(function (s) {
+      opts += '<option value="' + s + '"' + (die === s ? ' selected' : '') + '>d' + s + '</option>';
+    });
     return checkField('f-usedie', App.t('die'), !!die) +
       '<div id="f-diewrap"' + (die ? '' : ' style="display:none"') + '>' +
-      dieField('f-die', die || 20) + '</div>';
+        '<div class="field"><div class="f-row">' +
+          '<select id="f-die" class="f-die">' + opts + '</select>' +
+          '<span class="f-lbl">' + esc(App.t('diceCount')) + '</span>' +
+          '<input id="f-ndice" class="f-ndice" type="number" inputmode="numeric" min="1" max="20" step="1" value="' + n + '" aria-label="' + esc(App.t('diceCount')) + '">' +
+        '</div></div>' +
+      '</div>';
+  }
+  // Описание как галочка (у навыка): включил — появилось поле текста
+  function descToggleFields(val) {
+    const has = val != null && String(val) !== '';
+    return checkField('f-usedesc', App.t('description'), has) +
+      '<div id="f-descwrap"' + (has ? '' : ' style="display:none"') + '>' +
+        '<div class="field"><textarea id="f-desc" placeholder="' + esc(App.t('description')) + '…">' + esc(val || '') + '</textarea></div>' +
+      '</div>';
   }
   // Значение как галочка (у навыка): то же поведение — включил, появилось поле
   // (v25: значение тоже умеет параметр — «{Уровень} * 2»)
@@ -2401,8 +2496,12 @@ window.App = window.App || {};
         return exprFieldHTML('f-max', App.t('max'), (card._new && card.max === 0) ? '' : card.max, '') +
           checkField('f-restores', App.t('restores'), !!card.restores);
       case 'skill':
-        // три независимые галочки: Кубик / Значение / Бонус — каждая сама за себя
-        return dieToggleFields(card.die) + valueToggleFields(card.value) + bonusToggleFields(card.bonus);
+        // v50: порядок как просил юзер — Описание → Значение → Кубик → Бонус;
+        // у кубика появилось количество (2d20 и т.п.)
+        return descToggleFields(card.description) +
+          valueToggleFields(card.value) +
+          dieToggleFields(card.die, card.nDice) +
+          bonusToggleFields(card.bonus);
       case 'spell': return spellFields(card);
       case 'currency': return currencyFields(card);
       case 'inventory': return inventoryFields(card);
@@ -2612,6 +2711,20 @@ window.App = window.App || {};
     bindValueToggle();
     bindDieToggle();
     bindDieGate();
+    bindDescToggle();
+    // v50: имя влияет на предпросмотр (ссылка на себя по новому имени)
+    const nmEl = document.getElementById('f-name');
+    if (nmEl) nmEl.addEventListener('input', updateExprPreviews);
+  }
+
+  // v50: описание навыка — галочка показывает/скрывает поле
+  function bindDescToggle() {
+    const cb = document.getElementById('f-usedesc');
+    const wrap = document.getElementById('f-descwrap');
+    if (!cb || !wrap) return;
+    const upd = function () { wrap.style.display = cb.checked ? '' : 'none'; };
+    cb.addEventListener('change', upd);
+    upd();
   }
 
   // ===== Чипы-параметры (v21, из редактора формул; с v25 — общий механизм полей-выражений) =====
@@ -2931,10 +3044,16 @@ window.App = window.App || {};
         // три независимые галочки: Кубик / Значение / Бонус (значение и бонус — выражения)
         const dCb = document.getElementById('f-usedie');
         card.die = (dCb ? dCb.checked : !!card.die) ? (readDie('f-die') || 20) : null;
+        // v50: количество кубиков (2d20 и т.п.), 1..20
+        const nEl = document.getElementById('f-ndice');
+        card.nDice = Math.max(1, Math.min(20, Math.round(num(nEl ? nEl.value : card.nDice) || 1)));
         const vCb = document.getElementById('f-usevalue');
         if (vCb) card.value = vCb.checked ? exprOrNull(readExpr('f-value')) : null;
         const bCb = document.getElementById('f-usebonus');
         if (bCb) card.bonus = bCb.checked ? readExpr('f-bonus').trim() : '';
+        // v50: описание — по галочке
+        const descCb = document.getElementById('f-usedesc');
+        if (descCb) card.description = descCb.checked ? readText('f-desc') : '';
         break;
       }
       case 'spell':
@@ -3487,6 +3606,114 @@ window.App = window.App || {};
   }
 
   // ===== Init =====
+  // ===== Перестановка карточек на телефоне (v48) =====
+  // Долгий тап (300 мс) по карточке в правке «поднимает» её: ведём пальцем —
+  // карточка меняется местами с соседями в сетке, отпустили — порядок сохраняется.
+  // До подъёма прокрутка не блокируется: сдвинул палец раньше таймера — это скролл.
+  let colDrag = null;
+  let colDragSuppressClick = false;
+  function beginColumnDrag(el, x, y) {
+    const rect = el.getBoundingClientRect();
+    colDrag = { el: el, id: el.dataset.id };
+    colDragSuppressClick = true;
+    el.classList.add('col-drag');
+    document.body.classList.add('col-dragging');
+    if (navigator.vibrate) { try { navigator.vibrate(15); } catch (e) {} }
+  }
+  function moveColumnDrag(y) {
+    if (!colDrag) return;
+    const H = window.innerHeight;
+    if (y < 90) window.scrollBy(0, -14);          // автопрокрутка у краёв
+    else if (y > H - 90) window.scrollBy(0, 14);
+    const canvas = document.getElementById('canvas');
+    const el = colDrag.el;
+    const others = Array.prototype.slice.call(canvas.querySelectorAll('.card')).filter(function (c) { return c !== el; });
+    let before = null;
+    for (let i = 0; i < others.length; i++) {
+      const r = others[i].getBoundingClientRect();
+      if (y < r.top + r.height / 2) { before = others[i]; break; }
+    }
+    if (before) {
+      if (el.nextElementSibling !== before) canvas.insertBefore(el, before);
+    } else if (canvas.lastElementChild !== el) {
+      canvas.appendChild(el);
+    }
+  }
+  function finishColumnDrag(apply) {
+    const el = colDrag.el;
+    el.classList.remove('col-drag');
+    document.body.classList.remove('col-dragging');
+    colDrag = null;
+    const ch = activeChar();
+    if (!apply || !ch) { render(); return; }
+    const canvas = document.getElementById('canvas');
+    const domIds = Array.prototype.map.call(canvas.querySelectorAll('.card'), function (c) { return c.dataset.id; });
+    const byId = {};
+    ch.cards.forEach(function (c) { byId[c.id] = c; });
+    const onPage = new Set(domIds);
+    let k = 0;
+    const next = ch.cards.map(function (c) { return onPage.has(c.id) ? byId[domIds[k++]] : c; });
+    const changed = next.some(function (c, i) { return c !== ch.cards[i]; });
+    if (changed) mutate(function () { ch.cards = next; });
+    else render();
+  }
+  function initColumnDrag() {
+    const canvas = document.getElementById('canvas');
+    // подавляем «долгий тап → контекстное меню» и клик после перетаскивания
+    canvas.addEventListener('contextmenu', function (e) { if (colDrag) e.preventDefault(); });
+    document.addEventListener('click', function (e) {
+      if (!colDragSuppressClick) return;
+      colDragSuppressClick = false;
+      e.stopPropagation();
+      e.preventDefault();
+    }, true);
+    canvas.addEventListener('pointerdown', function (e) {
+      if (isDesktop() || !editMode) return;
+      if (e.pointerType === 'mouse') return;
+      const el = e.target.closest ? e.target.closest('.card') : null;
+      if (!el) return;
+      if (e.target.closest('button, input, textarea')) return;
+      const startX = e.clientX, startY = e.clientY;
+      let lifted = false, done = false, timer = null;
+      const blockScroll = function (ev) { if (lifted) ev.preventDefault(); };
+      const cleanup = function () {
+        if (done) return;
+        done = true;
+        clearTimeout(timer);
+        canvas.removeEventListener('touchmove', blockScroll);
+        window.removeEventListener('pointermove', onMove);
+        window.removeEventListener('pointerup', onUp);
+        window.removeEventListener('pointercancel', onCancel);
+      };
+      const onMove = function (ev) {
+        if (!lifted) {
+          if (Math.abs(ev.clientX - startX) > 10 || Math.abs(ev.clientY - startY) > 10) cleanup();
+          return;
+        }
+        moveColumnDrag(ev.clientY);
+      };
+      const onUp = function () {
+        const wasLifted = lifted;
+        cleanup();
+        if (wasLifted) finishColumnDrag(true);
+      };
+      const onCancel = function () {
+        const wasLifted = lifted;
+        cleanup();
+        if (wasLifted) finishColumnDrag(false);
+      };
+      canvas.addEventListener('touchmove', blockScroll, { passive: false });
+      window.addEventListener('pointermove', onMove);
+      window.addEventListener('pointerup', onUp);
+      window.addEventListener('pointercancel', onCancel);
+      timer = setTimeout(function () {
+        if (done) return;
+        lifted = true;
+        beginColumnDrag(el);
+      }, 300);
+    });
+  }
+
   function init() {
     if (!state.characters.length) {
       newCharacter();   // стартовый персонаж с демо-карточками — тот же путь, что и «Новый персонаж»
@@ -3494,6 +3721,7 @@ window.App = window.App || {};
     }
     state.characters.forEach(layoutCharacter);
     initFreePlacement();
+    initColumnDrag();
     initFormulaInfo();
     addUndoKeys();
     render();

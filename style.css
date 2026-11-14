@@ -182,6 +182,34 @@ html, body {
 .ctxmenu button:hover { background: var(--panel2); }
 .ctxmenu button:disabled { opacity: .4; cursor: default; }
 .ctxmenu button:disabled:hover { background: transparent; }
+/* v47: строка «Размер 1 2 3 4» в кебабе карточки (телефон) */
+.ctxmenu .menu-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 10px 7px;
+}
+.ctxmenu .menu-row > span { color: var(--muted); font-size: 12px; margin-right: auto; }
+.ctxmenu .menu-row button.size-btn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 26px;
+  padding: 0;
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  background: transparent;
+  font-size: 12px;
+  font-weight: 700;
+  color: var(--muted);
+}
+.ctxmenu .menu-row button.size-btn:hover { border-color: var(--accent); color: var(--text); }
+.ctxmenu .menu-row button.size-btn.on {
+  border-color: var(--accent);
+  color: var(--accent);
+  background: rgba(122, 108, 255, .14);
+}
 /* Иконка «мусорка» (TRASH_SVG) в кнопках «Удалить»: в тулзах карточек 12px,
    в контекстном меню («Удалить страницу») чуть крупнее и на базовой линии текста */
 .trash-ic { width: 12px; height: 12px; display: inline-block; vertical-align: -2px; }
@@ -351,6 +379,25 @@ button.active { border-color: var(--accent); color: var(--accent); }
   background: var(--muted);
 }
 .card-head .kebab:hover span { background: var(--text); }
+/* то же меню, но в шапке второго слоя (у ярлыка шапки на холсте нет) */
+.layer-menu {
+  display: inline-flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 2px;
+  padding: 4px 5px;
+  background: transparent;
+  border: 0;
+  cursor: pointer;
+}
+.layer-menu span {
+  width: 3px;
+  height: 3px;
+  border-radius: 50%;
+  background: var(--muted);
+}
+.layer-menu:hover span { background: var(--text); }
 
 .card-body { display: flex; flex-direction: column; gap: 6px; padding-top: 2px; }
 
@@ -360,6 +407,17 @@ button.active { border-color: var(--accent); color: var(--accent); }
   letter-spacing: .6px;
   color: var(--muted);
 }
+
+/* v48: карточка «поднята» пальцем в колоночном режиме — перетаскивание по списку */
+.card.col-drag {
+  transform: scale(1.03);
+  box-shadow: 0 12px 28px rgba(0, 0, 0, .55);
+  border-color: var(--accent);
+  z-index: 50;
+  transition: transform .12s ease, box-shadow .12s ease, border-color .12s ease;
+}
+body.col-dragging { user-select: none; }
+body.col-dragging .card { cursor: grabbing; }
 
 /* Счётчик (v40): компактный квадрат — значение крупно по центру + степпер
    «− [шаг] +». Фиксированные кнопки +/− и значки ++/−− убраны: их заменило
@@ -886,17 +944,27 @@ button.active { border-color: var(--accent); color: var(--accent); }
 
 /* ---------- Responsive ---------- */
 @media (max-width: 720px) {
-  .card { width: 100%; }
-  /* v44: по умолчанию 4 счётчика в ряд. Холст уменьшен целиком (zoom), поэтому
-     карточка сохраняет свои 155 px раскладки и просто рендерится мельче —
-     внутренняя верстка не ломается. Зазор 10 px: 4×(25% − 7.5px) + 3×10px = 100%.
-     Ярлыки — тоже 1 клетка, заклинание — 2 клетки (см. ниже). */
-  .canvas { gap: 10px; padding: 10px; zoom: 0.56; min-height: calc((100vh - 60px) / 0.56); }
-  .card.type-counter { width: calc((100% - 30px) / 4); }
-  .card.type-spell { width: calc((100% - 30px) / 2 + 10px); }
+  /* v46: мобильный холст — СЕТКА из 4 колонок. Карточка занимает `span` клеток
+     (1–4, поле card.span), поэтому в одном ряду свободно смешиваются
+     2 счётчика + 3 ярлыка, счётчик на 2 клетки и т.п. Высоты строк выравнивает
+     сам grid, горизонтальные зазоры общие — 10 px. */
+  .canvas {
+    display: grid;
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+    align-items: stretch;
+    gap: 10px;
+    padding: 10px;
+    zoom: 0.56;
+    min-height: calc((100vh - 60px) / 0.56);
+  }
+  /* ширину теперь задаёт сетка, а не проценты */
+  .card { width: auto; min-width: 0; grid-column: span var(--span, 1); }
   /* нативный зум страницы выключен (жест отдан под масштаб листа):
      только вертикальная прокрутка, без пинч- и двойного тапа-зума */
   html, body { touch-action: pan-y; }
+  /* v45: ярлык по высоте = счётчик (141 px в раскладке — замерено на 320/360/390).
+     Ширину и высоту ярлыка переопределяем В КОНЦЕ файла (там, где базовые правила
+     .card.collapsed с !important), иначе они перебивают мобильные. */
   .counter-val { font-size: 30px; }
   .counter-step { padding: 4px; gap: 4px; }
   .step-btn { height: 40px; font-size: 22px; }
@@ -905,6 +973,8 @@ button.active { border-color: var(--accent); color: var(--accent); }
   .step-input { height: 40px; flex: 0 1 56px; width: 56px; min-width: 34px; font-size: 16px; }
   .chg-row { --charge-size: 19px; --charge-gap: 4px; }
   #topbar { padding: 6px 8px; gap: 5px; }
+  /* v49: кнопки-иконки в шапке одинаковой ширины (кебаб ⋮ был уже кубика ⚄) */
+  #topbar .icon { min-width: 34px; padding-left: 0; padding-right: 0; }
   .brand { font-size: 15px; }
   .char-name { gap: 6px; max-width: 42vw; }
   .char-name .orn { font-size: 7px; }
@@ -979,6 +1049,20 @@ button.active { border-color: var(--accent); color: var(--accent); }
   cursor: text;
 }
 .f-expr:focus { outline: none; border-color: var(--accent); }
+/* v50: строка выражения — поле, «+ Параметр» и «= N» в одну линию */
+.f-row { display: flex; align-items: center; gap: 8px; }
+.f-row > .f-expr { flex: 1 1 auto; min-width: 0; }
+.f-row > .f-addref { flex: 0 0 auto; padding: 6px 8px; font-size: 12px; white-space: nowrap; }
+.f-row > .f-preview { flex: 0 0 auto; margin: 0; min-width: 54px; text-align: right; white-space: nowrap; }
+/* кубик + количество в одну линию (навык) */
+.f-row > .f-die { flex: 0 0 92px; }
+.f-row > .f-lbl { color: var(--muted); font-size: 12px; flex: 0 0 auto; }
+.f-row > .f-ndice {
+  flex: 0 0 88px;
+  width: 88px;
+  text-align: center;
+  font-variant-numeric: tabular-nums;
+}
 .tok { display: inline-flex; align-items: center; gap: 3px; background: var(--panel2); border: 1px solid var(--border); border-radius: 6px; padding: 2px 4px; }
 .tok-ref { display: inline-flex; align-items: center; gap: 3px; }
 .tok-name { max-width: 140px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; background: transparent; border: none; color: var(--accent); font: inherit; padding: 0 2px; }
@@ -1458,9 +1542,9 @@ button.active { border-color: var(--accent); color: var(--accent); }
   /* запас снизу: значок «−−» свисает на 3px ниже последней строки и без запаса
      добавлял карточке ползунок, который ей не нужен (замер v33: тело 91 / прокрутка 94) */
   .layer-card .card-body { padding-bottom: 8px; }
-  /* v44: ярлык — одна клетка той же сетки, что и счётчики (4 в ряд):
-     100% контента холста минус три зазора по 10px, делим на четыре.
-     Жёсткие 108px из .card.collapsed стоят выше по файлу — обе ширины
-     с !important, поэтому побеждает эта. */
-  .card.collapsed { width: calc((100% - 30px) / 4) !important; }
+  /* v46: ширину ярлыка даёт мобильная сетка (grid-column: span var(--span)).
+     Базовые .card.collapsed { width: 108px; height: 112px } стоят выше по файлу
+     с !important, поэтому перебиваем их здесь: width/height auto + min-height,
+     чтобы ярлык растягивался по строке (в ряду с заклинанием — выше). */
+  .card.collapsed { width: auto !important; height: auto !important; min-height: 141px; }
 }
