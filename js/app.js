@@ -6,13 +6,13 @@ window.App = window.App || {};
   // ===== Constants =====
   const STORAGE_KEY = 'custplay-v1';
   const LEGACY_KEY = 'dnd-tracker-v1';
-  const CARD_TYPES = ['counter', 'skill', 'spell', 'currency', 'inventory', 'note'];
+  const CARD_TYPES = ['counter', 'skill', 'spell', 'currency', 'inventory', 'note', 'initiative'];
   // v22: типы, которые можно использовать в формулах — без валюты/инвентаря/заметок
   const FORMULA_REF_TYPES = ['counter', 'skill', 'spell'];
   // Свертывание в ярлык (v29, со стенда «текущее свертывание И, З, В»): только типы
   // с готовой иконкой; иконки в icons/labels/. Счётчик/навык/заклинание — позже.
   const FOLDABLE_ICONS = { currency: 'кошель', inventory: 'сундук', note: 'книга' };
-  const LABEL_W = 108, LABEL_H = 112;   // размер ярлыка
+  const LABEL_W = 143, LABEL_H = 120;   // ярлык (v58: по высоте равен счётчику — компоновка сходится)
   // Иконка «мусорка» для ВСЕХ кнопок «Удалить» (вместо крестика ✕): инлайн-SVG
   // в currentColor — красится как текст кнопки, как остальные глифы тулз
   const TRASH_SVG = '<svg class="trash-ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 6h18"/><path d="M8 6V4a1 1 0 0 1 1-1h6a1 1 0 0 1 1 1v2"/><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/><path d="M10 11v6"/><path d="M14 11v6"/></svg>';
@@ -509,6 +509,11 @@ window.App = window.App || {};
       };
       case 'inventory': return { items: [], showWeight: true };
       case 'note': return { text: '' };
+      // v59: инициатива — строки участников, две фазы (подготовка/бой)
+      case 'initiative': return {
+        rows: [], phase: 'prep', round: 1, turnId: null,
+        die: 20, newMode: 'roll', mini: false, hFull: 0
+      };
     }
     return {};
   }
@@ -527,25 +532,29 @@ window.App = window.App || {};
 
   function defaultSize(type) {
     switch (type) {
-      case 'note': return { w: 300, h: 220 };
-      case 'inventory': return { w: 300, h: 200 };
-      case 'currency': return { w: 300, h: 170 };
-      case 'spell': return { w: 300, h: 140 };       // v52: 2 ряда треугольников + описание (минимум уточняется в minSize)
-      case 'skill': return { w: 300, h: 110 };        // v50: шапка + (описание) + значение + кубик
-      case 'counter': return { w: 155, h: 120 };     // v40: компактный квадрат со степпером
+      // v58: единая сетка — высоты по шагу 40 (80/120/160/200), ширины 143/300.
+      // 143 + 14 (зазор) + 143 = 300: два счётчика ровно равны одной широкой карточке.
+      case 'note': return { w: 300, h: 160 };
+      case 'inventory': return { w: 300, h: 160 };
+      case 'currency': return { w: 300, h: 120 };
+      case 'spell': return { w: 300, h: 160 };        // 2 ряда треугольников + описание
+      case 'skill': return { w: 300, h: 80 };         // шапка + значение (описание — сбоку, высоту не растит)
+      case 'counter': return { w: 143, h: 120 };      // ровно половина широкой карточки
+      case 'initiative': return { w: 300, h: 352 };  // 4 строки + добавление + кнопка хода
       default: return { w: 300, h: 120 };
     }
   }
   // жёсткий минимум: чтобы содержимое карточки не обрезалось при сжатии.
   // Зависит от содержимого: валюты растут от числа единиц, инвентарь — от числа предметов.
-  // Вариант F: бросок переехал в шапку, зоны результата нет — высоты заметно ниже, минимум 220.
   function minSize(card) {
     const type = card.type;
     let w = MIN_W, h = MIN_H;
-    if (type === 'counter') { w = 150; h = 112; }   // v40: компактный квадрат + степпер
+    if (type === 'counter') { w = 143; h = 120; }   // половина широкой карточки
     if (type === 'skill') {
-      // v50: шапка + (значение 20) + (описание ~38), минимум 75
-      h = 75 + (card.value != null ? 20 : 0) + ((card.description || '').trim() ? 38 : 0);
+      // v58: компактная вёрстка — значение слева, описание сбоку. Минимум 160 по ширине
+      // (дальше срабатывает «узкий» вид), высота 80 без описания и 90 с ним.
+      w = 160;
+      h = (card.description || '').trim() ? 90 : 80;
     }
     if (type === 'spell') {
       const sk = chargeSkeleton(card.charges ? chargeMaxUnits(card) : null);
@@ -566,6 +575,11 @@ window.App = window.App || {};
     if (type === 'currency') {                  // каждая валюта — строка ~28px
       const n = Math.max(2, (card.units || []).length);
       h = Math.max(h, 64 + n * 28);
+    }
+    if (type === 'initiative') {
+      // карточка-окно: 4 строки минимум, выше — по высоте. Свёрнутая строка — 42.
+      w = 300;
+      h = card.mini ? 42 : 352;
     }
     return { w: w, h: h };
   }
@@ -638,6 +652,19 @@ window.App = window.App || {};
         c.h = defaultSize('counter').h;
       });
       ch.compactCounters = 1;
+    }
+    // v58: единая сетка размеров. Карточки, стоящие ровно на СТАРЫХ дефолтах
+    // (пользователь их не растягивал), подтягиваем к новым — иначе пустота останется
+    // навсегда: размеры хранятся в данных. Растянутые вручную не трогаем.
+    if (ch.sizes58 !== 1) {
+      const OLD = { skill: [300, 110], spell: [300, 140], currency: [300, 170], inventory: [300, 200], note: [300, 220] };
+      ch.cards.forEach(function (c) {
+        const old = OLD[c.type];
+        if (!old) return;
+        if (c.w === old[0]) c.w = defaultSize(c.type).w;
+        if (c.h === old[1]) c.h = Math.max(defaultSize(c.type).h, minSize(c).h);
+      });
+      ch.sizes58 = 1;
     }
   }
 
@@ -970,6 +997,215 @@ window.App = window.App || {};
         mutate(function () { card.items = card.items.filter(function (i) { return i.id !== ds.item; }); });
       });
     }
+    else if (act.indexOf('ini-') === 0) handleInitiative(card, act, ds, e);
+  }
+
+  // ===== Действия карточки «Инициатива» (v59) =====
+  let iniPreviewTimer = null;
+  function handleInitiative(card, act, ds, e) {
+    const el = e && e.currentTarget ? e.currentTarget.closest('.card') : null;
+
+    if (act === 'ini-roll-all') {
+      const s = iniDie(card);
+      mutate(function () {
+        iniRows(card).forEach(function (r) { r.value = 1 + Math.floor(Math.random() * s) + num(r.bonus); });
+        card.viewManual = false;
+      });
+      toast(App.t('iniRolledAll'));
+      return;
+    }
+
+    if (act === 'ini-roll') {
+      const row = iniRows(card).find(function (r) { return r.id === ds.row; });
+      if (!row) return;
+      const s = iniDie(card);
+      const val = 1 + Math.floor(Math.random() * s) + num(row.bonus);
+      mutate(function () {
+        row.value = val;
+        card.focusId = row.id;
+        card.viewManual = false;
+      });
+      toast(App.tf('iniRolledOne', { name: row.name, v: val }));
+      return;
+    }
+
+    if (act === 'ini-add') {
+      const inp = el ? el.querySelector('.ini-add-input') : null;
+      const name = inp ? inp.value.trim() : '';
+      if (!name) { if (inp) inp.focus(); return; }
+      const s = iniDie(card);
+      let value = null;
+      if (card.phase === 'battle') {
+        if (card.newMode === 'last') {
+          const vals = iniRows(card).filter(iniFilled).map(function (r) { return Number(r.value); });
+          value = vals.length ? Math.min.apply(null, vals) : 1 + Math.floor(Math.random() * s);
+        } else {
+          value = 1 + Math.floor(Math.random() * s);
+        }
+      }
+      const row = { id: uid(), name: name, value: value, bonus: 0, seq: iniRows(card).length + 1, out: false };
+      card.previewId = row.id;
+      card.focusId = row.id;
+      card.viewManual = false;
+      mutate(function () { iniRows(card).push(row); });
+      if (inp) inp.value = '';
+
+      const pos = iniOrder(card).findIndex(function (r) { return r.id === row.id; }) + 1;
+      if (card.phase === 'battle') {
+        toast(App.tf('iniPlaced', { name: name, v: value == null ? '—' : value, n: pos }));
+      } else {
+        toast(App.tf('iniAdded', { name: name }));
+      }
+
+      clearTimeout(iniPreviewTimer);
+      iniPreviewTimer = setTimeout(function () {
+        // v63: в подготовке остаёмся на новом участнике (он там, где его добавили);
+        // в бою окно само вернётся к текущему ходу — focusId в бою не используется
+        card.previewId = null;
+        render();
+      }, 2200);
+      return;
+    }
+
+    if (act === 'ini-del') {
+      const row = iniRows(card).find(function (r) { return r.id === ds.row; });
+      if (!row) return;
+      // в бою первый клик — «выбыл», второй — убрать; в подготовке сразу убираем
+      if (card.phase === 'battle' && !row.out) {
+        mutate(function () { row.out = true; });
+        return;
+      }
+      mutate(function () {
+        card.rows = iniRows(card).filter(function (r) { return r.id !== row.id; });
+        if (card.phase === 'battle' && card.turnId === row.id) {
+          const order = iniSorted(card);
+          card.turnId = order.length ? order[0].id : null;
+        }
+      });
+      return;
+    }
+
+    if (act === 'ini-back') {
+      const row = iniRows(card).find(function (r) { return r.id === ds.row; });
+      if (row) mutate(function () { row.out = false; });
+      return;
+    }
+
+    if (act === 'ini-scroll') {
+      mutate(function () {
+        const len = iniOrder(card).length;
+        const maxStart = Math.max(0, len - iniWin(card));
+        card.viewStart = Math.max(0, Math.min(maxStart, (num(card.viewStart) || 0) + (num(ds.d) || 0)));
+        card.viewManual = true;
+      });
+      return;
+    }
+
+    if (act === 'ini-pass') {
+      if (card.phase !== 'battle') {
+        const total = iniRows(card).length;
+        const filled = iniFilledCount(card);
+        if (!total) { toast(App.t('iniNoRows')); return; }
+        if (filled < total) { toast(App.tf('iniMissing', { n: total - filled })); return; }
+        const order = iniSorted(card);
+        mutate(function () {
+          card.phase = 'battle';
+          card.round = 1;
+          card.turnId = order[0].id;
+          card.viewStart = 0;
+          card.viewManual = false;
+        });
+        iniFlash(card, App.t('iniRound') + ' 1');
+        return;
+      }
+      const order = iniSorted(card);
+      if (!order.length) return;
+      if (card._iniAdvancing) return;
+      const i = order.findIndex(function (r) { return r.id === card.turnId; });
+      if (i === order.length - 1) {
+        // последний в раунде: сначала полоса доходит до 100 %, потом «Раунд N+1»
+        const bar = document.querySelector('.card[data-id="' + card.id + '"] .ini-prog i');
+        if (bar) bar.style.width = '100%';
+        card._iniAdvancing = true;
+        setTimeout(function () {
+          card._iniAdvancing = false;
+          mutate(function () {
+            card.round = (num(card.round) || 1) + 1;
+            card.turnId = order[0].id;
+            card.viewStart = 0;
+            card.viewManual = false;
+          });
+          iniFlash(card, App.t('iniRound') + ' ' + card.round);
+        }, 340);
+      } else {
+        mutate(function () { card.turnId = order[i + 1].id; });
+      }
+      return;
+    }
+
+    if (act === 'ini-flag') {
+      const prev = {
+        phase: card.phase, round: num(card.round) || 1, turnId: card.turnId,
+        h: num(card.h) || 352,
+        values: iniRows(card).map(function (r) { return r.value; })
+      };
+      mutate(function () {
+        if (card.phase === 'battle') {
+          card.phase = 'prep';
+          card.round = 1;
+          card.turnId = null;
+          // v64: бой окончен — значения инициативы устарели, чистим (как «сброс»);
+          // откат вернёт их обратно вместе с ходом и раундом
+          iniRows(card).forEach(function (r) { r.value = null; r.out = false; });
+        }
+        card.hFull = card.h;
+        card.mini = true;
+        card.h = 42;
+        card.viewStart = 0;
+        card.viewManual = false;
+      });
+      if (prev.phase === 'battle') {
+        showUndoToast(App.t('iniFinished'), function () {
+          mutate(function () {
+            card.phase = prev.phase;
+            card.round = prev.round;
+            card.turnId = prev.turnId;
+            card.mini = false;
+            card.h = prev.h;
+            iniRows(card).forEach(function (r, i) { r.value = prev.values[i] == null ? null : prev.values[i]; });
+          });
+        });
+      }
+      return;
+    }
+
+    if (act === 'ini-expand') {
+      mutate(function () {
+        card.mini = false;
+        card.h = num(card.hFull) || defaultSize('initiative').h;
+      });
+      return;
+    }
+  }
+
+  // тост с кнопкой «Вернуть» — чтобы случайный флаг можно было отменить
+  let undoTimer = null;
+  function showUndoToast(text, onUndo) {
+    let el = document.getElementById('undoToast');
+    if (!el) {
+      el = document.createElement('div');
+      el.id = 'undoToast';
+      document.body.appendChild(el);
+    }
+    el.innerHTML = '<span>' + esc(text) + '</span><button type="button">' + esc(App.t('iniUndo')) + '</button>';
+    el.classList.add('show');
+    clearTimeout(undoTimer);
+    undoTimer = setTimeout(function () { el.classList.remove('show'); }, 5000);
+    el.querySelector('button').onclick = function () {
+      clearTimeout(undoTimer);
+      el.classList.remove('show');
+      onUndo();
+    };
   }
 
   // ===== Ввод своего значения (маленькие ++/−−) =====
@@ -1344,10 +1580,22 @@ window.App = window.App || {};
       '<div class="artifact" aria-hidden="true"><img src="icons/labels/' + esc(FOLDABLE_ICONS[card.type]) + '.png" alt=""></div>' +
       '<div class="card-title-small">' + esc(card.name) + '</div>' +
       '<button class="fold-tab" title="' + esc(App.t(folded ? 'unfoldCard' : 'foldCard')) + '" aria-label="' + esc(App.t(folded ? 'unfoldCard' : 'foldCard')) + '"></button>' : '';
-    return '<div class="card type-' + card.type + (folded ? ' collapsed' : '') + sel + (card.restores ? ' restores' : '') + '" data-id="' + card.id + '" style="' + style + '">' + cardHead(card, desktop) + cardBody(card) + resize + label + '</div>';
+    const cls = 'card type-' + card.type + (card.mini ? ' mini' : '') + (folded ? ' collapsed' : '') + sel + (card.restores ? ' restores' : '');
+    // v58: у навыка шапка и кнопка броска — соседи в сетке .skill-grid, чтобы на
+    // узкой карточке кнопка уходила вниз, к значению (иначе из шапки её не вынуть).
+    if (card.type === 'skill') {
+      const roll = cardRoller(card);
+      return '<div class="' + cls + '" data-id="' + card.id + '" style="' + style + '">' +
+        '<div class="skill-grid">' +
+          cardHead(card, desktop, undefined, true) +
+          (roll ? '<span class="skill-act">' + roll + '</span>' : '') +
+          cardBody(card) +
+        '</div>' + resize + label + '</div>';
+    }
+    return '<div class="' + cls + '" data-id="' + card.id + '" style="' + style + '">' + cardHead(card, desktop) + cardBody(card) + resize + label + '</div>';
   }
 
-  function cardHead(card, desktop, toolsMode) {
+  function cardHead(card, desktop, toolsMode, noRoller) {
     // toolsMode: не задан — как раньше (тулзы только в правке); true — тулзы всегда
     // (слой ярлыка); false — тулзы скрыты (в слое они уже есть в шапке ПАНЕЛИ,
     // дублирующие мёртвые кнопки в копии карточки не нужны)
@@ -1373,12 +1621,16 @@ window.App = window.App || {};
     // иначе тулзы (✎⧉✕) не влезают на минимальной ширине.
     // v36: у СЧЁТЧИКА кубика больше нет (просьба юзера) — даже если в старых данных
     // остался card.die, чип не рисуем; данные чистятся при сохранении карточки
-    let roller = '';
-    if (card.die && !editMode && card.type !== 'counter') {
-      const b = cardBonus(card);
-      const dl = cardDiceLabel(card);
-      roller = '<button class="headroll" data-act="roll" title="' + esc(App.t('roll')) + ' ' + esc(dl) + '">' + esc(dl) + '</button>' +
-        (b ? '<span class="inc">' + (b > 0 ? '+' : '−') + Math.abs(b) + '</span>' : '');
+    // v58: кнопка вынесена в cardRoller — у навыка она живёт отдельно от шапки,
+    // чтобы на узкой карточке переехать вниз (сетка .skill-grid)
+    let roller = noRoller ? '' : cardRoller(card);
+    // v59: у инициативы свои кнопки: «бросить всем» (только в подготовке) и флаг
+    // («бой окончен» / сворачивание). Флаг всегда последний — в бою он у правого края.
+    if (card.type === 'initiative') {
+      roller = editMode ? '' :
+        (card.phase === 'battle' ? '' :
+          '<button type="button" class="headroll" data-act="ini-roll-all" title="' + esc(App.t('iniRollAll')) + '"></button>') +
+        '<button type="button" class="headroll flag-btn" data-act="ini-flag" title="' + esc(App.t('iniEndFight')) + '">' + FLAG_SVG + '</button>';
     }
     // восклицательный знак в кружке: у карточек, чьё значение — выражение (бывшие формулы,
     // теперь навыки с параметрами): навёл курсор — подсказка с выражением и результатом.
@@ -1395,6 +1647,17 @@ window.App = window.App || {};
       '</span>' + finfo + linktag + roller + tools + '</div>';
   }
 
+  // Кнопка броска (v58): отдельная сущность, а не часть шапки — у навыка она
+  // стоит в своей клетке сетки и на узком виде переезжает вниз, к значению.
+  // У навыка бонус уже показан в скобках у значения, поэтому чип +N не дублируем.
+  function cardRoller(card) {
+    if (!card.die || editMode || card.type === 'counter' || card.type === 'initiative') return '';
+    const b = cardBonus(card);
+    const dl = cardDiceLabel(card);
+    return '<button class="headroll" data-act="roll" title="' + esc(App.t('roll')) + ' ' + esc(dl) + '">' + esc(dl) + '</button>' +
+      (b && card.type !== 'skill' ? '<span class="inc">' + (b > 0 ? '+' : '−') + Math.abs(b) + '</span>' : '');
+  }
+
   function cardBody(card) {
     switch (card.type) {
       case 'counter': return counterBody(card);
@@ -1403,6 +1666,7 @@ window.App = window.App || {};
       case 'currency': return currencyBody(card);
       case 'inventory': return inventoryBody(card);
       case 'note': return noteBody(card);
+      case 'initiative': return initiativeBody(card);
     }
     return '';
   }
@@ -1428,18 +1692,24 @@ window.App = window.App || {};
       '</div>';
   }
 
-  // Навык: описание (если включено) + строка значения, если задано
+  // Навык (v58): значение с бонусом в скобках слева, описание — сбоку за тонкой чертой.
+  // Порядок важен: при сужении карточки описание прячется (CSS), а значение остаётся.
   function skillBody(card) {
-    let html = '';
     const desc = (card.description || '').trim();
-    if (desc) html += '<div class="desc-text">' + esc(card.description) + '</div>';
-    if (card.value != null) {
+    const hasVal = card.value != null;
+    if (!desc && !hasVal) return '';
+    let html = '';
+    if (hasVal) {
       const val = skillValueNum(card);
       const bonus = cardBonus(card);
       html += '<div class="stat-line"><span class="stat-value' + (val < 0 ? ' under' : '') + '">' + fmt(val) + '</span>' +
         (bonus ? '<span class="stat-bonus">(' + (bonus > 0 ? '+' : '') + bonus + ')</span>' : '') + '</div>';
     }
-    return html ? '<div class="card-body">' + html + '</div>' : '';
+    if (desc) {
+      html += '<span class="skill-vline" aria-hidden="true"></span>' +
+        '<div class="desc-text">' + esc(card.description) + '</div>';
+    }
+    return '<div class="card-body skill-body">' + html + '</div>';
   }
 
   /* ===== Заряды-фигуры (v52: только треугольники, 2 ряда по 6) =====
@@ -1576,6 +1846,147 @@ window.App = window.App || {};
     return '<div class="card-body">' +
       (card.description ? '<div class="desc-text">' + esc(card.description) + '</div>' : '') +
       chargesInfo(card) + '</div>';
+  }
+
+  /* ===== Инициатива (v59) =====
+     Две фазы. «Подготовка»: порядок не назначается (строки как добавили), у новых
+     участников инициатива пустая («—»), такие строки подсвечены фиолетовым, полоса
+     показывает, сколько заполнено. «Начать бой» сортирует, прячет значения, кубики
+     и плюсы. Окно строк — от высоты карточки, минимум 4. Флаг — «бой окончен»
+     и сворачивание в строку 42 px. */
+  const FLAG_SVG = '<svg class="ini-flag-ic" viewBox="0 0 100 100" aria-hidden="true"><path d="M14 96 L14 6"/><path d="M14 14 C22 8 35 4 48 6 C52 7 55 10 55 14 L55 22 C60 22 70 20 80 18 C84 17 88 15 88 15 L88 55 C80 58 70 62 60 63 C55 64 50 62 50 56 L50 46 C42 48 32 52 22 54 C18 55 14 56 14 56"/></svg>';
+
+  function iniDie(card) { return Math.max(2, Math.round(num(card.die) || 20)); }
+  function iniRows(card) { if (!Array.isArray(card.rows)) card.rows = []; return card.rows; }
+  function iniFilled(r) { return !!r && r.value != null && r.value !== '' && Number.isFinite(Number(r.value)); }
+  function iniFilledCount(card) { return iniRows(card).filter(iniFilled).length; }
+  function iniSorted(card) {
+    return iniRows(card).slice().sort(function (a, b) {
+      const av = iniFilled(a) ? Number(a.value) : -Infinity;
+      const bv = iniFilled(b) ? Number(b.value) : -Infinity;
+      return (bv - av) || ((num(a.seq) || 0) - (num(b.seq) || 0));
+    });
+  }
+  function iniOrder(card) { return card.phase === 'battle' ? iniSorted(card) : iniRows(card); }
+  function iniCur(card) { return iniRows(card).find(function (r) { return r.id === card.turnId; }) || null; }
+  // сколько строк видно: минимум 4, дальше — по высоте карточки
+  function iniWin(card) {
+    // 208 — вся «обвязка» карточки, кроме списка: отступы, шапка, подпись, полоса,
+    // подсказки, добавление и кнопка хода. При высоте 352 остаётся ровно 4 строки.
+    return Math.max(4, Math.floor(((num(card.h) || 352) - 208) / 37));
+  }
+  function iniViewStart(card) {
+    const order = iniOrder(card);
+    const len = order.length;
+    const win = iniWin(card);
+    const maxStart = Math.max(0, len - win);
+    let st = Math.max(0, Math.min(num(card.viewStart) || 0, maxStart));
+    if (!card.viewManual) {
+      let focus = 0;
+      if (card.phase === 'battle') {
+        focus = Math.max(0, order.findIndex(function (r) { return r.id === card.turnId; }));
+      } else if (card.focusId) {
+        focus = Math.max(0, order.findIndex(function (r) { return r.id === card.focusId; }));
+      }
+      if (focus < st) st = focus;
+      else if (focus > st + win - 1) st = focus - win + 1;
+    }
+    return Math.max(0, Math.min(st, maxStart));
+  }
+
+  function initiativeBody(card) {
+    iniRows(card);
+    if (card.mini) return initiativeMini(card);
+
+    const order = iniOrder(card);
+    const total = order.length;
+    const filled = iniFilledCount(card);
+    const win = iniWin(card);
+    const start = iniViewStart(card);
+    card.viewStart = start;
+    const view = order.slice(start, start + win);
+    const prep = card.phase !== 'battle';
+
+    let headLabel, prog;
+    if (prep) {
+      headLabel = '<span class="ini-label prep">' + esc(App.t('iniPreparation')) +
+        '<span class="ini-cnt">' + filled + ' / ' + total + '</span></span>';
+      prog = total ? Math.round(filled / total * 100) : 0;
+    } else {
+      const ti = Math.max(0, order.findIndex(function (r) { return r.id === card.turnId; }));
+      headLabel = '<span class="ini-label">' + esc(App.t('iniRound')) + ' <b>' + (num(card.round) || 1) + '</b></span>';
+      prog = total ? Math.round(ti / total * 100) : 0;
+    }
+
+    let html = '<div class="ini-top">' + headLabel + '</div>' +
+      '<div class="ini-prog' + (prep ? ' prep' : '') + '"><i style="width:' + prog + '%"></i></div>' +
+      '<div class="ini-spill">' + (start ? '<button type="button" class="ini-scroll" data-act="ini-scroll" data-d="-1">↑ ещё ' + start + '</button>' : '') + '</div>' +
+      '<div class="ini-list">';
+
+    view.forEach(function (r, i) {
+      const rank = start + i + 1;
+      const cur = !prep && r.id === card.turnId;
+      const todo = prep && !iniFilled(r);
+      // v63: в подготовке не мигаем — пока инициатива пустая, держится ровная
+      // фиолетовая подсветка (todo). Вспышка — только когда значение уже есть.
+      const fresh = r.id === card.previewId && (!prep || iniFilled(r));
+      html += '<div class="ini-row' + (cur ? ' cur' : '') + (todo ? ' todo' : '') + (r.out ? ' out' : '') + (fresh ? ' fresh' : '') + '" data-row="' + esc(r.id) + '">' +
+        '<span class="ini-rank">' + rank + '</span>' +
+        '<input class="ini-name" data-ini="name" data-row="' + esc(r.id) + '" value="' + esc(r.name) + '">' +
+        (prep
+          ? (num(r.bonus) ? '<span class="ini-bonus">+' + num(r.bonus) + '</span>' : '') +
+            '<input class="ini-val" data-ini="value" data-row="' + esc(r.id) + '" placeholder="—" inputmode="numeric" value="' + (iniFilled(r) ? esc(r.value) : '') + '">' +
+            '<button type="button" class="ini-dice" data-act="ini-roll" data-row="' + esc(r.id) + '" title="' + esc(App.t('roll')) + '">🎲</button>' +
+            '<button type="button" class="ini-del" data-act="ini-del" data-row="' + esc(r.id) + '" title="' + esc(App.t('delete')) + '">✕</button>'
+          : (!r.out
+              ? '<button type="button" class="ini-del" data-act="ini-del" data-row="' + esc(r.id) + '" title="' + esc(App.t('iniOut')) + '">✕</button>'
+              : '<button type="button" class="ini-back" data-act="ini-back" data-row="' + esc(r.id) + '" title="' + esc(App.t('iniBack')) + '">↩</button>' +
+                '<button type="button" class="ini-del armed" data-act="ini-del" data-row="' + esc(r.id) + '" title="' + esc(App.t('delete')) + '">✕</button>')) +
+        '</div>';
+    });
+    html += '</div>';
+
+    const above = start;
+    const below = Math.max(0, total - (start + win));
+    html += '<div class="ini-spill">' +
+      (below ? '<button type="button" class="ini-scroll" data-act="ini-scroll" data-d="1">↓ ещё ' + below + '</button>' : '') +
+      '</div>';
+
+    const blocked = prep && (filled < total || !total);
+    html += '<div class="ini-add">' +
+        '<input class="ini-add-input" type="text" placeholder="' + esc(App.t('iniName')) + '">' +
+        '<button type="button" data-act="ini-add">+</button>' +
+      '</div>' +
+      '<button type="button" class="ini-pass' + (prep ? ' start' : '') + (blocked ? ' blocked' : '') + '" data-act="ini-pass">' +
+        esc(App.t(prep ? 'iniStart' : 'iniNext')) + '</button>';
+
+    return '<div class="card-body ini-body">' + html + '</div>';
+  }
+
+  // свёрнутая строка: имя · раунд/подготовка · текущий
+  function initiativeMini(card) {
+    const prep = card.phase !== 'battle';
+    const cur = iniCur(card);
+    const left = prep ? App.t('iniPreparation') : App.t('iniRound') + ' ' + (num(card.round) || 1);
+    const right = prep ? iniFilledCount(card) + '/' + iniRows(card).length : (cur ? '▶ ' + cur.name : '');
+    return '<div class="card-body ini-body mini">' +
+      '<div class="ini-mini" data-act="ini-expand" role="button" tabindex="0">' +
+        '<span class="m-name">' + esc(card.name) + '</span>' +
+        '<span class="m-sep"></span>' +
+        '<span class="m-round' + (prep ? ' prep' : '') + '">' + esc(left) + '</span>' +
+        '<span class="m-turn' + (prep ? ' dim' : '') + '">' + esc(right) + '</span>' +
+      '</div></div>';
+  }
+
+  // всплывающая надпись «Раунд N» при смене раунда
+  function iniFlash(card, text) {
+    const el = document.querySelector('.card[data-id="' + card.id + '"]');
+    if (!el) return;
+    const d = document.createElement('div');
+    d.className = 'ini-flash';
+    d.textContent = text;
+    el.appendChild(d);
+    setTimeout(function () { d.remove(); }, 1000);
   }
 
   /* ===== Барабан зарядов (v53) =====
@@ -1846,6 +2257,38 @@ window.App = window.App || {};
       // фокус в поле не должен тянуть карточку/меню — гасим всплытие клика
       stepInp.addEventListener('pointerdown', function (e) { e.stopPropagation(); });
     }
+    // v59: инициатива — правка имени/значения прямо в строке и прокрутка окна колесом
+    if (card.type === 'initiative') {
+      el.querySelectorAll('[data-ini]').forEach(function (inp) {
+        inp.addEventListener('change', function () {
+          const row = iniRows(card).find(function (r) { return r.id === inp.dataset.row; });
+          if (!row) return;
+          if (inp.dataset.ini === 'name') {
+            const v = inp.value.trim();
+            if (!v) { inp.value = row.name; return; }
+            if (v === row.name) return;
+            mutate(function () { row.name = v; });
+            return;
+          }
+          const raw = inp.value.trim();
+          const v = parseInt(raw, 10);
+          mutate(function () {
+            row.value = raw === '' || !Number.isFinite(v) ? null : v;
+            card.focusId = row.id;
+            card.viewManual = false;
+          });
+        });
+        inp.addEventListener('pointerdown', function (e) { e.stopPropagation(); });
+      });
+      const iniList = el.querySelector('.ini-list');
+      if (iniList) {
+        iniList.addEventListener('wheel', function (ev) {
+          if (Math.max(0, iniOrder(card).length - iniWin(card)) === 0) return;
+          ev.preventDefault();
+          handleInitiative(card, 'ini-scroll', { d: ev.deltaY > 0 ? '1' : '-1' }, { currentTarget: el });
+        }, { passive: false });
+      }
+    }
     // Язычок: клик — свернуть/развернуть (единственный способ). Клик по САМОЙ карточке
     // ничего не сворачивает (как решили).
     const fold = el.querySelector('.fold-tab');
@@ -1976,10 +2419,10 @@ window.App = window.App || {};
 
       const handle = e.target.closest ? e.target.closest('.handle') : null;
       const resize = e.target.closest ? e.target.closest('.resize-handle') : null;
-      // у ярлыка нет ручки (шапка скрыта) — тащим за тело; ресайза у ярлыка нет
-      const collapsedCard = cardEl.classList.contains('collapsed');
-      if (!handle && !resize && !collapsedCard) return;   // клик по телу — только подъём (как раньше)
-      if (resize && collapsedCard) return;
+      // у ярлыка нет ручки (шапка скрыта) — тащим за тело; то же у свёрнутой инициативы
+      const foldedCard = cardEl.classList.contains('collapsed') || cardEl.classList.contains('mini');
+      if (!handle && !resize && !foldedCard) return;   // клик по телу — только подъём (как раньше)
+      if (resize && foldedCard) return;
       const card = findCard(cardEl.dataset.id);
       if (!card) return;
       e.preventDefault();
@@ -1989,7 +2432,7 @@ window.App = window.App || {};
       // в выделении (рамкой или Ctrl) — тащим всю выделенную группу, как обычную карточку
       // (иначе «выделил 3 ярлыка, тащу один — едет только он»)
       let group;
-      if (collapsedCard && !selIds.has(card.id)) group = [card];
+      if (foldedCard && !selIds.has(card.id)) group = [card];
       else {
         if (!selIds.has(card.id)) setSelection([card.id]);
         group = Array.from(selIds).map(findCard).filter(Boolean);
@@ -2598,12 +3041,27 @@ window.App = window.App || {};
       case 'currency': return currencyFields(card);
       case 'inventory': return inventoryFields(card);
       case 'note': return noteFields(card);
+      case 'initiative': return initiativeFields(card);
     }
     return '';
   }
 
-  function chargesFields(card, showRestores) {
-    const ch = card.charges || { mode: 'own' };
+  // v59: настройки инициативы — кубик и поведение нового участника
+  function initiativeFields(card) {
+    const die = Math.max(2, Math.round(num(card.die) || 20));
+    const options = [20, 12, 10, 8, 6].map(function (s) {
+      return '<option value="' + s + '"' + (die === s ? ' selected' : '') + '>d' + s + '</option>';
+    }).join('');
+    return '<div class="field"><label>' + esc(App.t('iniDie')) + '</label>' +
+        '<select id="f-ini-die">' + options + '</select></div>' +
+      '<div class="field"><label>' + esc(App.t('iniNewMode')) + '</label>' +
+        '<select id="f-ini-new">' +
+          '<option value="roll"' + (card.newMode === 'last' ? '' : ' selected') + '>' + esc(App.t('iniNewRoll')) + '</option>' +
+          '<option value="last"' + (card.newMode === 'last' ? ' selected' : '') + '>' + esc(App.t('iniNewLast')) + '</option>' +
+        '</select></div>';
+  }
+
+  function chargesFields(card, showRestores) {    const ch = card.charges || { mode: 'own' };
     const ch2 = activeChar();
     const counters = ch2.cards.filter(function (c) { return c.type === 'counter' && c.id !== card.id; });
     const linkOpts = counters.map(function (c) {
@@ -3155,6 +3613,13 @@ window.App = window.App || {};
         card.bonus = readBonus();
         card.restores = readCheck('f-restores');
         break;
+      case 'initiative': {
+        const dEl = document.getElementById('f-ini-die');
+        card.die = Math.max(2, Math.round(num(dEl ? dEl.value : card.die) || 20));
+        const nEl = document.getElementById('f-ini-new');
+        card.newMode = nEl && nEl.value === 'last' ? 'last' : 'roll';
+        break;
+      }
       case 'currency': {
         const units = editScratch.units || card.units;
         card.units = units.map(function (u) { return { id: u.id, name: u.name, base: num(u.base) }; });
