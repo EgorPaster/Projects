@@ -2083,8 +2083,7 @@ body.no-scroll { overflow: hidden; overscroll-behavior: none; }
 .set-del:hover { color: var(--danger); border-color: var(--danger); background: transparent; }
 .set-del .trash-ic { width: 14px; height: 14px; }
 /* всплывающий вопрос «Да / Нет» (вместо отдельного окна) */
-.inline-ask { min-width: 190px; padding: 10px; }
-.inline-ask .ask-text { font-size: 12.5px; line-height: 1.35; margin-bottom: 9px; }
+.inline-ask { min-width: 190px; padding: 10px; }.inline-ask .ask-text { font-size: 12.5px; line-height: 1.35; margin-bottom: 9px; }
 .inline-ask .ask-actions { display: flex; gap: 6px; justify-content: flex-end; }
 .inline-ask .ask-actions button {
   display: inline-block; width: auto; padding: 5px 12px;
@@ -2241,3 +2240,35 @@ body.no-scroll { overflow: hidden; overscroll-behavior: none; }
   .set-plus, .set-ren, .set-exp, .set-del { width: 24px; height: 24px; }
   .set-flag { padding: 2px 4px; }
 }
+/* ---------- v89: бейдж и дельта модификаторов, «своя» строка инициативы ---------- */
+.mod-badge {
+  flex: 0 0 auto; min-width: 18px; height: 18px; padding: 0 4px;
+  border-radius: 9px; background: rgba(212,169,60,.16);
+  border: 1px solid rgba(212,169,60,.5); color: var(--accent);
+  font-size: 10.5px; font-weight: 700; line-height: 16px; text-align: center;
+  cursor: pointer; user-select: none;
+}
+.mod-badge:hover { background: rgba(212,169,60,.28); }
+.mod-delta {
+  margin-left: 3px; font-size: 11px; font-weight: 700;
+  color: var(--accent); vertical-align: super; line-height: 1;
+  cursor: help;
+}
+.chg-badge .mod-delta { margin-left: 2px; }
+/* излишек зарядов сверх уменьшённого максимума */
+.chg-over {
+  align-self: center; margin-left: 4px; padding: 0 5px;
+  font-size: 11px; font-weight: 700; color: var(--danger);
+  border: 1px solid rgba(224,92,92,.45); border-radius: 999px;
+  cursor: help;
+}
+.mod-pop { max-width: 270px; }
+.mod-pop-title { font-size: 11px; color: var(--muted); margin-bottom: 5px; }
+.mod-pop-row { font-size: 12.5px; line-height: 1.6; overflow-wrap: anywhere; }
+.ini-self {
+  flex: 0 0 auto; width: 22px; height: 22px; padding: 0; border-radius: 50%;
+  border: 1px solid var(--border); background: transparent; color: var(--muted);
+  font: inherit; font-size: 10px; font-weight: 700; cursor: pointer;
+}
+.ini-self:hover { color: var(--text); border-color: var(--accent2); }
+.ini-self.on { color: #1a1622; background: var(--accent); border-color: var(--accent); }

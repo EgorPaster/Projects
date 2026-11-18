@@ -847,7 +847,7 @@ window.App = window.App || {};
         (s.effects || []).forEach(function (ef) {
           if (!ef || !ef.target) return;              // флаг без цели на числа не влияет
           if (ef.mode === 'block') { blocks[ef.target] = ef.label || s.name || ''; return; }
-          (byTarget[ef.target] || (byTarget[ef.target] = [])).push({ ef: ef, source: s.name || '' });
+          (byTarget[ef.target] || (byTarget[ef.target] = [])).push({ ef: ef, source: s.name || '', color: s.color || '' });
         });
       });
     });
@@ -889,6 +889,57 @@ window.App = window.App || {};
     });
     return v;
   }
+
+  // v89: «что на меня влияет» — сводка для бейджа в шапке карточки
+  function modSummary(card) {
+    const items = [];
+    (modIndex().byTarget[card.id] || []).forEach(function (it) {
+      if (!(MOD_ORDER[it.ef.mode] || it.ef.mode === 'dice')) return;
+      items.push((it.ef.label || it.source || '') + ': ' + fxShort(it.ef));
+    });
+    const block = modIndex().blocks[card.id];
+    if (block) items.push(block + ': ' + App.t('fxOpBlock'));
+    return { count: items.length, items: items };
+  }
+
+  // v89: дельта у значения — «(−2)» рядом с числом; в подсказке — от кого
+  function modDelta(card, field, base) {
+    const list = modsFor(card, field);
+    if (!list.length) return '';
+    const val = applyMods(card, field, base);
+    const b = (typeof base === 'number' && Number.isFinite(base)) ? base : null;
+    const v = (typeof val === 'number' && Number.isFinite(val)) ? val : null;
+    let txt = '';
+    if (b != null && v != null && v !== b) {
+      const d = v - b;
+      txt = (d > 0 ? '+' : '−') + fmt(Math.abs(d));
+    } else if (v != null) {
+      txt = '→ ' + fmt(v);
+    }
+    if (!txt) return '';
+    const tip = list.map(function (it) {
+      return (it.ef.label || it.source || '') + ': ' + fxShort(it.ef);
+    }).join(' · ');
+    // v90: дельта красится цветом иконки состояния-источника
+    const col = list[0] && list[0].color ? list[0].color : '';
+    return '<span class="mod-delta"' + (col ? ' style="color:' + esc(col) + '"' : '') +
+      ' title="' + esc(tip) + '">' + esc(txt) + '</span>';
+  }
+
+  // базовые значения без модификаторов — для расчёта дельты
+  function cardBonusBase(card) {
+    if (card.bonus != null && String(card.bonus).trim() !== '') {
+      try { return evalCardExpr(card, card.bonus, 'bonus'); } catch (e) { return 0; }
+    }
+    return 0;
+  }
+  function skillValueBase(card) {
+    if (card.value == null) return 0;
+    if (typeof card.value === 'number') return num(card.value);
+    try { return evalCardExpr(card, card.value, 'value'); } catch (e) { return 0; }
+  }
+  function counterMaxBase(card) { return exprNumber(card, card.max); }
+  function chargesMaxBase(card) { return exprNumber(card, card.charges ? card.charges.max : null); }
 
   // доп. кубики к броску (режим dice): «1d6», «2d8»
   function diceEffectsFor(card) {
@@ -1255,6 +1306,16 @@ window.App = window.App || {};
     if (act === 'ini-back') {
       const row = iniRows(card).find(function (r) { return r.id === ds.row; });
       if (row) mutate(function () { row.out = false; });
+      return;
+    }
+
+    if (act === 'ini-self') {
+      const row = iniRows(card).find(function (r) { return r.id === ds.row; });
+      if (!row) return;
+      mutate(function () {
+        const turnOn = !row.self;
+        iniRows(card).forEach(function (r) { r.self = (r.id === row.id) ? turnOn : false; });
+      });
       return;
     }
 
@@ -1836,7 +1897,15 @@ window.App = window.App || {};
     // показывает большая фоновая луна (.card.restores::after)
     return '<div class="card-head">' + handle + '<span class="card-name">' +
       (card.restores && card.type !== 'counter' ? '<span class="restore-ic">☾</span>' : '') + esc(card.name) +
-      '</span>' + finfo + linktag + roller + tools + '</div>';
+      '</span>' + modBadgeHTML(card) + finfo + linktag + roller + tools + '</div>';
+  }
+
+  // v89: бейдж «на меня влияют»: число активных модификаторов, тап — список источников
+  function modBadgeHTML(card) {
+    if (editMode) return '';
+    const s = modSummary(card);
+    if (!s.count) return '';
+    return '<span class="mod-badge" data-mod="' + esc(card.id) + '" title="' + esc(s.items.join('\n')) + '">' + s.count + '</span>';
   }
 
   // Кнопка броска (v58): отдельная сущность, а не часть шапки — у навыка она
@@ -1872,11 +1941,18 @@ window.App = window.App || {};
     const over = (max != null && cur > max);
     const under = cur < 0;
     const step = counterSteps.get(card.id);
+    // v90: если по «текущему» бьют эффекты «раз в ход» — красим число цветом состояния
+    const tickList = (modIndex().byTarget[card.id] || []).filter(function (it) { return it.ef.mode === 'tick'; });
+    const curHtml = tickList.length
+      ? '<span class="mod-tick" style="color:' + esc(tickList[0].color || '') + '" title="' +
+          esc(tickList.map(function (it) { return (it.ef.label || it.source || '') + ': ' + (it.ef.value || ''); }).join(' · ')) +
+        '">' + cur + '</span>'
+      : String(cur);
     // v40: компактный вид — значение крупно по центру, ниже степпер «− [шаг] +».
     // Фиксированные +/− и ++/−− убраны: шаг задаётся полем (пусто = 1).
     return '<div class="card-body counter-body">' +
-        '<div class="counter-val' + (over ? ' over' : '') + (under ? ' under' : '') + '">' + cur +
-          (max != null ? '<small> / ' + max + '</small>' : '') + '</div>' +
+        '<div class="counter-val' + (over ? ' over' : '') + (under ? ' under' : '') + '">' + curHtml +
+          (max != null ? '<small> / ' + max + '</small>' + modDelta(card, 'max', counterMaxBase(card)) : '') + '</div>' +
         '<div class="counter-step">' +
           '<button type="button" class="step-btn minus" data-act="dec" title="' + esc(App.t('decrease')) + '">−</button>' +
           '<input class="step-input" type="text" inputmode="numeric" autocomplete="off" spellcheck="false"' +
@@ -1898,7 +1974,8 @@ window.App = window.App || {};
       const val = skillValueNum(card);
       const bonus = cardBonus(card);
       html += '<div class="stat-line"><span class="stat-value' + (val < 0 ? ' under' : '') + '">' + fmt(val) + '</span>' +
-        (bonus ? '<span class="stat-bonus">(' + (bonus > 0 ? '+' : '') + bonus + ')</span>' : '') + '</div>';
+        modDelta(card, 'value', skillValueBase(card)) +
+        (bonus ? '<span class="stat-bonus">(' + (bonus > 0 ? '+' : '') + bonus + ')' + modDelta(card, 'bonus', cardBonusBase(card)) + '</span>' : '') + '</div>';
     }
     if (desc) {
       html += '<span class="skill-vline" aria-hidden="true"></span>' +
@@ -1985,6 +2062,10 @@ window.App = window.App || {};
       return clickable ? ' data-act="pip" data-i="' + idx + '"' : ' data-act="pip"';
     };
     const title = clickable ? App.t('pipFill') : tip;
+    // v90: зарядов больше предела (модификатор уменьшил максимум) — показываем излишек,
+    // иначе «Применить» тратит невидимые треугольники и кажется, что кнопка не работает
+    const units = Math.max(0, Math.floor(num(chargeUnits(card)) || 0));
+    const overflow = Math.max(0, units - sk.slots);
     let top = '', bottom = '';
     for (let i = 0; i < sk.top; i++) {
       top += chgBtnHTML(i < fill.top, pal, attrsFor(i), title);
@@ -1995,6 +2076,7 @@ window.App = window.App || {};
     return '<div class="chg-area">' +
       (sk.top ? '<div class="chg-row chg-tris">' + top + '</div>' : '') +
       (sk.bottom ? '<div class="chg-row chg-tris">' + bottom + '</div>' : '') +
+      (overflow ? '<span class="chg-over" title="' + esc(App.t('chgOver')) + '">+' + overflow + '</span>' : '') +
       '</div>';
   }
 
@@ -2004,11 +2086,13 @@ window.App = window.App || {};
     const cur = Math.floor(num(chargeUnits(card)) || 0);
     const maxU = chargeMaxUnits(card);
     const txt = cur + (maxU != null ? ' / ' + Math.floor(maxU) : '');
+    // v89: дельта зарядов (модификаторы состояния)
+    const delta = (m === 'own') ? modDelta(card, 'charges', chargesMaxBase(card)) : '';
     // v53: у СВОИХ зарядов тег открывает барабан (тап по «Х / N»);
     // у связанных — как раньше, плашка-подсказка «пополните счётчик»
     const act = m === 'link' ? ' data-act="pip"' : ' data-act="chg-drum"';
     return '<button type="button" class="chg-badge ' + m + '"' + act +
-      ' title="' + esc(App.t('charges')) + '">' + txt + '</button>';
+      ' title="' + esc(App.t('charges')) + '">' + txt + delta + '</button>';
   }
 
   function chargesInfo(card) {
@@ -2037,7 +2121,8 @@ window.App = window.App || {};
     }
     if (forceTag) return '<div class="charges-row">' + chargeBadgeHTML(card) + useBtn + '</div>';
     const figs = chargeFiguresHTML(card, App.t('pipFill'));
-    return '<div class="charges-row">' + (figs || chargeBadgeHTML(card)) + useBtn + '</div>';
+    // v89: у фигур нет числа — дельту ставим рядом с рядом, чтобы модификатор был виден
+    return '<div class="charges-row">' + (figs ? figs + modDelta(card, 'charges', chargesMaxBase(card)) : chargeBadgeHTML(card)) + useBtn + '</div>';
   }
 
   function spellBody(card) {
@@ -2131,6 +2216,9 @@ window.App = window.App || {};
       html += '<div class="ini-row' + (cur ? ' cur' : '') + (todo ? ' todo' : '') + (r.out ? ' out' : '') + (fresh ? ' fresh' : '') + '" data-row="' + esc(r.id) + '">' +
         '<span class="ini-rank">' + rank + '</span>' +
         '<input class="ini-name" data-ini="name" data-row="' + esc(r.id) + '" value="' + esc(r.name) + '">' +
+        // v89: «своя» строка — по ней срабатывают тики состояний (вместо совпадения имён)
+        '<button type="button" class="ini-self' + (r.self ? ' on' : '') + '" data-act="ini-self" data-row="' + esc(r.id) + '"' +
+          ' title="' + esc(App.t('iniSelfTip')) + '" aria-pressed="' + (r.self ? 'true' : 'false') + '">Я</button>' +
         (prep
           ? (num(r.bonus) ? '<span class="ini-bonus">+' + num(r.bonus) + '</span>' : '') +
             '<input class="ini-val" data-ini="value" data-row="' + esc(r.id) + '" placeholder="—" inputmode="numeric" value="' + (iniFilled(r) ? esc(r.value) : '') + '">' +
@@ -6378,18 +6466,26 @@ window.App = window.App || {};
       document.querySelectorAll('.card.finf-open').forEach(function (c) { c.classList.remove('finf-open'); });
     };
     document.addEventListener('click', function (e) {
+      const modBadge = e.target.closest ? e.target.closest('.mod-badge') : null;
       const finf = e.target.closest ? e.target.closest('.finf') : null;
       const linktag = e.target.closest ? e.target.closest('.linktag') : null;
       const old = document.getElementById('finfPop');
-      if (!finf && !linktag) { if (old) old.remove(); closeAll(); return; }
+      if (!finf && !linktag && !modBadge) { if (old) old.remove(); closeAll(); return; }
       closeAll();
-      const cardEl = (finf || linktag).closest('.card');
+      const cardEl = (finf || linktag || modBadge).closest('.card');
       const card = cardEl ? findCard(cardEl.dataset.id) : null;
       if (!card) return;
       const pop = document.createElement('div');
       pop.id = 'finfPop';
       pop.className = 'finf-pop';
-      if (finf) {
+      if (modBadge) {
+        const s = modSummary(card);
+        pop.className = 'finf-pop mod-pop';
+        pop.innerHTML = '<div class="mod-pop-title">' + esc(App.t('modsTitle')) + '</div>' +
+          (s.items.length
+            ? s.items.map(function (t) { return '<div class="mod-pop-row">' + esc(t) + '</div>'; }).join('')
+            : '<div class="mod-pop-row">—</div>');
+      } else if (finf) {
         // v26: «(!)» теперь у навыков со строковым выражением в значении (бывшие формулы)
         let val = null;
         try { val = skillValueNum(card); } catch (e) { val = null; }
