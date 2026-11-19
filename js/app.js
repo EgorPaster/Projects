@@ -6,7 +6,7 @@ window.App = window.App || {};
   // ===== Constants =====
   const STORAGE_KEY = 'custplay-v1';
   const LEGACY_KEY = 'dnd-tracker-v1';
-  const CARD_TYPES = ['counter', 'skill', 'spell', 'currency', 'inventory', 'note', 'initiative', 'condition'];
+  const CARD_TYPES = ['counter', 'skill', 'spell', 'currency', 'inventory', 'note', 'initiative', 'condition', 'buff'];
   // v22: типы, которые можно использовать в формулах — без валюты/инвентаря/заметок
   const FORMULA_REF_TYPES = ['counter', 'skill', 'spell'];
   // Свертывание в ярлык (v29, со стенда «текущее свертывание И, З, В»): только типы
@@ -47,7 +47,7 @@ window.App = window.App || {};
     return window.matchMedia('(min-width: 721px)').matches;
   }
   function nameExample(type) {
-    return ({ counter: 'Здоровье', skill: 'Акробатика', spell: 'Огненный шар', currency: 'Деньги', inventory: 'Снаряжение', note: 'Заметка' })[type] || '';
+    return ({ counter: 'Здоровье', skill: 'Акробатика', spell: 'Огненный шар', currency: 'Деньги', inventory: 'Снаряжение', note: 'Заметка', buff: 'Ярость' })[type] || '';
   }
 
   // ===== State =====
@@ -526,6 +526,8 @@ window.App = window.App || {};
       };
       // v65: состояние — кукла-вуду + список активных состояний (снимки)
       case 'condition': return { conditions: [] };
+      // v91: бафф — самостоятельная карточка-тумблер; эффекты с целями живут на листе
+      case 'buff': return { on: false, effects: [], description: '', color: '#d4a93c' };
     }
     return {};
   }
@@ -556,6 +558,8 @@ window.App = window.App || {};
       // v65: состояние — фигура 236×305 + шапка и воздух; ресайз отключён.
       // v68: высота 360 — фигура 305 + шапка 18 + отступы 18 + запас 19
       case 'condition': return { w: 300, h: 360 };
+      // v91: бафф — 120 для короткого и 200 для чипов с описанием
+      case 'buff': return { w: 300, h: 120 };
       default: return { w: 300, h: 120 };
     }
   }
@@ -598,6 +602,8 @@ window.App = window.App || {};
     }
     // v65: состояние — фиксированный размер, фигура не должна сжиматься/обрезаться
     if (type === 'condition') { w = 300; h = 360; }
+    // v91: бафф — два двухстрочных чипа в ряд; ниже 120 описание уже не влезает
+    if (type === 'buff') { w = 220; h = 120; }
     return { w: w, h: h };
   }
 
@@ -841,13 +847,26 @@ window.App = window.App || {};
     if (modIndexCache) return modIndexCache;
     const byTarget = {}, blocks = {};
     const ch = activeChar();
+    // v91: бафф — такой же источник эффектов, как наложенное состояние, но
+    // без снимков и набора: эффекты лежат прямо в карточке и работают только
+    // когда тумблер включён.
+    function addEffect(ef, source, color) {
+      if (!ef || !ef.target) return;              // флаг без цели на числа не влияет
+      if (ef.mode === 'block') { blocks[ef.target] = ef.label || source || ''; return; }
+      (byTarget[ef.target] || (byTarget[ef.target] = [])).push({ ef: ef, source: source || '', color: color || '' });
+    }
     if (ch) (ch.cards || []).forEach(function (card) {
+      if (card.type === 'buff') {
+        if (!card.on) return;
+        (card.effects || []).forEach(function (ef) {
+          addEffect(ef, card.name || '', card.color || '');
+        });
+        return;
+      }
       if (card.type !== 'condition') return;
       (card.conditions || []).forEach(function (s) {
         (s.effects || []).forEach(function (ef) {
-          if (!ef || !ef.target) return;              // флаг без цели на числа не влияет
-          if (ef.mode === 'block') { blocks[ef.target] = ef.label || s.name || ''; return; }
-          (byTarget[ef.target] || (byTarget[ef.target] = [])).push({ ef: ef, source: s.name || '', color: s.color || '' });
+          addEffect(ef, s.name || '', s.color || '');
         });
       });
     });
@@ -1179,6 +1198,7 @@ window.App = window.App || {};
     if (act === 'inc') mutate(function () { card.current = num(card.current) + counterStep(card.id); });
     else if (act === 'dec') mutate(function () { card.current = num(card.current) - counterStep(card.id); });
     else if (act === 'card-menu') openCardMenu(card.id, e && e.currentTarget);
+    else if (act === 'buff-expand') openBuffDetails(card.id);
     else if (act === 'roll') rollCard(card);
     else if (act === 'use') useCharge(card);
     else if (act === 'chg-drum') openChargeDrum(card);
@@ -1613,6 +1633,8 @@ window.App = window.App || {};
       // v65: у «Состояния» имя может быть пустым — копия тоже остаётся без подписи
       if (base) { while (ch.cards.some(function (c) { return c.name === nm; })) { nm = base + ' (' + i + ')'; i++; } }
       copy.name = nm;
+      // v91: копия активного баффа не должна молча удвоить эффекты
+      if (copy.type === 'buff') copy.on = false;
       if (copy.x != null) { copy.x += 24; copy.y += 24; }
       ch.cards.push(copy);
     });
@@ -1809,10 +1831,21 @@ window.App = window.App || {};
     mutate(function () { card.span = n; });
   }
 
+  // v91: цвет баффа используется и в рамке/свечении, и в чипах; альфу считаем
+  // в JS, чтобы не зависеть от color-mix в старых браузерах.
+  function hexAlpha(hex, a) {
+    const c = condHexToRgb(hex || '#d4a93c');
+    return 'rgba(' + c.r + ',' + c.g + ',' + c.b + ',' + a + ')';
+  }
+
   function cardView(card, desktop) {
     const sel = (desktop && editMode && selIds.has(card.id)) ? ' selected' : '';
     const folded = foldable(card) && isCollapsed(card);
     let style = '--span:' + cardSpan(card) + ';';
+    if (card.type === 'buff') {
+      const col = card.color || '#d4a93c';
+      style += '--buff-color:' + col + ';--buff-glow:' + hexAlpha(col, 0.32) + ';--buff-bg:' + hexAlpha(col, 0.10) + ';';
+    }
     if (desktop && card.x != null) {
       // при сужении окна карточки визуально поджимаются внутрь, но сохранённые координаты
       // НЕ перезаписываются: расширил окно — карточки восстановили положение
@@ -1833,7 +1866,7 @@ window.App = window.App || {};
       '<div class="artifact" aria-hidden="true"><img src="icons/labels/' + esc(FOLDABLE_ICONS[card.type]) + '.png" alt=""></div>' +
       '<div class="card-title-small">' + esc(card.name) + '</div>' +
       '<button class="fold-tab" title="' + esc(App.t(folded ? 'unfoldCard' : 'foldCard')) + '" aria-label="' + esc(App.t(folded ? 'unfoldCard' : 'foldCard')) + '"></button>' : '';
-    const cls = 'card type-' + card.type + (card.mini ? ' mini' : '') + (folded ? ' collapsed' : '') + sel + (card.restores ? ' restores' : '');
+    const cls = 'card type-' + card.type + (card.type === 'buff' && card.on ? ' on' : '') + (card.mini ? ' mini' : '') + (folded ? ' collapsed' : '') + sel + (card.restores ? ' restores' : '');
     // v58: у навыка шапка и кнопка броска — соседи в сетке .skill-grid, чтобы на
     // узкой карточке кнопка уходила вниз, к значению (иначе из шапки её не вынуть).
     if (card.type === 'skill') {
@@ -1895,9 +1928,13 @@ window.App = window.App || {};
       ? '<span class="linktag" title="' + esc(App.t('charges')) + '">🔗</span>' : '';
     // v40: у счётчика ☾ в шапке больше нет — «восстанавливается при отдыхе»
     // показывает большая фоновая луна (.card.restores::after)
+    // v91: развернуть бафф — единственный способ открыть полный текст;
+    // клик по тексту карточки остаётся тумблером (см. bindCard).
+    const buffExpand = (!editMode && card.type === 'buff')
+      ? '<button type="button" class="buff-expand" data-act="buff-expand" title="' + esc(App.t('buffExpand')) + '" aria-label="' + esc(App.t('buffExpand')) + '">⤢</button>' : '';
     return '<div class="card-head">' + handle + '<span class="card-name">' +
       (card.restores && card.type !== 'counter' ? '<span class="restore-ic">☾</span>' : '') + esc(card.name) +
-      '</span>' + modBadgeHTML(card) + finfo + linktag + roller + tools + '</div>';
+      '</span>' + modBadgeHTML(card) + finfo + linktag + buffExpand + roller + tools + '</div>';
   }
 
   // v89: бейдж «на меня влияют»: число активных модификаторов, тап — список источников
@@ -1931,6 +1968,7 @@ window.App = window.App || {};
       case 'note': return noteBody(card);
       case 'initiative': return initiativeBody(card);
       case 'condition': return conditionBody(card);
+      case 'buff': return buffBody(card);
     }
     return '';
   }
@@ -2495,6 +2533,47 @@ window.App = window.App || {};
     return '<div class="card-body"><div class="note-text">' + esc(card.text || '') + '</div></div>';
   }
 
+  function buffTargetName(ef) {
+    const t = ef && findCard(ef.target);
+    return t ? t.name : App.t('fxNoTarget');
+  }
+
+  // v91: на карточке баффа — только короткие чипы. Полная формулировка
+  // («−2 максимум → Здоровье») живёт в подсказке и в развёрнутом окне,
+  // иначе три эффекта превращают карточку в простыню.
+  function buffBody(card) {
+    const list = (card.effects || []).filter(function (ef) { return ef && ef.target; });
+    const h = Math.round(num(card.h) || 120);
+    const desk = isDesktop();
+    // на телефоне высота карточки auto (сетка), поэтому ориентируемся на ширину
+    // и показываем описание всегда; на ПК — по фактической высоте
+    const maxChips = desk ? (h >= 200 ? 4 : (h >= 160 ? 3 : 2)) : 4;
+    const shown = list.slice(0, maxChips);
+    const more = list.length - shown.length;
+    const chips = shown.map(function (ef) {
+      const full = fxShort(ef) + ' → ' + buffTargetName(ef);
+      return '<span class="buff-chip" title="' + esc(full) + '">' +
+        '<span class="buff-chip-v">' + esc(ef.label || fxChipShort(ef)) + '</span>' +
+        '<span class="buff-chip-t">' + esc(buffTargetName(ef)) + '</span>' +
+      '</span>';
+    }).join('');
+    const moreBtn = more > 0
+      ? '<button type="button" class="buff-chip buff-chip-more" data-act="buff-expand" title="' + esc(App.t('buffAllEffects')) + '">+' + more + '</button>'
+      : '';
+    const desc = (card.description || '').trim();
+    // v91: описание показываем всегда — на 120 одной строкой, на 200 двумя.
+    // Длинный текст всё равно живёт в ⤢; пустое место внизу карточки выглядело
+    // как незаконченный макет.
+    const showDesc = !!desc;
+    const descCls = (desk && h < 200) ? ' one-line' : '';
+    return '<div class="card-body buff-body">' +
+      (chips || moreBtn
+        ? '<div class="buff-chips">' + chips + moreBtn + '</div>'
+        : '<div class="buff-empty">' + esc(App.t('buffNoEffects')) + '</div>') +
+      (showDesc ? '<div class="desc-text buff-desc' + descCls + '">' + esc(desc) + '</div>' : '') +
+    '</div>';
+  }
+
   function bindCard(card) {
     const el = document.querySelector('.card[data-id="' + card.id + '"]');
     if (!el) return;
@@ -2502,8 +2581,9 @@ window.App = window.App || {};
       btn.addEventListener('click', function (e) { handleAction(card.id, btn.dataset, e); });
     });
     // описание целиком: клик по тексту — модалка «просмотр полностью»
+    // v91: у баффа клик по тексту — это тумблер, поэтому «развернуть» только кнопкой ⤢
     const desc = el.querySelector('.desc-text');
-    if (desc && (card.description || '').trim()) {
+    if (card.type !== 'buff' && desc && (card.description || '').trim()) {
       desc.classList.add('readable');
       desc.addEventListener('click', function () { openTextModal(card.name, card.description); });
     }
@@ -2604,6 +2684,24 @@ window.App = window.App || {};
         // downT = 0 — клик без pointerdown (программный/доступность): не блокируем
         if (downT && Date.now() - downT > 650) return;
         openConditionLayer(card.id);
+      });
+    }
+    // v91: бафф — тап по карточке включает/выключает. В правке не трогаем,
+    // иначе перетаскивание карточки заканчивалось бы переключением эффектов.
+    if (card.type === 'buff') {
+      let downX = 0, downY = 0, downT = 0;
+      el.addEventListener('pointerdown', function (e) {
+        downX = e.clientX; downY = e.clientY; downT = Date.now();
+      });
+      el.addEventListener('click', function (e) {
+        if (editMode || e.ctrlKey || e.metaKey) return;
+        if (e.target.closest('button, .handle, .resize-handle, .kebab, .tools')) return;
+        if (Math.abs(e.clientX - downX) > 10 || Math.abs(e.clientY - downY) > 10) return;
+        if (downT && Date.now() - downT > 650) return;
+        mutate(function () {
+          const c = findCard(card.id);
+          if (c) c.on = !c.on;
+        });
       });
     }
     // v48: долгий тап больше не «Перенести на лист» (это теперь пункт в кебабе) —
@@ -3656,8 +3754,23 @@ window.App = window.App || {};
   // иначе при «умножить» висело «например -2 или 1d6»
   const FX_MODE_PH = { add: 'fxPhAdd', mul: 'fxPhMul', set: 'fxPhSet', cap: 'fxPhCap', dice: 'fxPhDice', tick: 'fxPhTick' };
   const FX_FIELD_KEYS = { bonus: 'fxFieldBonus', max: 'fxFieldMax', value: 'fxFieldValue', charges: 'fxFieldCharges', current: 'fxFieldCurrent' };
+  // v91: короткие имена полей для чипов на карточке; полные остаются в редакторе
+  // и в подсказке, чтобы «−2 макс» не превращалось в «−2 максимум → Здоровье».
+  const FX_SHORT_FIELD_KEYS = { bonus: 'fxShortBonus', max: 'fxShortMax', value: 'fxShortValue', charges: 'fxShortCharges', current: 'fxShortCurrent' };
   function fxModeText(mode) { return App.t(FX_MODE_KEYS[mode] || 'fxOpAdd'); }
   function fxFieldText(field) { return App.t(FX_FIELD_KEYS[field] || 'fxFieldBonus'); }
+  function fxChipShort(ef) {
+    const f = App.t(FX_SHORT_FIELD_KEYS[effectField(ef)] || 'fxShortBonus');
+    if (ef.mode === 'block') return App.t('fxOpBlockShort');
+    let s = String(ef.value == null ? '' : ef.value).trim();
+    if (ef.mode === 'dice') return '+' + s.replace(/^\+/, '');
+    if (ef.mode === 'mul') return '×' + s.replace(/^[*×]/, '') + ' ' + f;
+    if (ef.mode === 'set') return '= ' + s + ' ' + f;
+    if (ef.mode === 'cap') return '≤ ' + s + ' ' + f;
+    if (ef.mode === 'tick') return '⏱ ' + s + ' ' + f;
+    s = s.replace(/^\+/, '');
+    return (s.charAt(0) === '-' ? '−' + s.slice(1) : '+' + s) + ' ' + f;
+  }
   function fxShort(ef) {
     const f = fxFieldText(effectField(ef));
     if (ef.mode === 'block') return App.t('fxOpBlock');
@@ -3813,8 +3926,11 @@ window.App = window.App || {};
 
     openModal(cur ? App.t('fxEdit') : App.t('fxAdd'),
       '<div class="field"><label>' + esc(App.t('fxTarget')) + '</label><select id="fx-target">' + tOpts + '</select></div>' +
-      '<div class="field"><label>' + esc(App.t('fxField')) + '</label><select id="fx-field"></select></div>' +
-      '<div class="field"><label>' + esc(App.t('fxMode')) + '</label><select id="fx-mode"></select></div>' +
+      // v93: «Что меняем» и «Как» рядом, как в редакторе баффа — модалка не тянется вниз
+      '<div class="fx-pair">' +
+        '<div class="field"><label>' + esc(App.t('fxField')) + '</label><select id="fx-field"></select></div>' +
+        '<div class="field"><label>' + esc(App.t('fxMode')) + '</label><select id="fx-mode"></select></div>' +
+      '</div>' +
       '<div class="field" id="fx-timing-wrap"><label>' + esc(App.t('fxTiming')) + '</label><select id="fx-timing">' +
         '<option value="start"' + (cur && cur.timing === 'end' ? '' : ' selected') + '>' + esc(App.t('fxTimingStart')) + '</option>' +
         '<option value="end"' + (cur && cur.timing === 'end' ? ' selected' : '') + '>' + esc(App.t('fxTimingEnd')) + '</option>' +
@@ -3863,15 +3979,18 @@ window.App = window.App || {};
         const fx = (s.effects || []).map(function (ef, i) {
           const t = findCard(ef.target);
           const tgt = t ? t.name : App.t('fxNoTarget');
-          const computed = fxShort(ef);
+          const full = fxShort(ef);
+          // v92: на карточке и в списке — короткая формула («−2 макс»),
+          // полная («−2 максимум») остаётся в подсказке и в редакторе.
+          const short = fxChipShort(ef);
           // v79: кубик имеет смысл только для бонуса. Старые эффекты «кубик в значение»
           // больше не применяются — помечаем их, чтобы не выглядели рабочими.
           const inactive = ef.mode === 'dice' && effectField(ef) !== 'bonus';
           // v78: своя подпись заменяет описание эффекта — помечаем карандашом,
           // иначе непонятно, откуда взялся текст, и что эффект делает на самом деле
-          const lbl = (inactive ? '⚠ ' : (ef.label ? '✎ ' : '')) + (ef.label || computed);
+          const lbl = (inactive ? '⚠ ' : (ef.label ? '✎ ' : '')) + (ef.label || short);
           const tip = inactive ? App.t('fxDiceOnlyBonus')
-            : (ef.label ? App.tf('fxCustomTip', { text: computed }) : App.t('fxEdit'));
+            : (ef.label ? App.tf('fxCustomTip', { text: full }) : full + ' · ' + App.t('fxEdit'));
           return '<button type="button" class="cond-fx' + (inactive ? ' off' : '') + '" data-fx="' + esc(s.id) + '" data-fi="' + i + '" title="' + esc(tip) + '">' +
             esc(lbl) + ' → ' + esc(tgt) +
           '</button>';
@@ -3908,7 +4027,7 @@ window.App = window.App || {};
         const own = condPersonalEffects(card, condMemoryKey(p), p.key);
         const fx = (own && own.length) ? own : (p.effects || []);
         if (fx.length) {
-          ds = fx.map(function (ef) { return ef.label || fxShort(ef); }).join(' · ');
+          ds = fx.map(function (ef) { return ef.label || fxChipShort(ef); }).join(' · ');
         }
         return '<button type="button" class="cond-pick-row' + (on ? ' on' : '') + '" data-key="' + esc(p.key) + '">' +
           '<span class="cond-pick-ic" data-ic="' + esc(p.icon) + '">' + condIcon(p.icon, p.color, p.shade, p.hi) + '</span>' +
@@ -4044,6 +4163,29 @@ window.App = window.App || {};
   // Полный текст (описание перка/заклинания) отдельным окном
   function openTextModal(title, text) {
     openModal(title || App.t('description'), '<div class="full-text">' + esc(text) + '</div>',
+      [{ label: App.t('close'), cls: 'primary' }]);
+  }
+
+  // v91: ⤢ и «+N» открывают одно и то же — полный список эффектов и текст.
+  // Клик по описанию на карточке сюда НЕ ведёт: там он переключает бафф.
+  function openBuffDetails(cardId) {
+    const card = findCard(cardId);
+    if (!card || card.type !== 'buff') return;
+    const list = (card.effects || []).filter(function (ef) { return ef && ef.target; });
+    const rows = list.map(function (ef) {
+      const full = fxShort(ef);
+      return '<div class="buff-details-row">' +
+        '<span class="buff-details-main">' + esc(ef.label || full) + '</span>' +
+        '<span class="buff-details-sub">' + (ef.label ? esc(full) + ' · ' : '') + esc(buffTargetName(ef)) + '</span>' +
+      '</div>';
+    }).join('');
+    const desc = (card.description || '').trim();
+    openModal(card.name || App.t('typeBuff'),
+      '<div class="buff-details">' +
+        '<div class="buff-details-state' + (card.on ? ' on' : '') + '">' + esc(App.t(card.on ? 'buffOn' : 'buffOff')) + '</div>' +
+        (rows || '<div class="meta">' + esc(App.t('buffNoEffects')) + '</div>') +
+        (desc ? '<div class="full-text buff-details-text">' + esc(desc) + '</div>' : '') +
+      '</div>',
       [{ label: App.t('close'), cls: 'primary' }]);
   }
 
@@ -4449,6 +4591,136 @@ window.App = window.App || {};
     return '<div class="field check"><input id="' + id + '" type="checkbox"' + (checked ? ' checked' : '') + '><label for="' + id + '">' + esc(label) + '</label></div>';
   }
 
+  // ===== Бафф: поля редактора (v91) =====
+  // В баффе нет «текущего» счётчика: это тик, а не модификатор. Поэтому
+  // набор полей — те же, что у состояний, минус current.
+  function buffTargetFields(type) {
+    return (MOD_FIELDS[type] || []).filter(function (f) { return f !== 'current'; });
+  }
+  function buffTargets() {
+    return (activeChar().cards || []).filter(function (c) {
+      return c.type !== 'buff' && buffTargetFields(c.type).length;
+    });
+  }
+  function buffModesFor(t, field) {
+    const out = ['add', 'mul', 'set', 'cap'];
+    // кубик — только к бонусу и только если у цели вообще есть кубик
+    if (t && t.die && (t.type === 'skill' || t.type === 'spell') && field === 'bonus') out.push('dice');
+    if (t && t.type === 'spell' && field === 'charges') out.push('block');
+    return out;
+  }
+  function normalizeBuffEffect(ef) {
+    const t = findCard(ef.target);
+    const fields = t ? buffTargetFields(t.type) : [];
+    if (fields.indexOf(ef.field) === -1) ef.field = fields[0] || 'bonus';
+    const modes = t ? buffModesFor(t, ef.field) : ['add', 'mul', 'set', 'cap'];
+    if (modes.indexOf(ef.mode) === -1) ef.mode = modes[0];
+    if (ef.mode === 'block') ef.value = '';
+    return ef;
+  }
+  function buffFields(card) {
+    editScratch.buffEffects = (card.effects || []).map(function (ef) {
+      return {
+        mode: ef.mode || 'add', field: effectField(ef),
+        value: ef.value == null ? '' : String(ef.value), label: ef.label || '',
+        target: ef.target || null
+      };
+    });
+    const col = card.color || '#d4a93c';
+    return '<div class="field"><label>' + esc(App.t('description')) + '</label>' +
+        '<textarea id="f-desc" placeholder="' + esc(App.t('description')) + '…">' + esc(card.description || '') + '</textarea></div>' +
+      '<div class="field"><label>' + esc(App.t('buffEffects')) + '</label>' +
+        '<div id="f-bfx-list" class="st-fx-list"></div>' +
+        '<button type="button" id="f-bfx-add" class="st-add-fx small">+ ' + esc(App.t('fxAdd')) + '</button>' +
+        '<div class="formula-help">' + esc(App.t('buffTapHint')) + '</div></div>' +
+      '<div class="field"><label>' + esc(App.t('buffColor')) + '</label>' +
+        '<div class="st-color-row"><input id="f-buff-color" type="color" value="' + esc(col) + '">' +
+        '<span class="st-meta" id="f-buff-color-hex">' + esc(col) + '</span></div></div>';
+  }
+  function buffFxRowHTML(ef, i) {
+    normalizeBuffEffect(ef);
+    const targets = buffTargets();
+    const t = ef.target ? findCard(ef.target) : null;
+    const fields = t ? buffTargetFields(t.type) : [];
+    const modes = t ? buffModesFor(t, ef.field) : ['add', 'mul', 'set', 'cap'];
+    let tOpts = targets.map(function (c) {
+      return '<option value="' + esc(c.id) + '"' + (c.id === ef.target ? ' selected' : '') + '>' + esc(c.name) + '</option>';
+    }).join('');
+    if (!tOpts) tOpts = '<option value="">' + esc(App.t('fxNoTargets')) + '</option>';
+    // цель удалили: оставляем её в списке, чтобы эффект не потерялся молча
+    if (ef.target && !t) tOpts += '<option value="' + esc(ef.target) + '" selected>' + esc(App.t('fxNoTarget')) + '</option>';
+    const fOpts = fields.map(function (f) {
+      return '<option value="' + f + '"' + (f === ef.field ? ' selected' : '') + '>' + esc(fxFieldText(f)) + '</option>';
+    }).join('');
+    const mOpts = modes.map(function (m) {
+      return '<option value="' + m + '"' + (m === ef.mode ? ' selected' : '') + '>' + esc(fxModeText(m)) + '</option>';
+    }).join('');
+    const block = ef.mode === 'block';
+    const ph = block ? '—' : App.t(FX_MODE_PH[ef.mode] || 'fxPhAdd');
+    return '<div class="st-fx-form bfx-form" data-bfx-i="' + i + '">' +
+      '<div class="bfx-grid">' +
+        '<div class="field bfx-wide"><label>' + esc(App.t('fxTarget')) + '</label><select data-bfx="target">' + tOpts + '</select></div>' +
+        '<div class="field"><label>' + esc(App.t('fxField')) + '</label><select data-bfx="field">' + fOpts + '</select></div>' +
+        '<div class="field"><label>' + esc(App.t('fxMode')) + '</label><select data-bfx="mode">' + mOpts + '</select></div>' +
+        '<div class="field bfx-wide"><label>' + esc(App.t('fxValue')) + '</label><input data-bfx="value" type="text" autocomplete="off" spellcheck="false" value="' + esc(block ? '' : ef.value) + '" placeholder="' + esc(ph) + '"' + (block ? ' disabled' : '') + '></div>' +
+        '<div class="field bfx-wide"><label>' + esc(App.t('fxLabelField')) + '</label><input data-bfx="label" type="text" autocomplete="off" spellcheck="false" value="' + esc(ef.label) + '" placeholder="' + esc(App.t('fxLabelPh')) + '"></div>' +
+      '</div>' +
+      '<div class="st-fx-actions"><button type="button" class="small danger" data-bfx-del="' + i + '">' + TRASH_SVG + ' ' + esc(App.t('delete')) + '</button></div>' +
+    '</div>';
+  }
+  function renderBuffFx() {
+    const host = document.getElementById('f-bfx-list');
+    if (!host) return;
+    const list = editScratch.buffEffects || [];
+    host.innerHTML = list.length
+      ? list.map(function (ef, i) { return buffFxRowHTML(ef, i); }).join('')
+      : '<div class="st-fx-empty">' + esc(App.t('buffNoEffects')) + '</div>';
+  }
+  function bindBuffEditor() {
+    renderBuffFx();
+    const add = document.getElementById('f-bfx-add');
+    if (add) add.addEventListener('click', function () {
+      const targets = buffTargets();
+      if (!targets.length) { toast(App.t('fxNoTargets')); return; }
+      const t = targets[0];
+      editScratch.buffEffects.push({
+        target: t.id,
+        field: buffTargetFields(t.type)[0] || 'bonus',
+        mode: 'add', value: '', label: ''
+      });
+      renderBuffFx();
+    });
+    const host = document.getElementById('f-bfx-list');
+    if (!host) return;
+    host.addEventListener('change', function (e) {
+      const sel = e.target.closest('[data-bfx]');
+      if (!sel) return;
+      const form = sel.closest('[data-bfx-i]');
+      const ef = form && editScratch.buffEffects[+form.dataset.bfxI];
+      if (!ef) return;
+      const key = sel.dataset.bfx;
+      ef[key] = sel.value;
+      if (key === 'target' || key === 'field' || key === 'mode') renderBuffFx();
+    });
+    host.addEventListener('input', function (e) {
+      const inp = e.target.closest('[data-bfx]');
+      if (!inp) return;
+      const form = inp.closest('[data-bfx-i]');
+      const ef = form && editScratch.buffEffects[+form.dataset.bfxI];
+      if (!ef) return;
+      if (inp.dataset.bfx === 'value' || inp.dataset.bfx === 'label') ef[inp.dataset.bfx] = inp.value;
+    });
+    host.addEventListener('click', function (e) {
+      const del = e.target.closest('[data-bfx-del]');
+      if (!del) return;
+      editScratch.buffEffects.splice(+del.dataset.bfxDel, 1);
+      renderBuffFx();
+    });
+    const col = document.getElementById('f-buff-color');
+    const hex = document.getElementById('f-buff-color-hex');
+    if (col) col.addEventListener('input', function () { if (hex) hex.textContent = col.value; });
+  }
+
   function typeFields(card) {
     switch (card.type) {
       case 'counter':
@@ -4474,6 +4746,8 @@ window.App = window.App || {};
       case 'initiative': return initiativeFields(card);
       // v65: у состояния настраивается только подпись — сами состояния в слое
       case 'condition': return '<div class="formula-help">' + esc(App.t('condTitleHint')) + '</div>';
+      // v91: бафф живёт на листе: описание, цвет, эффекты с целями
+      case 'buff': return buffFields(card);
     }
     return '';
   }
@@ -4687,6 +4961,7 @@ window.App = window.App || {};
   function postInitEditor(card) {
     if (card.type === 'currency') bindCurrencyEditor();
     if (card.type === 'inventory') bindInventoryEditor();
+    if (card.type === 'buff') bindBuffEditor();
     if (card.type === 'spell') bindChargesToggle();
     bindExprFields();   // v25: поля-выражения (максимум/бонус/значение) — чипы-параметры
     bindBonusToggle();
@@ -5067,6 +5342,25 @@ window.App = window.App || {};
       case 'note':
         card.text = readText('f-text');
         break;
+      case 'buff': {
+        // v91: эффекты храним только с существующей целью; пустую строку,
+        // добавленную и не заполненную, молча не сохраняем.
+        card.description = readText('f-desc');
+        const colEl = document.getElementById('f-buff-color');
+        card.color = (colEl && /^#[0-9a-f]{6}$/i.test(colEl.value)) ? colEl.value : (card.color || '#d4a93c');
+        card.effects = (editScratch.buffEffects || []).map(function (ef) {
+          const e = {
+            mode: ef.mode, field: effectField(ef),
+            value: ef.value == null ? '' : String(ef.value),
+            label: ef.label || '', target: ef.target || null
+          };
+          if (e.mode === 'block') e.value = '';
+          return e;
+        }).filter(function (ef) {
+          return ef.target && findCard(ef.target) && (ef.mode === 'block' || String(ef.value).trim() !== '');
+        });
+        break;
+      }
     }
   }
 
@@ -5188,7 +5482,7 @@ window.App = window.App || {};
         let ds = e.descKey ? App.t(e.descKey) : (e.effect || '');
         // v81: если у шаблона есть эффекты, показываем их, а не старую подпись
         const fx = e.effects || [];
-        if (fx.length) ds = fx.map(function (ef) { return ef.label || fxShort(ef); }).join(' · ');
+        if (fx.length) ds = fx.map(function (ef) { return ef.label || fxChipShort(ef); }).join(' · ');
         const ic = isStates
           ? '<span class="set-ic" data-ic="' + esc(e.icon) + '">' + condIcon(e.icon, e.color, e.shade, e.hi) + '</span>'
           : '<span class="set-ic"></span>';
@@ -5493,8 +5787,11 @@ window.App = window.App || {};
         return '<option value="' + m + '"' + (m === mode ? ' selected' : '') + '>' + esc(fxModeText(m)) + '</option>';
       }).join('');
       return '<div class="st-fx-form">' +
-        '<div class="field"><label>' + esc(App.t('fxField')) + '</label><select data-f-field>' + fieldOpts + '</select></div>' +
-        '<div class="field"><label>' + esc(App.t('fxMode')) + '</label><select data-f-mode>' + modeOpts + '</select></div>' +
+        // v93: поле и режим в одну строку, как в редакторе баффа
+        '<div class="fx-pair">' +
+          '<div class="field"><label>' + esc(App.t('fxField')) + '</label><select data-f-field>' + fieldOpts + '</select></div>' +
+          '<div class="field"><label>' + esc(App.t('fxMode')) + '</label><select data-f-mode>' + modeOpts + '</select></div>' +
+        '</div>' +
         '<div class="field" data-f-timing-wrap' + (tick ? '' : ' hidden') + '><label>' + esc(App.t('fxTiming')) + '</label><select data-f-timing>' +
           '<option value="start"' + ((data.timing || 'start') === 'start' ? ' selected' : '') + '>' + esc(App.t('fxTimingStart')) + '</option>' +
           '<option value="end"' + (data.timing === 'end' ? ' selected' : '') + '>' + esc(App.t('fxTimingEnd')) + '</option>' +
@@ -5519,7 +5816,7 @@ window.App = window.App || {};
       draft.effects.forEach(function (ef, i) {
         if (fxEdit === i) { html += fxFormHTML(fxDraft || ef); return; }
         html += '<div class="st-fx-row">' +
-          '<span class="st-fx-sum" title="' + esc(fxShort(ef)) + '">' + esc(ef.label || fxShort(ef)) + '</span>' +
+          '<span class="st-fx-sum" title="' + esc(fxShort(ef)) + '">' + esc(ef.label || fxChipShort(ef)) + '</span>' +
           '<button type="button" data-fx-edit="' + i + '" title="' + esc(App.t('edit')) + '" aria-label="' + esc(App.t('edit')) + '">✎</button>' +
           '<button type="button" class="st-fx-del" data-fx-del="' + i + '" title="' + esc(App.t('delete')) + '" aria-label="' + esc(App.t('delete')) + '">' + TRASH_SVG + '</button>' +
         '</div>';

@@ -2272,3 +2272,71 @@ body.no-scroll { overflow: hidden; overscroll-behavior: none; }
 }
 .ini-self:hover { color: var(--text); border-color: var(--accent2); }
 .ini-self.on { color: #1a1622; background: var(--accent); border-color: var(--accent); }
+
+/* ---------- v91: карточка «Бафф» ---------- */
+.card.type-buff { transition: border-color .18s, box-shadow .18s, background .18s; }
+.card.type-buff:not(.on) { cursor: pointer; }
+.card.type-buff.on {
+  border-color: var(--buff-color, var(--accent));
+  background: linear-gradient(180deg, var(--buff-bg, rgba(212,169,60,.1)), transparent 70%);
+  box-shadow: 0 0 0 1px var(--buff-glow, rgba(212,169,60,.32)), 0 0 18px var(--buff-glow, rgba(212,169,60,.32));
+}
+.card.type-buff.on .card-name { color: var(--buff-color, var(--accent)); }
+.buff-body { display: flex; flex-direction: column; gap: 6px; padding-top: 0; min-height: 0; }
+.buff-chips { display: flex; flex-wrap: wrap; gap: 5px; align-content: flex-start; min-width: 0; }
+.buff-chip {
+  display: flex; flex-direction: column; gap: 1px; flex: 0 0 auto;
+  min-width: 0; max-width: 100%; padding: 3px 7px;
+  border: 1px solid var(--border); border-radius: 8px;
+  background: var(--panel2); overflow: hidden;
+}
+.card.type-buff.on .buff-chip { border-color: var(--buff-glow, rgba(212,169,60,.32)); }
+.buff-chip-v {
+  font-size: 11.5px; font-weight: 700; line-height: 1.15; color: var(--text);
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.buff-chip-t {
+  font-size: 9.5px; line-height: 1.1; color: var(--muted);
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.buff-chip-more {
+  justify-content: center; align-items: center; align-self: center;
+  min-width: 30px; padding: 3px 6px; color: var(--buff-color, var(--accent));
+  font: inherit; font-size: 11.5px; font-weight: 700; cursor: pointer;
+}
+.buff-chip-more:hover { border-color: var(--buff-color, var(--accent)); }
+.buff-empty { color: var(--muted); font-size: 12px; }
+.buff-desc { font-size: 11.5px; line-height: 1.3; }
+.buff-desc.one-line { -webkit-line-clamp: 1; }
+.buff-expand {
+  flex: 0 0 auto; width: 22px; height: 22px; padding: 0;
+  border: 1px solid transparent; border-radius: 6px;
+  background: transparent; color: var(--muted); font: inherit;
+  font-size: 14px; line-height: 1; cursor: pointer;
+}
+.buff-expand:hover { color: var(--buff-color, var(--accent)); border-color: var(--border); background: var(--panel2); }
+.buff-details { display: flex; flex-direction: column; gap: 8px; }
+.buff-details-state {
+  align-self: flex-start; font-size: 11px; font-weight: 700;
+  color: var(--muted); border: 1px solid var(--border); border-radius: 999px; padding: 1px 8px;
+}
+.buff-details-state.on { color: var(--accent); border-color: rgba(212,169,60,.5); }
+.buff-details-row {
+  display: flex; align-items: baseline; gap: 8px; flex-wrap: wrap;
+  padding: 5px 0; border-bottom: 1px solid var(--border);
+}
+.buff-details-main { font-size: 13px; font-weight: 600; }
+.buff-details-sub { font-size: 11.5px; color: var(--muted); }
+.buff-details-text { margin-top: 2px; }
+/* форма эффекта баффа в редакторе карточки */
+.bfx-form { margin-bottom: 8px; }
+.bfx-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 0 8px; }
+.bfx-grid .field { margin-bottom: 6px; }
+.bfx-wide { grid-column: 1 / -1; }
+/* v93: «Что меняем» и «Как» рядом в модалке эффекта состояния */
+.fx-pair { display: grid; grid-template-columns: 1fr 1fr; gap: 0 8px; }
+@media (max-width: 520px) {
+  .bfx-grid { grid-template-columns: 1fr; }
+  .bfx-wide { grid-column: auto; }
+  .fx-pair { grid-template-columns: 1fr; }
+}
