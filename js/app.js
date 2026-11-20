@@ -6,12 +6,49 @@ window.App = window.App || {};
   // ===== Constants =====
   const STORAGE_KEY = 'custplay-v1';
   const LEGACY_KEY = 'dnd-tracker-v1';
+  // v94: паки предметов живут отдельно от состояния персонажа, чтобы save()/undo
+  // не таскали каталог на каждый тап по счётчику.
+  const PACKS_KEY = 'custplay-packs';
   const CARD_TYPES = ['counter', 'skill', 'spell', 'currency', 'inventory', 'note', 'initiative', 'condition', 'buff'];
   // v22: типы, которые можно использовать в формулах — без валюты/инвентаря/заметок
   const FORMULA_REF_TYPES = ['counter', 'skill', 'spell'];
   // Свертывание в ярлык (v29, со стенда «текущее свертывание И, З, В»): только типы
   // с готовой иконкой; иконки в icons/labels/. Счётчик/навык/заклинание — позже.
   const FOLDABLE_ICONS = { currency: 'кошель', inventory: 'сундук', note: 'книга' };
+  // v94: категории предметов. Поведение задаёт категория, а не отдельная галочка:
+  // consumable всегда тратится при использовании; equipment можно надеть.
+  const ITEM_CATEGORIES = [
+    { id: 'equipment', labelKey: 'catEquipment' },
+    { id: 'consumable', labelKey: 'catConsumable' },
+    { id: 'misc', labelKey: 'catMisc' }
+  ];
+  // v96: базовые иконки по 5 на категорию. Храним id, а не глиф, чтобы позже
+  // заменить emoji на SVG без миграции данных.
+  // v116: щит предмета — инлайн-SVG, чтобы не путать с эмодзи щита механики (🛡).
+  const ITEM_SHIELD_SVG = '<svg class="item-svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 2.8 19 5.6v5.9c0 4.7-3.1 8.2-7 9.7-3.9-1.5-7-5-7-9.7V5.6z"/><path d="M12 7.2v7.2"/><path d="M8.9 10.4h6.2"/></svg>';
+  const ITEM_ICONS = {
+    equipment: [
+      { id: 'sword', ch: '⚔' }, { id: 'shield', ch: ITEM_SHIELD_SVG }, { id: 'bow', ch: '🏹' },
+      { id: 'hammer', ch: '🔨' }, { id: 'ring', ch: '💍' }
+    ],
+    consumable: [
+      { id: 'potion', ch: '🧪' }, { id: 'food', ch: '🍖' }, { id: 'bomb', ch: '💣' },
+      { id: 'scroll', ch: '📜' }, { id: 'drink', ch: '🍷' }
+    ],
+    misc: [
+      { id: 'key', ch: '🔑' }, { id: 'gem', ch: '💎' }, { id: 'coin', ch: '🪙' },
+      { id: 'box', ch: '📦' }, { id: 'compass', ch: '🧭' }
+    ]
+  };
+  function itemIconsFor(cat) { return ITEM_ICONS[cat] || ITEM_ICONS.misc; }
+  function itemIconId(icon, cat) {
+    const list = itemIconsFor(cat);
+    return list.some(function (i) { return i.id === icon; }) ? icon : list[0].id;
+  }
+  function itemIconChar(icon, cat) {
+    const id = itemIconId(icon, cat);
+    return (itemIconsFor(cat).find(function (i) { return i.id === id; }) || { ch: '•' }).ch;
+  }
   const LABEL_W = 143, LABEL_H = 120;   // ярлык (v58: по высоте равен счётчику — компоновка сходится)
   // Иконка «мусорка» для ВСЕХ кнопок «Удалить» (вместо крестика ✕): инлайн-SVG
   // в currentColor — красится как текст кнопки, как остальные глифы тулз
@@ -54,6 +91,9 @@ window.App = window.App || {};
   function defaultState() {
     return {
       version: 1,
+      // v107: схема данных. Поднимаем, когда меняем смысл полей, чтобы импорт
+      // старых файлов мог отличить их и мигрировать.
+      schemaVersion: 4,
       activeCharacterId: null,
       characters: [],
       settings: { language: 'ru', critSuccess: '20', critFail: '1' },
@@ -92,6 +132,7 @@ window.App = window.App || {};
           });
         }
         if (s.activeCharacterId && st.characters.some(function (c) { return c.id === s.activeCharacterId; })) st.activeCharacterId = s.activeCharacterId;
+        if (typeof s.schemaVersion === 'number') st.schemaVersion = s.schemaVersion;
         if (s.settings && typeof s.settings === 'object') st.settings = Object.assign(st.settings, s.settings);
         // v71: наборы состояний/вещей (библиотеки на устройстве)
         if (s.libraries && typeof s.libraries === 'object') {
@@ -99,6 +140,16 @@ window.App = window.App || {};
           if (Array.isArray(s.libraries.items)) st.libraries.items = s.libraries.items.filter(function (x) { return x && typeof x === 'object' && Array.isArray(x.entries); });
         }
         if (Array.isArray(s.log)) st.log = s.log.filter(function (e) { return e && typeof e.text === 'string'; });
+      }
+      // v111: цель разового эффекта переехала из строки инвентаря в сам эффект
+      if ((st.schemaVersion || 0) < 3) {
+        migrateItemTargets(st);
+        st.schemaVersion = 3;
+      }
+      // v115: «сверх максимума» становится явным щитом
+      if ((st.schemaVersion || 0) < 4) {
+        migrateShields(st);
+        st.schemaVersion = 4;
       }
       return st;
     } catch (e) {
@@ -121,7 +172,11 @@ window.App = window.App || {};
   let redoStack = [];
   const MAX_UNDO = 15;   // v20d: 15 действий достаточно (каждый снимок = копия всего состояния)
   let editMode = false;
-  let editScratch = { units: null, items: null, editCard: null };
+  let editScratch = { units: null, editCard: null };
+  // v106: что удалить, если редактор только что созданной сущности закрыли
+  // «Отменой», Esc или тапом мимо. Иначе пустая карточка/предмет остаются.
+  let pendingNewCardId = null;
+  let pendingNewItem = null;
 
   function snapshot() {
     return JSON.parse(JSON.stringify({ characters: state.characters, activeCharacterId: state.activeCharacterId }));
@@ -137,8 +192,10 @@ window.App = window.App || {};
     render();
     if (layerCardId) refreshLayer();   // слой ярлыка догоняет данные (кнопки −/＋ и т.п.)
   }
-  function mutate(fn) {
-    pushUndo();
+  // skipUndo — для сохранения только что созданной сущности: шаг отката уже
+  // сделан при создании, второй шаг заставлял бы нажимать Ctrl+Z дважды.
+  function mutate(fn, skipUndo) {
+    if (!skipUndo) pushUndo();
     fn();
     commit();
   }
@@ -185,6 +242,7 @@ window.App = window.App || {};
             const nm = document.getElementById('p-name').value.trim();
             if (!nm) return false;
             mutate(function () { page.name = nm; });
+            toast(App.tf('renamedGeneric', { name: nm }));
           } }
       ]
     );
@@ -198,7 +256,7 @@ window.App = window.App || {};
     const page = ch.pages.find(function (p) { return p.id === pageId; });
     const hasCards = ch.cards.some(function (c) { return c.page === pageId; });
     if (!hasCards) {
-      confirmDialog(App.tf('confirmDeletePage', { name: page.name }), function () { doDeletePage(pageId, null); }, App.t('deletePage'));
+      askDelete({ text: App.tf('confirmDeletePage', { name: page.name }), onYes: function () { doDeletePage(pageId, null); }, title: App.t('deletePage') });
       return;
     }
     // на странице есть карточки — предлагаем выбор: перенести или удалить вместе со страницей
@@ -256,7 +314,8 @@ window.App = window.App || {};
     bar.classList.remove('hidden');
     const tabs = ch.pages.map(function (p) {
       // кебаб ⋮ ВНУТРИ вкладки справа, только в правке (как ручка ⋮⋮ на карточках)
-      const kebab = editMode ? '<span class="pt-kebab" data-page="' + p.id + '" title="' + esc(App.t('pageMenu')) + '">⋮</span>' : '';
+      // v126: кебаб доступен с клавиатуры — Tab до него и Enter/пробел открывают меню
+      const kebab = editMode ? '<span class="pt-kebab" role="button" tabindex="0" data-page="' + p.id + '" title="' + esc(App.t('pageMenu')) + '" aria-label="' + esc(App.t('pageMenu')) + '">⋮</span>' : '';
       return '<button class="ptab' + (p.id === ch.lastPage ? ' active' : '') + '" data-page="' + p.id + '">' + esc(p.name) + kebab + '</button>';
     }).join('');
     // «+» — только в правке (старые кнопки ✎/✕ заменил кебаб ⋮ у каждой вкладки)
@@ -264,7 +323,15 @@ window.App = window.App || {};
     bar.innerHTML = tabs + ctrl;
     bar.querySelectorAll('.ptab').forEach(function (b) {
       const k = b.querySelector('.pt-kebab');
-      if (k) k.addEventListener('click', function (e) { e.stopPropagation(); openPageMenu(b.dataset.page, k); });
+      if (k) {
+        k.addEventListener('click', function (e) { e.stopPropagation(); openPageMenu(b.dataset.page, k); });
+        k.addEventListener('keydown', function (e) {
+          if (e.key !== 'Enter' && e.key !== ' ') return;
+          e.preventDefault();
+          e.stopPropagation();
+          openPageMenu(b.dataset.page, k);
+        });
+      }
       if (editMode && isDesktop()) b.addEventListener('pointerdown', function (e) { startTabDrag(b, ch, bar, e); });
       else b.addEventListener('click', function () { ch.lastPage = b.dataset.page; commit(); });
     });
@@ -332,31 +399,114 @@ window.App = window.App || {};
       td.ch.pages.sort(function (x, y) { return order.indexOf(x.id) - order.indexOf(y.id); });
     });
   });
-  // контекстное меню страницы (⋮): переименовать / удалить. Закрывается кликом мимо и по resize
-  function closePageMenu() {
-    const m = document.querySelector('.ctxmenu');
-    if (m) m.remove();
-    document.removeEventListener('pointerdown', onPageMenuClose, true);
-    window.removeEventListener('resize', closePageMenu);
+  // ===== v126: одно поведение у всех всплывающих меню =====
+  // Esc, клик мимо, прокрутка вне меню, переворот у края, перепозиция при ресайзе,
+  // роли menu/menuitem и возврат фокуса на якорь.
+  let mountedMenu = null;
+  function closeMountedMenu(refocus) {
+    if (!mountedMenu) return;
+    const m = mountedMenu;
+    mountedMenu = null;
+    m.el.remove();
+    document.removeEventListener('pointerdown', onMountedMenuDown, true);
+    window.removeEventListener('keydown', onMountedMenuKey, true);
+    window.removeEventListener('resize', onMountedMenuResize);
+    window.removeEventListener('scroll', onMountedMenuScroll, true);
+    if (m.onClose) m.onClose();
+    if (refocus && m.anchor && m.anchor.isConnected) {
+      try { m.anchor.focus({ preventScroll: true }); } catch (e) { m.anchor.focus(); }
+    }
   }
-  function onPageMenuClose(e) {
-    const m = document.querySelector('.ctxmenu');
-    if (m && !m.contains(e.target)) closePageMenu();
+  function closeMenuById(id) {
+    if (mountedMenu && mountedMenu.el.id === id) {
+      // если фокус был внутри меню (выбор мышью или Enter), вернём его на якорь:
+      // следующее окно тогда запомнит нормальную точку возврата
+      closeMountedMenu(mountedMenu.el.contains(document.activeElement));
+    }
   }
+  function onMountedMenuDown(e) {
+    if (!mountedMenu) return;
+    if (mountedMenu.el.contains(e.target)) return;
+    if (mountedMenu.anchor && mountedMenu.anchor.contains(e.target)) return;
+    closeMountedMenu(false);
+  }
+  function onMountedMenuKey(e) {
+    if (!mountedMenu) return;
+    if (e.key === 'Escape') {
+      e.preventDefault(); e.stopPropagation();
+      closeMountedMenu(true);
+      return;
+    }
+    if (e.key !== 'ArrowDown' && e.key !== 'ArrowUp' && e.key !== 'Home' && e.key !== 'End') return;
+    const items = Array.from(mountedMenu.el.querySelectorAll('button:not([disabled]), input, [tabindex="0"]'))
+      .filter(function (el) { return el.offsetParent !== null; });
+    if (!items.length) return;
+    e.preventDefault();
+    const i = items.indexOf(document.activeElement);
+    let next = 0;
+    if (e.key === 'End') next = items.length - 1;
+    else if (e.key === 'ArrowDown') next = i < 0 ? 0 : (i + 1) % items.length;
+    else if (e.key === 'ArrowUp') next = i <= 0 ? items.length - 1 : i - 1;
+    items[next].focus();
+  }
+  function onMountedMenuScroll(e) {
+    if (!mountedMenu) return;
+    if (mountedMenu.el.contains(e.target)) return;
+    closeMountedMenu(false);
+  }
+  function onMountedMenuResize() { if (mountedMenu) placeMountedMenu(); }
+  function placeMountedMenu() {
+    if (!mountedMenu) return;
+    const m = mountedMenu;
+    const r = m.anchor.getBoundingClientRect();
+    const mw = m.el.offsetWidth, mh = m.el.offsetHeight;
+    let left = m.align === 'right' ? r.right - mw : r.left;
+    if (m.side === 'left') left = r.left - mw - 6;
+    left = Math.max(8, Math.min(left, window.innerWidth - mw - 8));
+    let top = r.bottom + 6;
+    if (top + mh > window.innerHeight - 8) top = Math.max(8, r.top - mh - 6);
+    top = Math.max(8, Math.min(top, window.innerHeight - mh - 8));
+    m.el.style.left = Math.round(left) + 'px';
+    m.el.style.top = Math.round(top) + 'px';
+  }
+  function mountMenu(el, anchor, opts) {
+    opts = opts || {};
+    if (opts.toggle && mountedMenu && mountedMenu.anchor === anchor) {
+      closeMountedMenu(false);
+      return null;
+    }
+    closeMountedMenu(false);
+    el.setAttribute('role', 'menu');
+    el.querySelectorAll('button').forEach(function (b) { b.setAttribute('role', 'menuitem'); });
+    document.body.appendChild(el);
+    mountedMenu = { el: el, anchor: anchor, align: opts.align || 'left', side: opts.side || '', onClose: opts.onClose || null };
+    placeMountedMenu();
+    document.addEventListener('pointerdown', onMountedMenuDown, true);
+    window.addEventListener('keydown', onMountedMenuKey, true);
+    window.addEventListener('resize', onMountedMenuResize);
+    window.addEventListener('scroll', onMountedMenuScroll, true);
+    if (opts.focus !== false) {
+      const first = el.querySelector('button:not([disabled]), input, [tabindex="0"]');
+      if (first) {
+        try { first.focus({ preventScroll: true }); } catch (e) { first.focus(); }
+      }
+    }
+    return el;
+  }
+
+  // контекстное меню страницы (⋮): переименовать / удалить. Закрывается кликом мимо, Esc и по resize
+  function closePageMenu() { closeMenuById('pageMenu'); }
   function openPageMenu(pageId, kebab) {
     closePageMenu();
     const ch = activeChar();
     if (!ch) return;
     const menu = document.createElement('div');
     menu.className = 'ctxmenu';
+    menu.id = 'pageMenu';
     const canDel = ch.pages.length > 1;
     menu.innerHTML =
       '<button type="button" data-act="rename">✎ ' + esc(App.t('renamePage')) + '</button>' +
       '<button type="button" data-act="del"' + (canDel ? '' : ' disabled') + '>' + TRASH_SVG + ' ' + esc(App.t('deletePage')) + '</button>';
-    const r = kebab.getBoundingClientRect();
-    menu.style.left = Math.round(r.left) + 'px';
-    menu.style.top = Math.round(r.bottom + 4) + 'px';
-    document.body.appendChild(menu);
     menu.addEventListener('click', function (e) {
       const b = e.target.closest('button');
       if (!b || b.disabled) return;
@@ -364,21 +514,11 @@ window.App = window.App || {};
       if (b.dataset.act === 'rename') openPageRename(pageId);
       else if (b.dataset.act === 'del') deletePage(pageId);
     });
-    document.addEventListener('pointerdown', onPageMenuClose, true);
-    window.addEventListener('resize', closePageMenu);
+    mountMenu(menu, kebab);
   }
   // v19: кебаб-меню мобильной шапки (⋮): Отдых / История / Назад / Вперед.
   // Генеричное .ctxmenu, прижат вправо под кнопкой; закрытие — клик мимо (pointerdown capture) и resize
-  function closeTopMenu() {
-    const m = document.getElementById('topMenu');
-    if (m) m.remove();
-    document.removeEventListener('pointerdown', onTopMenuClose, true);
-    window.removeEventListener('resize', closeTopMenu);
-  }
-  function onTopMenuClose(e) {
-    const m = document.getElementById('topMenu');
-    if (m && !m.contains(e.target)) closeTopMenu();
-  }
+  function closeTopMenu() { closeMenuById('topMenu'); }
   function openTopMenu() {
     closeTopMenu();
     const btn = document.getElementById('topMenuBtn');
@@ -391,10 +531,6 @@ window.App = window.App || {};
       '<button type="button" data-act="log">☰ ' + esc(App.t('log')) + '</button>' +
       '<button type="button" data-act="undo">↶ ' + esc(App.t('menuUndo')) + '</button>' +
       '<button type="button" data-act="redo">↷ ' + esc(App.t('menuRedo')) + '</button>';
-    const r = btn.getBoundingClientRect();
-    menu.style.right = Math.round(window.innerWidth - r.right) + 'px';
-    menu.style.top = Math.round(r.bottom + 4) + 'px';
-    document.body.appendChild(menu);
     menu.addEventListener('click', function (e) {
       const b = e.target.closest('button');
       if (!b) return;
@@ -404,33 +540,16 @@ window.App = window.App || {};
       else if (b.dataset.act === 'undo') undo();
       else if (b.dataset.act === 'redo') redo();
     });
-    document.addEventListener('pointerdown', onTopMenuClose, true);
-    window.addEventListener('resize', closeTopMenu);
+    mountMenu(menu, btn, { align: 'right' });
   }
 
   // Кебаб карточки (v40): у компактного счётчика вместо трёх кнопок ✎⧉🗑 — одно меню.
   // Разметка и поведение те же, что у верхнего меню (.ctxmenu).
-  let cardMenuAnchor = null;
-  function closeCardMenu() {
-    const m = document.getElementById('cardMenu');
-    if (m) m.remove();
-    document.removeEventListener('pointerdown', onCardMenuClose, true);
-    window.removeEventListener('resize', closeCardMenu);
-    window.removeEventListener('scroll', closeCardMenu, true);
-    cardMenuAnchor = null;
-  }
-  function onCardMenuClose(e) {
-    const m = document.getElementById('cardMenu');
-    if (!m) return;
-    if (m.contains(e.target)) return;
-    if (cardMenuAnchor && cardMenuAnchor.contains(e.target)) return;
-    closeCardMenu();
-  }
+  function closeCardMenu() { closeMenuById('cardMenu'); }
   function openCardMenu(cardId, anchor) {
     closeCardMenu();
     const card = findCard(cardId);
     if (!card || !anchor) return;
-    cardMenuAnchor = anchor;
     const menu = document.createElement('div');
     menu.className = 'ctxmenu';
     menu.id = 'cardMenu';
@@ -450,18 +569,10 @@ window.App = window.App || {};
         html += '<button type="button" data-m="page">' + esc(App.t('moveToPage')) + '…</button>';
       }
     }
-    html += '<button type="button" data-m="edit">✎ ' + esc(App.t('edit')) + '</button>' +
+    html += (card.type === 'inventory' ? '' : '<button type="button" data-m="edit">✎ ' + esc(App.t('edit')) + '</button>') +
             '<button type="button" data-m="dup">⧉ ' + esc(App.t('duplicate')) + '</button>' +
             '<button type="button" data-m="del">' + TRASH_SVG + ' ' + esc(App.t('delete')) + '</button>';
     menu.innerHTML = html;
-    document.body.appendChild(menu);
-    const r = anchor.getBoundingClientRect();
-    const mw = menu.offsetWidth, mh = menu.offsetHeight;
-    let left = Math.max(8, Math.min(r.right - mw, window.innerWidth - mw - 8));
-    let top = r.bottom + 4;
-    if (top + mh > window.innerHeight - 8) top = Math.max(8, r.top - mh - 4);
-    menu.style.left = Math.round(left) + 'px';
-    menu.style.top = Math.round(top) + 'px';
     menu.addEventListener('click', function (e) {
       const b = e.target.closest('button');
       if (!b) return;
@@ -473,9 +584,7 @@ window.App = window.App || {};
       else if (m === 'del') deleteCard(cardId);
       else if (m === 'page') openMoveToPage(cardId);
     });
-    document.addEventListener('pointerdown', onCardMenuClose, true);
-    window.addEventListener('resize', closeCardMenu);
-    window.addEventListener('scroll', closeCardMenu, true);
+    mountMenu(menu, anchor, { align: 'right' });
   }
   function findCard(cardId) {
     const ch = activeChar();
@@ -517,7 +626,7 @@ window.App = window.App || {};
           { id: uid(), name: 'Платина', base: 10 }
         ], amounts: {}, autoconvert: true
       };
-      case 'inventory': return { items: [], showWeight: true };
+      case 'inventory': return { items: [], showWeight: true, itemTargets: {} };
       case 'note': return { text: '' };
       // v59: инициатива — строки участников, две фазы (подготовка/бой)
       case 'initiative': return {
@@ -533,7 +642,7 @@ window.App = window.App || {};
   }
 
   function createCard(type, name, extra) {
-    return Object.assign({ id: uid(), type: type, name: name, ui: { bg: '', color: '', align: '', bold: false, italic: false } }, defaultsFor(type), extra || {});
+    return Object.assign({ id: uid(), type: type, name: name }, defaultsFor(type), extra || {});
   }
 
   function defaultCardName(type) {
@@ -589,7 +698,7 @@ window.App = window.App || {};
     }
     if (type === 'inventory') {                 // предметы + строка итога веса
       const n = (card.items || []).length;
-      h = Math.max(h, 62 + n * 30 + 22);        // 2 строки описания в предмете тоже учтены сверху (30/строка может не хватить — проверяется тестом)
+      h = Math.max(h, 88 + n * 38);             // шапка, верхняя строка, строки, итог
     }
     if (type === 'currency') {                  // каждая валюта — строка ~28px
       const n = Math.max(2, (card.units || []).length);
@@ -666,6 +775,11 @@ window.App = window.App || {};
       }
       // v68: «Состояние» — фиксированный размер; старые карточки v65 хранили 400
       if (card.type === 'condition') { card.w = 300; card.h = 360; }
+      // v96: строки инвентаря получили пакетные поля; старые снимки приводим к модели
+      if (card.type === 'inventory') {
+        card.items = (card.items || []).map(normalizeInventoryRow);
+        if (!card.itemTargets || typeof card.itemTargets !== 'object') card.itemTargets = {};
+      }
     });
     // v40: ВСЕ счётчики разом приводим к единому компактному размеру (один раз на
     // персонажа — флаг в данных). Позиции не трогаем: уменьшение карточки не может
@@ -716,7 +830,6 @@ window.App = window.App || {};
     cards.push(createCard('counter', 'Здоровье', { current: 10, max: 10, restores: true }));
     cards.push(createCard('counter', 'Мана', { current: 5, max: 5, restores: true }));
     cards.push(createCard('counter', 'Броня', { current: 10, max: null }));
-    cards.push(createCard('counter', 'Временные HP', { current: 0, max: 0 }));
     cards.push(createCard('counter', 'Кости хитов', { current: 4, max: 4, restores: true }));
     cards.push(createCard('counter', 'Спасброски: успехи', { current: 0, max: 3 }));
     cards.push(createCard('counter', 'Спасброски: провалы', { current: 0, max: 3 }));
@@ -834,10 +947,108 @@ window.App = window.App || {};
   const MOD_ORDER = { add: 1, mul: 2, set: 3, cap: 4 };
   // какие числа можно менять у каждого типа карточки (для формы «на что влияет»)
   const MOD_FIELDS = {
-    counter: ['max', 'current'],
+    counter: ['max'],
     skill: ['bonus', 'value'],
     spell: ['bonus', 'charges']
   };
+  // v107: все режимы эффекта в одном месте. MOD_ORDER — только «математика»,
+  // остальные режимы читают другие потребители (block/tick/adv…).
+  const EFFECT_MODES = { add: 1, mul: 2, set: 3, cap: 4, dice: 1, block: 1, tick: 1, adv: 1, dis: 1 };
+  const EFFECT_FIELDS = MOD_FIELDS;
+
+  // v107: единая нормализация эффекта. Сохраняет timing/duration/target и любые
+  // незнакомые поля: старым снимкам и будущим режимам нельзя терять данные.
+  function normalizeEffect(raw, defaults) {
+    const e = raw && typeof raw === 'object' ? raw : {};
+    const d = defaults || {};
+    const ef = {};
+    ef.mode = EFFECT_MODES[e.mode] ? e.mode : (EFFECT_MODES[d.mode] ? d.mode : 'add');
+    ef.field = e.field != null ? String(e.field) : (d.field != null ? String(d.field) : 'bonus');
+    ef.value = e.value == null ? (d.value == null ? '' : String(d.value)) : String(e.value);
+    ef.label = String(e.label == null ? (d.label || '') : e.label);
+    ef.target = e.target != null ? String(e.target) : (d.target != null ? String(d.target) : null);
+    if (e.timing != null) ef.timing = String(e.timing);
+    if (e.duration != null) ef.duration = e.duration;
+    Object.keys(e).forEach(function (k) { if (!(k in ef)) ef[k] = e[k]; });
+    return ef;
+  }
+
+  // v107: реестр источников эффектов. Хранилища остаются разными (бафф, снимок,
+  // строка инвентаря, временный эффект), но потребители видят один список.
+  function collectEffects(ch) {
+    const out = [];
+    if (!ch) return out;
+    (ch.cards || []).forEach(function (card) {
+      if (card.type === 'buff') {
+        if (!card.on) return;
+        (card.effects || []).forEach(function (ef) {
+          out.push({ ef: ef, kind: 'buff', srcId: card.id, name: card.name || '', color: card.color || '', card: card });
+        });
+        return;
+      }
+      if (card.type === 'condition') {
+        (card.conditions || []).forEach(function (s) {
+          (s.effects || []).forEach(function (ef) {
+            out.push({ ef: ef, kind: 'condition', srcId: card.id, name: s.name || '', color: s.color || '', card: card, snap: s });
+          });
+        });
+        return;
+      }
+      if (card.type === 'inventory') {
+        // снаряжение работает только когда надето; истинная форма подставляется
+        (card.items || []).forEach(function (row) {
+          if (!row.equipped) return;
+          const e = effectiveInventoryRow(row);
+          (e.effects || []).forEach(function (ef) {
+            out.push({ ef: ef, kind: 'equipment', srcId: card.id + ':' + row.id, name: e.name || '', color: '', card: card, row: row });
+          });
+        });
+        // v124: активные эффекты предметов (тики, временные, adv/dis)
+        (card.itemActive || []).forEach(function (a) {
+          if (!a || !a.ef) return;
+          out.push({ ef: a.ef, kind: 'itemActive', srcId: card.id + ':' + a.id, name: a.name || '', color: '', card: card, active: a });
+        });
+      }
+    });
+    return out;
+  }
+
+  // v110: какие карточки листа могут принять эффект этого поля.
+  // 'current' — разовое применение к счётчику, а не модификатор: цель такого
+  // эффекта выбирается при использовании, в «цель эффекта» она не идёт.
+  function effectTargetCards(field) {
+    const ch = activeChar();
+    if (!ch) return [];
+    return (ch.cards || []).filter(function (c) {
+      if (field === 'current' || field === 'shield') return c.type === 'counter';
+      return (MOD_FIELDS[c.type] || []).indexOf(field) !== -1;
+    });
+  }
+
+  // v111: эффект готов сработать: живая цель и значение (запрету и
+  // преимуществу/помехе значение не нужно).
+  function effectReady(ef) {
+    if (!ef || !ef.target || !findCard(ef.target)) return false;
+    const flag = ef.mode === 'block' || ef.mode === 'adv' || ef.mode === 'dis';
+    if (!flag && String(ef.value == null ? '' : ef.value).trim() === '') return false;
+    return true;
+  }
+
+  // v111: модификатор для чисел. Разовое «текущее» и щит сюда не входят:
+  // это события, а не постоянные модификаторы.
+  function effectWorks(ef) {
+    const f = effectField(ef);
+    return f !== 'current' && f !== 'shield' && effectReady(ef);
+  }
+
+  // v110: какие эффекты строки сейчас дают механику (для бейджа на карточке).
+  // Разовая «текущая» механика сюда не входит: это не модификатор.
+  function activeRowEffects(row) {
+    const e = effectiveInventoryRow(row);
+    return (e.effects || []).filter(function (ef) {
+      return effectField(ef) !== 'current' && effectWorks(ef);
+    });
+  }
 
   // Индекс строится один раз за рендер: так каждая карточка не бегает по всем
   // состояниям листа (иначе O(карточки × состояния) на каждый render).
@@ -846,29 +1057,11 @@ window.App = window.App || {};
   function modIndex() {
     if (modIndexCache) return modIndexCache;
     const byTarget = {}, blocks = {};
-    const ch = activeChar();
-    // v91: бафф — такой же источник эффектов, как наложенное состояние, но
-    // без снимков и набора: эффекты лежат прямо в карточке и работают только
-    // когда тумблер включён.
-    function addEffect(ef, source, color) {
+    collectEffects(activeChar()).forEach(function (it) {
+      const ef = it.ef;
       if (!ef || !ef.target) return;              // флаг без цели на числа не влияет
-      if (ef.mode === 'block') { blocks[ef.target] = ef.label || source || ''; return; }
-      (byTarget[ef.target] || (byTarget[ef.target] = [])).push({ ef: ef, source: source || '', color: color || '' });
-    }
-    if (ch) (ch.cards || []).forEach(function (card) {
-      if (card.type === 'buff') {
-        if (!card.on) return;
-        (card.effects || []).forEach(function (ef) {
-          addEffect(ef, card.name || '', card.color || '');
-        });
-        return;
-      }
-      if (card.type !== 'condition') return;
-      (card.conditions || []).forEach(function (s) {
-        (s.effects || []).forEach(function (ef) {
-          addEffect(ef, s.name || '', s.color || '');
-        });
-      });
+      if (ef.mode === 'block') { blocks[ef.target] = ef.label || it.name || ''; return; }
+      (byTarget[ef.target] || (byTarget[ef.target] = [])).push({ ef: ef, source: it.name || '', color: it.color || '' });
     });
     modIndexCache = { byTarget: byTarget, blocks: blocks };
     return modIndexCache;
@@ -880,6 +1073,41 @@ window.App = window.App || {};
     });
     // внутри режима сохраняется порядок включения (sort в JS стабилен)
     return list.slice().sort(function (a, b) { return MOD_ORDER[a.ef.mode] - MOD_ORDER[b.ef.mode]; });
+  }
+
+  // v119: преимущество/помеха — флаги на бонус. Источники складываются:
+  // преимуществ больше — adv, помех больше — dis, при равенстве обычный бросок.
+  function rollAdvantage(card) {
+    let adv = 0, dis = 0;
+    (modIndex().byTarget[card.id] || []).forEach(function (it) {
+      if (effectField(it.ef) !== 'bonus') return;
+      if (it.ef.mode === 'adv') adv++;
+      else if (it.ef.mode === 'dis') dis++;
+    });
+    return adv > dis ? 'adv' : (dis > adv ? 'dis' : '');
+  }
+
+  // v121: у adv/dis значение — сколько бросков подряд действует эффект
+  // (по умолчанию 1). После броска списываем один; на нуле убираем эффект.
+  // Снаряжение не расходуем: пока надето — действует всегда.
+  function consumeAdvantage(card) {
+    collectEffects(activeChar()).forEach(function (it) {
+      const ef = it.ef;
+      if (!ef || ef.target !== card.id) return;
+      if (ef.mode !== 'adv' && ef.mode !== 'dis') return;
+      if (effectField(ef) !== 'bonus') return;
+      if (it.kind === 'equipment') return;
+      const n = Math.max(1, num(ef.value) || 1);
+      if (n > 1) { ef.value = String(n - 1); return; }
+      if (it.kind === 'itemActive' && it.card && it.active) {
+        it.card.itemActive = (it.card.itemActive || []).filter(function (a) { return a !== it.active; });
+      } else if (it.kind === 'buff' && it.card) {
+        it.card.effects = (it.card.effects || []).filter(function (x) { return x !== ef; });
+        if (!it.card.effects.length) it.card.on = false;
+      } else if (it.kind === 'condition' && it.snap) {
+        it.snap.effects = (it.snap.effects || []).filter(function (x) { return x !== ef; });
+      }
+    });
   }
 
   // значение эффекта — выражение: «-{Уровень}», «1/3». В режиме умножения люди пишут
@@ -909,10 +1137,81 @@ window.App = window.App || {};
     return v;
   }
 
+  // v115: щит — набор частей, чтобы временную часть можно было снять по
+  // длительности, не задевая постоянную. card.shield — кэш суммы для отображения.
+  function shieldPartsOf(card) {
+    return card && Array.isArray(card.shieldParts) ? card.shieldParts : [];
+  }
+  function shieldTotal(card) {
+    return shieldPartsOf(card).reduce(function (s, p) { return s + num(p.amount); }, 0);
+  }
+  function syncShield(card) {
+    card.shield = shieldTotal(card);
+    return card.shield;
+  }
+  function addShield(card, amount, left, meta) {
+    const n = num(amount);
+    if (!(n > 0)) return 0;
+    if (!Array.isArray(card.shieldParts)) card.shieldParts = [];
+    const part = { id: uid(), amount: n, left: num(left) > 0 ? num(left) : null };
+    if (meta && meta.name) { part.name = String(meta.name); part.srcKey = meta.srcKey || ''; part.from = meta.from || ''; }
+    card.shieldParts.push(part);
+    syncShield(card);
+    return n;
+  }
+  function spendShield(card, amount) {
+    let left = Math.max(0, num(amount));
+    let absorbed = 0;
+    const parts = shieldPartsOf(card);
+    parts.forEach(function (p) {
+      if (left <= 0) return;
+      const take = Math.min(num(p.amount), left);
+      p.amount = num(p.amount) - take;
+      left -= take;
+      absorbed += take;
+    });
+    if (parts.length) card.shieldParts = parts.filter(function (p) { return num(p.amount) > 0; });
+    syncShield(card);
+    return absorbed;
+  }
+
+  // v107: единственная точка, где меняются текущее значение и щит счётчика.
+  // kind: 'heal' (плюс в текущее, не выше максимума), 'damage' (сначала щит,
+  // остаток в текущее), 'shield' (плюс в запас поглощения, ev.left — ходы).
+  // v115: возвращает фактическое изменение { hp, shield } — для тостов.
+  function applyEvent(card, ev) {
+    const none = { hp: 0, shield: 0 };
+    if (!card || card.type !== 'counter' || !ev) return none;
+    const n = num(ev.value);
+    if (!n) return none;
+    if (ev.kind === 'shield') {
+      const added = addShield(card, n, ev.left, { name: ev.name, srcKey: ev.srcKey, from: ev.from });
+      return { hp: 0, shield: added };
+    }
+    if (ev.kind === 'heal') {
+      const before = num(card.current);
+      let after = before + n;
+      const max = counterMaxNum(card);
+      if (max != null && max > 0) after = Math.min(after, max);   // перелив отбрасываем
+      card.current = after;
+      return { hp: after - before, shield: 0 };
+    }
+    let left = Math.abs(n);
+    const absorbed = spendShield(card, left);
+    left -= absorbed;
+    card.current = num(card.current) - left;
+    return { hp: -left, shield: -absorbed };
+  }
+
   // v89: «что на меня влияет» — сводка для бейджа в шапке карточки
   function modSummary(card) {
     const items = [];
     (modIndex().byTarget[card.id] || []).forEach(function (it) {
+      if (it.ef.mode === 'adv' || it.ef.mode === 'dis') {
+        const n = num(it.ef.value);
+        items.push((it.source || '') + ': ' + fxModeShort(it.ef.mode) + (n > 1 ? ' ×' + n : ''));
+        return;
+      }
       if (!(MOD_ORDER[it.ef.mode] || it.ef.mode === 'dice')) return;
       items.push((it.ef.label || it.source || '') + ': ' + fxShort(it.ef));
     });
@@ -1068,7 +1367,7 @@ window.App = window.App || {};
         'deg;--size:' + s[3] + 'px;--delay:' + s[4] + '">' + (i % 2 ? '✧' : '✦') + '</i>';
     }).join('') + '</div>';
   }
-  function showRollToast(rolled, bonus, total, modsHTML) {
+  function showRollToast(o) {
     let host = document.getElementById('rollToast');
     if (!host) {
       host = document.createElement('div');
@@ -1077,18 +1376,24 @@ window.App = window.App || {};
     }
     clearInterval(rollToastTimer);
     clearTimeout(rollToastHideTimer);
-    const kind = critKind(rolled);
-    // Крит по логике НРИ — «всё или ничего»: бонус уже не важен, показываем только
-    // выпавшее число, без «+N =». Иначе игрок считает 20+5=25 и спорит с правилами.
+    const kind = o.crit || '';
+    // v119: при преимуществе/помехе показываем второй бросок и выбранный.
+    // Крит — только выбранный кубик, без бонуса и суммы («всё или ничего»).
+    const dieText = o.n > 1 ? o.chosen.rolls.join(' + ') : String(o.chosen.dieSum);
+    const altText = o.other ? (o.n > 1 ? o.other.rolls.join(' + ') : String(o.other.dieSum)) : '';
+    const altHTML = (o.other && !kind)
+      ? '<span class="rt-alt">' + esc(altText) + '</span><span class="rt-arrow">→</span>'
+      : '';
+    const chosenHTML = kind
+      ? '<span class="rt-total">' + o.chosen.dieSum + '</span>'
+      : (o.bonus
+        ? '<span class="rt-die">' + esc(dieText) + '</span><span class="rt-bonus">' + (o.bonus > 0 ? '+' : '−') + Math.abs(o.bonus) + '</span><span class="rt-eq">=</span><span class="rt-total">' + o.total + '</span>'
+        : '<span class="rt-total">' + o.total + '</span>');
     host.innerHTML =
-      (kind
-        ? '<div class="rt-row"><span class="rt-total">' + rolled + '</span></div>'
-        : (bonus
-          ? '<div class="rt-row"><span class="rt-die">' + rolled + '</span><span class="rt-bonus">' + (bonus > 0 ? '+' : '−') + Math.abs(bonus) + '</span><span class="rt-eq">=</span><span class="rt-total">' + total + '</span></div>'
-          : '<div class="rt-row"><span class="rt-total">' + total + '</span></div>') +
-          // разложка источников: на крите не показываем («всё или ничего»), иначе
-          // игрок складывает 20 + бонус и спорит с правилами
-          (!kind && modsHTML ? modsHTML : '')) +
+      '<div class="rt-row">' + altHTML + chosenHTML + '</div>' +
+      // разложка источников: на крите не показываем («всё или ничего»), иначе
+      // игрок складывает 20 + бонус и спорит с правилами
+      (!kind && o.modsHTML ? o.modsHTML : '') +
       // провал — осколки снаружи к центру, успех — звёзды из центра наружу
       (kind === 'fail' ? '<div class="rt-shards" aria-hidden="true">' +
         '<i class="rt-shard" style="--dx:-118px;--dy:-46px;--rot:-62deg;--size:12px;--delay:.02s"></i>' +
@@ -1117,30 +1422,61 @@ window.App = window.App || {};
     // v78: запрет состояния гасит «Применить», а не кубик. Бросок остаётся обычным —
     // так просил юзер: зачёркивать кнопку действия, а не сам кубик.
     const bonus = cardBonus(card);
-    // v50: у навыка может быть несколько кубиков (2d20 и т.п.) — бросаем все и суммируем
     const n = Math.max(1, Math.round(num(card.nDice) || 1));
-    const rolls = [];
-    for (let i = 0; i < n; i++) rolls.push(App.dice.roll(card.die));
-    const dieRoll = rolls.reduce(function (a, b) { return a + b; }, 0);
-    // доп. кубики от состояний (режим dice) — бросаются вместе с основным
-    const extra = rollEffectDice(card);
-    const total = dieRoll + bonus + extra.total;
-    const detail = cardDiceLabel(card) + bonusStr(bonus);
-    const rollText = n > 1 ? rolls.join(' + ') + ' = ' + dieRoll : String(dieRoll);
-    const text = card.name + ' (' + detail + '): ' + rollText +
-      (extra.total ? ' + ' + extra.total + ' (состояния)' : '') +
-      (bonus ? (bonus > 0 ? ' + ' : ' − ') + Math.abs(bonus) + ' = ' + total : (extra.total ? ' = ' + total : ''));
+    const advMode = rollAdvantage(card);
+    const rollAttempt = function () {
+      const rolls = [];
+      for (let i = 0; i < n; i++) rolls.push(App.dice.roll(card.die));
+      const dieSum = rolls.reduce(function (a, b) { return a + b; }, 0);
+      const extra = rollEffectDice(card);   // доп. кубики от состояний/баффов
+      return { rolls: rolls, dieSum: dieSum, extra: extra, total: dieSum + bonus + extra.total };
+    };
+    const attempts = [rollAttempt()];
+    if (advMode) attempts.push(rollAttempt());
+    let chosen = attempts[0];
+    if (attempts.length > 1) {
+      // v119: выбираем по итогу; для одного d20 это то же, что по кубику
+      chosen = advMode === 'adv'
+        ? (attempts[1].total > attempts[0].total ? attempts[1] : attempts[0])
+        : (attempts[1].total < attempts[0].total ? attempts[1] : attempts[0]);
+    }
+    const other = attempts.length > 1 ? (chosen === attempts[0] ? attempts[1] : attempts[0]) : null;
+    // крит — только одиночный d20; урон (d4, 2d6) не критует
+    const critOk = card.die === 20 && n === 1;
+    const attemptText = function (a) { return n > 1 ? a.rolls.join(' + ') + ' = ' + a.dieSum : String(a.dieSum); };
+    const rollText = other
+      ? '[' + attemptText(other) + ' | ' + attemptText(chosen) + '] → ' + attemptText(chosen)
+      : (n > 1 ? attemptText(chosen) : String(chosen.dieSum));
+    const text = card.name + ' (' + cardDiceLabel(card) + bonusStr(bonus) + '): ' + rollText +
+      (chosen.extra.total ? ' + ' + chosen.extra.total + ' (состояния)' : '') +
+      (bonus ? (bonus > 0 ? ' + ' : ' − ') + Math.abs(bonus) + ' = ' + chosen.total : (chosen.extra.total ? ' = ' + chosen.total : ''));
     logRoll(text);
+    consumeAdvantage(card);   // v121: преимущество/помеха тратятся по броскам
     commit();
-    showRollToast(dieRoll, bonus + extra.total, total, rollModsHTML(card, extra));
+    showRollToast({
+      chosen: chosen,
+      other: other,
+      n: n,
+      bonus: bonus + chosen.extra.total,
+      total: chosen.total,
+      modsHTML: rollModsHTML(card, chosen.extra),
+      crit: critOk ? critKind(chosen.dieSum) : ''
+    });
   }
 
   // разложка модификаторов под тостом броска: без неё непонятно, откуда взялось число
   function rollModsHTML(card, extra) {
     const parts = [];
-    modsFor(card, 'bonus').forEach(function (it) {
+    (modIndex().byTarget[card.id] || []).filter(function (it) {
+      return effectField(it.ef) === 'bonus';
+    }).forEach(function (it) {
       const ef = it.ef;
+      if (ef.mode === 'adv' || ef.mode === 'dis') {
+        parts.push('<span class="rt-mod">' + esc((ef.label ? '✎ ' + ef.label : fxModeShort(ef.mode)) + ' ' + (it.source || '')) + '</span>');
+        return;
+      }
       if (ef.mode === 'set' || ef.mode === 'cap') return;   // замену и потолок словами не разложить
+      if (!MOD_ORDER[ef.mode]) return;
       const n = modNumber(card, ef.value, ef.mode);
       if (n == null) return;
       // своя подпись важнее вычисленной: «−2 к броскам» читается лучше, чем «−2 Отравлен».
@@ -1195,10 +1531,59 @@ window.App = window.App || {};
     const card = findCard(cardId);
     if (!card) return;
     const act = ds.act;
-    if (act === 'inc') mutate(function () { card.current = num(card.current) + counterStep(card.id); });
-    else if (act === 'dec') mutate(function () { card.current = num(card.current) - counterStep(card.id); });
+    if (act === 'inc') mutate(function () {
+      // v115: выше максимума не поднимаем; излишек — это щит, а не «переполнение»
+      const step = counterStep(card.id);
+      const max = counterMaxNum(card);
+      let v = num(card.current) + step;
+      if (max != null && max > 0) v = Math.min(v, max);
+      card.current = v;
+    });
+    else if (act === 'dec') mutate(function () {
+      // v118: ручной «−» — это урон: сначала щит, остаток в текущее.
+      // Отрицательный шаг работает как прибавка (щит не трогаем).
+      const step = counterStep(card.id);
+      if (step < 0) {
+        const max = counterMaxNum(card);
+        let v = num(card.current) - step;
+        if (max != null && max > 0) v = Math.min(v, max);
+        card.current = v;
+      } else if (step > 0) {
+        applyEvent(card, { kind: 'damage', value: step });
+      }
+    });
     else if (act === 'card-menu') openCardMenu(card.id, e && e.currentTarget);
     else if (act === 'buff-expand') openBuffDetails(card.id);
+    else if (act === 'item-view') {
+      // v109: тап по иконке или имени — всегда просмотр. Правка своей вещи
+      // живёт в кебабе и в ✎ окна просмотра, чтобы случайный тап не открывал форму.
+      openInventoryItemView(card.id, ds.item);
+    }
+    else if (act === 'item-edit') openInventoryItemEditor(card.id, ds.item);
+    else if (act === 'item-menu') openInventoryItemMenu(card.id, ds.item, e && e.currentTarget);
+    else if (act === 'item-use') useInventoryItem(card.id, ds.item);
+    else if (act === 'item-equip') toggleInventoryEquip(card.id, ds.item);
+    else if (act === 'item-damage') rollInventoryDamage(card.id, ds.item);
+    else if (act === 'item-add-menu') openInventoryAddMenu(card.id, e && e.currentTarget);
+    else if (act === 'item-fx-del') {
+      const a = (card.itemActive || []).find(function (x) { return x.id === ds.fx; });
+      const nm = a ? a.name : '';
+      mutate(function () {
+        card.itemActive = (card.itemActive || []).filter(function (x) { return x.id !== ds.fx; });
+      });
+      if (nm) toast(App.tf('deletedGeneric', { name: nm }));
+    }
+    else if (act === 'item-shield-del') {
+      const target = findCard(ds.target);
+      const part = target && (target.shieldParts || []).find(function (p) { return p.id === ds.part; });
+      const nm = part ? part.name : '';
+      if (!target) return;
+      mutate(function () {
+        target.shieldParts = (target.shieldParts || []).filter(function (p) { return p.id !== ds.part; });
+        syncShield(target);
+      });
+      if (nm) toast(App.tf('deletedGeneric', { name: nm }));
+    }
     else if (act === 'roll') rollCard(card);
     else if (act === 'use') useCharge(card);
     else if (act === 'chg-drum') openChargeDrum(card);
@@ -1228,13 +1613,6 @@ window.App = window.App || {};
     });
     else if (act === 'curr-custom-inc') openCurrencyDelta(card, ds.unit, 1, e && e.currentTarget);
     else if (act === 'curr-custom-dec') openCurrencyDelta(card, ds.unit, -1, e && e.currentTarget);
-    else if (act === 'item-del') {
-      const item = (card.items || []).find(function (i) { return i.id === ds.item; });
-      const itemName = item ? item.name : '';
-      confirmDialog(App.tf('confirmDeleteItem', { name: itemName }), function () {
-        mutate(function () { card.items = card.items.filter(function (i) { return i.id !== ds.item; }); });
-      });
-    }
     else if (act.indexOf('ini-') === 0) handleInitiative(card, act, ds, e);
   }
 
@@ -1619,6 +1997,7 @@ window.App = window.App || {};
     const ch = activeChar();
     const card = findCard(cardId);
     if (!ch || !card) return;
+    let copyName = '';
     mutate(function () {
       const copy = JSON.parse(JSON.stringify(card));
       copy.id = uid();           // новый id копии ОБЯЗАТЕЛЕН: id ищется/удаляется/анимируется по data-id,
@@ -1633,11 +2012,19 @@ window.App = window.App || {};
       // v65: у «Состояния» имя может быть пустым — копия тоже остаётся без подписи
       if (base) { while (ch.cards.some(function (c) { return c.name === nm; })) { nm = base + ' (' + i + ')'; i++; } }
       copy.name = nm;
+      copyName = nm;
       // v91: копия активного баффа не должна молча удвоить эффекты
-      if (copy.type === 'buff') copy.on = false;
+      if (copy.type === 'buff') {
+        copy.on = false;
+        // v114: копия не должна перехватывать обновления от предмета
+        delete copy.srcKey;
+      }
+      // v124: копия инвентаря не наследует временные эффекты предметов
+      if (copy.type === 'inventory') copy.itemActive = [];
       if (copy.x != null) { copy.x += 24; copy.y += 24; }
       ch.cards.push(copy);
     });
+    toast(App.tf('duplicatedGeneric', { name: copyName }));
   }
 
   function deleteCard(cardId) {
@@ -1659,18 +2046,33 @@ window.App = window.App || {};
       msg += App.tf('linkedBy', { name: linked.map(function (l) { return l.name; }).join(', ') });
     }
     const confirmMsg = msg || App.tf('confirmDeleteCard', { name: name });
-    confirmDialog(confirmMsg, function () { doDeleteCard(cardId); });
+    askDelete({ text: confirmMsg, onYes: function () { doDeleteCard(cardId); } });
   }
   function doDeleteCard(cardId) {
     const ch = activeChar();
     if (!ch) return;
+    const card = ch.cards.find(function (c) { return c.id === cardId; });
+    const nm = card ? card.name : '';
     mutate(function () { ch.cards = ch.cards.filter(function (c) { return c.id !== cardId; }); });
+    toast(App.tf('deletedGeneric', { name: nm }));
   }
 
   function doRest() {
     const ch = activeChar();
     if (!ch) return;
     mutate(function () {
+      // v114: сначала снимаем временные эффекты — иначе максимум счётчика
+      // посчитается вместе с ними, и «отдых» оставит current выше максимума
+      ch.cards.forEach(function (c) {
+        if (c.type === 'buff' && num(c.duration) > 0 && c.on) { c.on = false; c.left = 0; }
+        // v115: отдых обнуляет щит (и постоянный, и временный)
+        if (c.type === 'counter' && shieldPartsOf(c).length) { c.shieldParts = []; c.shield = 0; }
+        // v124: временные эффекты предметов (с ходами) снимаются
+        if (c.type === 'inventory' && (c.itemActive || []).length) {
+          c.itemActive = c.itemActive.filter(function (a) { return !(num(a.left) > 0); });
+        }
+      });
+      invalidateMods();
       ch.cards.forEach(function (c) {
         if (!c.restores) return;
         if (c.type === 'counter') {
@@ -1697,8 +2099,7 @@ window.App = window.App || {};
     const s = undoStack.pop();
     state.characters = s.characters;
     state.activeCharacterId = s.activeCharacterId;
-    save(); render();
-    if (layerCardId) refreshLayer();   // слой не должен переживать свои данные
+    commit();   // без pushUndo: отмена не должна попадать в историю
   }
   function redo() {
     if (!redoStack.length) return;
@@ -1706,12 +2107,58 @@ window.App = window.App || {};
     const s = redoStack.pop();
     state.characters = s.characters;
     state.activeCharacterId = s.activeCharacterId;
-    save(); render();
-    if (layerCardId) refreshLayer();
+    commit();
   }
 
   // ===== Rendering =====
+  // v106: render() пересобирает DOM, поэтому запоминаем фокус и прокрутку списков
+  // до перерисовки и возвращаем после. Иначе ввод шага счётчика сбрасывался,
+  // а список инвентаря прыгал в начало после каждого «надеть».
+  function captureViewState() {
+    const canvas = document.getElementById('canvas');
+    const topbar = document.getElementById('topbar');
+    const ae = document.activeElement;
+    let focus = null;
+    if (ae && ae !== document.body) {
+      if (canvas.contains(ae)) {
+        focus = { where: 'canvas', step: (ae.dataset && ae.dataset.step) || null, id: ae.id || null };
+      } else if (topbar.contains(ae) && ae.id) {
+        focus = { where: 'topbar', id: ae.id };
+      }
+      if (focus && typeof ae.selectionStart === 'number') {
+        focus.start = ae.selectionStart;
+        focus.end = ae.selectionEnd;
+      }
+    }
+    const scrolls = [];
+    canvas.querySelectorAll('.inv-list, .note-text, .desc-text').forEach(function (el) {
+      if (!el.scrollTop) return;
+      const card = el.closest('.card');
+      scrolls.push({ card: card ? card.dataset.id : '', cls: el.classList[0], top: el.scrollTop });
+    });
+    return { focus: focus, scrolls: scrolls };
+  }
+  function restoreViewState(st) {
+    if (!st) return;
+    st.scrolls.forEach(function (s) {
+      if (!s.card) return;
+      const card = document.querySelector('.card[data-id="' + s.card + '"]');
+      const el = card && card.querySelector('.' + s.cls);
+      if (el) el.scrollTop = s.top;
+    });
+    const f = st.focus;
+    if (!f) return;
+    let el = null;
+    if (f.step) el = document.querySelector('.step-input[data-step="' + f.step + '"]');
+    else if (f.id) el = document.getElementById(f.id);
+    if (!el) return;
+    try { el.focus({ preventScroll: true }); } catch (e) { el.focus(); }
+    if (f.start != null && el.setSelectionRange) {
+      try { el.setSelectionRange(f.start, f.end); } catch (e) { /* не текстовое поле */ }
+    }
+  }
   function render() {
+    const view = captureViewState();
     // модификаторы пересобираются на каждый рендер: undo/redo и импорт меняют
     // состояние в обход commit(), а индекс обязан быть свежим (кэш — один на рендер)
     invalidateMods();
@@ -1720,15 +2167,23 @@ window.App = window.App || {};
     renderCanvas();
     renderLog();
     updateFab();
+    restoreViewState(view);
   }
   function updateFab() {
-    document.getElementById('fab').classList.toggle('hidden', !editMode || !activeChar());
+    const fab = document.getElementById('fab');
+    fab.classList.toggle('hidden', !editMode || !activeChar());
+    // v126: подпись для экранных дикторов (title с текстом уже есть, но он не диктуется)
+    fab.setAttribute('aria-label', App.t('addCard'));
   }
 
   // Накладка ↺/↻: на ПК клавиши Ctrl+Z / Ctrl+Y (и Ctrl+Shift+Z), кнопки в шапке — только телефон
   function addUndoKeys() {
     document.addEventListener('keydown', function (e) {
       if (!(e.ctrlKey || e.metaKey) || e.altKey) return;
+      // v106: в поле ввода Ctrl+Z отменяет текст, а не весь лист. Иначе одно
+      // нажатие в имени персонажа откатывало карточки, и это выглядело как потеря.
+      const t = e.target;
+      if (t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.tagName === 'SELECT' || t.isContentEditable)) return;
       // v20d: сравниваем ФИЗИЧЕСКУЮ клавишу e.code, а не e.key — на русской раскладке
       // Ctrl+Z даёт key='я' (и Ctrl+Y='н'), из-за чего отмена молча не срабатывала.
       // e.code='KeyZ'/'KeyY' не зависит от языка раскладки.
@@ -1766,7 +2221,7 @@ window.App = window.App || {};
       charNameHtml +
       '<div class="top-controls">' + controlsHtml + '</div>';
 
-    document.getElementById('brandBtn').addEventListener('click', openSettings);
+    document.getElementById('brandBtn').addEventListener('click', function () { openSettings(); });
     const restBtn = document.getElementById('restBtn');
     if (restBtn) restBtn.addEventListener('click', confirmRest);
     document.getElementById('diceBtn').addEventListener('click', toggleDiceWidget);
@@ -1817,7 +2272,8 @@ window.App = window.App || {};
   function defaultSpan(type) {
     if (type === 'counter') return 1;      // четыре счётчика в ряд
     if (type === 'currency') return 1;     // валюта/ярлык — компактная клетка
-    return 2;                              // навык/заклинание/инвентарь/заметка
+    if (type === 'skill') return 1;        // v127: навык — квадрат в одну клетку, как «квадрат 76» со стенда
+    return 2;                              // заклинание/инвентарь/заметка
   }
   function cardSpan(card) {
     const n = Math.round(num(card.span) || 0);
@@ -1865,6 +2321,10 @@ window.App = window.App || {};
     const label = foldable(card) ?
       '<div class="artifact" aria-hidden="true"><img src="icons/labels/' + esc(FOLDABLE_ICONS[card.type]) + '.png" alt=""></div>' +
       '<div class="card-title-small">' + esc(card.name) + '</div>' +
+      (function () {
+        const n = card.type === 'inventory' ? inventoryActiveEntries(card).length : 0;
+        return n ? '<span class="label-fx-count" title="' + esc(App.t('itemActiveEffects')) + '">' + n + '</span>' : '';
+      })() +
       '<button class="fold-tab" title="' + esc(App.t(folded ? 'unfoldCard' : 'foldCard')) + '" aria-label="' + esc(App.t(folded ? 'unfoldCard' : 'foldCard')) + '"></button>' : '';
     const cls = 'card type-' + card.type + (card.type === 'buff' && card.on ? ' on' : '') + (card.mini ? ' mini' : '') + (folded ? ' collapsed' : '') + sel + (card.restores ? ' restores' : '');
     // v58: у навыка шапка и кнопка броска — соседи в сетке .skill-grid, чтобы на
@@ -1896,10 +2356,11 @@ window.App = window.App || {};
         '<span></span><span></span><span></span></button>';
     } else if (toolsMode !== false && (editMode || toolsMode)) {
       tools = '<div class="tools">' +
-        (desktop ? '' : '<button class="card-up" title="↑">▲</button><button class="card-down" title="↓">▼</button>') +
-        '<button class="card-edit" title="' + esc(App.t('edit')) + '">✎</button>' +
-        '<button class="card-dup" title="' + esc(App.t('duplicate')) + '">⧉</button>' +
-        '<button class="card-del" title="' + esc(App.t('delete')) + '">' + TRASH_SVG + '</button>' +
+        (desktop ? '' : '<button class="card-up" title="↑" aria-label="' + esc(App.t('moveUp')) + '">▲</button><button class="card-down" title="↓" aria-label="' + esc(App.t('moveDown')) + '">▼</button>') +
+        // v102: у инвентаря нет редактора карточки — правка строк идёт в самих предметах
+        (card.type === 'inventory' ? '' : '<button class="card-edit" title="' + esc(App.t('edit')) + '" aria-label="' + esc(App.t('edit')) + '">✎</button>') +
+        '<button class="card-dup" title="' + esc(App.t('duplicate')) + '" aria-label="' + esc(App.t('duplicate')) + '">⧉</button>' +
+        '<button class="card-del" title="' + esc(App.t('delete')) + '" aria-label="' + esc(App.t('delete')) + '">' + TRASH_SVG + '</button>' +
       '</div>';
     }
     const handle = (editMode && desktop) ? '<span class="handle" title="⋮⋮">⋮⋮</span>' : '';
@@ -1932,9 +2393,15 @@ window.App = window.App || {};
     // клик по тексту карточки остаётся тумблером (см. bindCard).
     const buffExpand = (!editMode && card.type === 'buff')
       ? '<button type="button" class="buff-expand" data-act="buff-expand" title="' + esc(App.t('buffExpand')) + '" aria-label="' + esc(App.t('buffExpand')) + '">⤢</button>' : '';
+    // v124: щит — в шапке рядом с бейджем модификаторов, а не поверх значения:
+    // иначе плашка закрывала «−2» у максимума на узком счётчике
+    const shield = card.type === 'counter' ? shieldTotal(card) : 0;
+    const shieldChip = shield > 0
+      ? '<span class="counter-shield" title="' + esc(App.t('shieldHint')) + '">🛡 ' + shield + '</span>'
+      : '';
     return '<div class="card-head">' + handle + '<span class="card-name">' +
       (card.restores && card.type !== 'counter' ? '<span class="restore-ic">☾</span>' : '') + esc(card.name) +
-      '</span>' + modBadgeHTML(card) + finfo + linktag + buffExpand + roller + tools + '</div>';
+      '</span>' + modBadgeHTML(card) + shieldChip + finfo + linktag + buffExpand + roller + tools + '</div>';
   }
 
   // v89: бейдж «на меня влияют»: число активных модификаторов, тап — список источников
@@ -2139,7 +2606,7 @@ window.App = window.App || {};
     const forceTag = !!ch.tag;
     const useWhy = blockedBy(card);
     const useBtn = useWhy
-      ? '<button class="small primary use-btn blocked" type="button" disabled title="' + esc(App.tf('useBlocked', { why: useWhy })) + '">' + esc(App.t('use')) + '</button>'
+      ? '<button class="small primary use-btn" type="button" disabled title="' + esc(App.tf('useBlocked', { why: useWhy })) + '">' + esc(App.t('use')) + '</button>'
       : '<button class="small primary use-btn" data-act="use">' + esc(App.t('use')) + '</button>';
     if (ch.mode === 'link') {
       const target = findCard(ch.linkId);
@@ -2281,7 +2748,7 @@ window.App = window.App || {};
         '<input class="ini-add-input" type="text" placeholder="' + esc(App.t('iniName')) + '">' +
         '<button type="button" data-act="ini-add">+</button>' +
       '</div>' +
-      '<button type="button" class="ini-pass' + (prep ? ' start' : '') + (blocked ? ' blocked' : '') + '" data-act="ini-pass">' +
+      '<button type="button" class="ini-pass' + (prep ? ' start' : '') + '" data-act="ini-pass"' + (blocked ? ' disabled' : '') + '>' +
         esc(App.t(prep ? 'iniStart' : 'iniNext')) + '</button>';
 
     return '<div class="card-body ini-body">' + html + '</div>';
@@ -2508,29 +2975,804 @@ window.App = window.App || {};
     return '<div class="card-body">' + (rows || '<div class="meta">—</div>') + '</div>';
   }
 
+  // v125: щиты, выданные предметом, тоже попадают в полосу активных эффектов.
+  // Сама часть живёт на счётчике (она поглощает урон), но чип показываем в
+  // инвентаре того предмета, который её выдал.
+  function itemShieldChips(card) {
+    const ch = activeChar();
+    const out = [];
+    if (!ch || !card) return out;
+    (ch.cards || []).forEach(function (c) {
+      if (c.type !== 'counter') return;
+      (c.shieldParts || []).forEach(function (p) {
+        if (!p.name || p.from !== card.id) return;
+        out.push({ target: c, part: p });
+      });
+    });
+    return out;
+  }
+  function inventoryActiveEntries(card) {
+    const out = (card.itemActive || []).map(function (a) { return { kind: 'fx', a: a }; });
+    itemShieldChips(card).forEach(function (x) { out.push({ kind: 'shield', target: x.target, part: x.part }); });
+    return out;
+  }
+
   function inventoryBody(card) {
     const items = card.items || [];
     let totalW = 0;
-    let hasWeight = false;                      // есть ли хоть у одного предмета указанный вес
+    let hasWeight = false;
     const rows = items.map(function (it) {
-      const w = (it.weight == null) ? 0 : num(it.weight);
+      const e = effectiveInventoryRow(it);
+      const w = (e.weight == null) ? 0 : num(e.weight);
       totalW += w * num(it.qty);
-      if (it.weight != null) hasWeight = true;
-      const desc = it.description || '';
-  return '<div class="item-row' + (desc ? ' has-desc' : '') + '"' + (desc ? ' data-item="' + it.id + '" title="' + esc(desc) + '"' : '') + '>' +
-        '<span class="iname">' + esc(it.name) + (desc ? '<small class="idesc">' + esc(desc) + '</small>' : '') + '</span>' +
-        '<span class="iqty">×' + num(it.qty) + '</span>' +
-        (card.showWeight && it.weight != null ? '<span class="iwgt">' + fmt(w) + '</span>' : '') +
-        (editMode ? '<button class="small" data-act="item-del" data-item="' + it.id + '">✕</button>' : '') +
-        '</div>';
+      if (e.weight != null) hasWeight = true;
+      const actions = [];
+      if (e.damage) {
+        actions.push('<button type="button" class="inv-act dmg" data-act="item-damage" data-item="' + esc(it.id) + '">' + esc(e.damage) + '</button>');
+      }
+      if (e.category === 'consumable') {
+        const cur = (e.effects || []).find(function (ef) { return ef.field === 'current'; });
+        actions.push('<button type="button" class="inv-act use" data-act="item-use" data-item="' + esc(it.id) + '">' +
+          esc(cur ? (cur.label || cur.value) : App.t('itemUse')) + '</button>');
+      }
+      if (e.category === 'equipment') {
+        actions.push('<button type="button" class="inv-act' + (e.equipped ? ' on' : '') + '" data-act="item-equip" data-item="' + esc(it.id) + '">' +
+          esc(App.t(e.equipped ? 'itemUnequip' : 'itemEquip')) + '</button>');
+      }
+      // v108: кебаб строки — «Изменить»/«Обновить из набора» и «Удалить».
+      // v109: крестик убран — удаление живёт только здесь, чтобы в строке
+      // не было двух путей к одному действию.
+      actions.push('<button type="button" class="inv-menu-btn" data-act="item-menu" data-item="' + esc(it.id) + '"' +
+        ' title="' + esc(App.t('menu')) + '" aria-label="' + esc(App.t('menu')) + '">⋮</button>');
+      // v110: бейдж — только реально работающие эффекты (есть живая цель)
+      const fxOn = activeRowEffects(it).length;
+      const badge = (e.category === 'equipment' && e.equipped && fxOn)
+        ? '<span class="inv-badge" title="' + esc(App.t('itemActiveEffects')) + '">' + fxOn + '</span>' : '';
+      return '<div class="inv-row" data-item="' + esc(it.id) + '">' +
+        '<span class="inv-ic">' + itemIconChar(e.icon, e.category) + '</span>' +
+        '<button type="button" class="inv-main" data-act="item-view" data-item="' + esc(it.id) + '">' +
+          '<span class="inv-name">' + esc(e.name) + badge + '</span>' +
+          '<span class="inv-meta">' + esc(itemCategoryLabel(e.category)) + ' · ' + (e.weight == null ? '—' : fmt(e.weight) + ' кг') +
+            (it.qty > 1 ? ' · ×' + it.qty : '') + '</span>' +
+        '</button>' +
+        '<span class="inv-actions">' + actions.join('') + '</span>' +
+      '</div>';
     }).join('');
-    // итог веса показываем только если вес реально указан (иначе «Вес: 0» только занимал место)
     const total = (card.showWeight && hasWeight) ? '<div class="inv-total">' + esc(App.t('totalWeight')) + ': ' + fmt(totalW) + '</div>' : '';
-    return '<div class="card-body">' + (rows || '<div class="meta">—</div>') + total + '</div>';
+    // v124–v125: активные эффекты и выданные предметом щиты — в шапке, рядом с «＋»
+    const entries = inventoryActiveEntries(card);
+    const strip = entries.length
+      ? '<div class="inv-effects">' + entries.map(function (e) {
+          if (e.kind === 'shield') {
+            const p = e.part, t = e.target, left = num(p.left);
+            const title = p.name + ': ' + App.t('shieldShort') + ' ' + p.amount + ' → ' + t.name + (left > 0 ? ' · ⏱' + left : '');
+            return '<span class="inv-fx-chip shield" title="' + esc(title) + '">' +
+              '<b>' + esc(p.name) + '</b>' +
+              '<span class="inv-fx-txt">' + esc(App.t('shieldShort')) + ' ' + p.amount + (left > 0 ? ' ⏱' + left : '') + '</span>' +
+              '<button type="button" class="inv-fx-x" data-act="item-shield-del" data-target="' + esc(t.id) + '" data-part="' + esc(p.id) + '" title="' + esc(App.t('delete')) + '" aria-label="' + esc(App.t('delete')) + '">×</button>' +
+            '</span>';
+          }
+          const a = e.a;
+          const ef = a.ef || {};
+          const tgt = findCard(ef.target);
+          const full = (a.name ? a.name + ': ' : '') + fxShort(ef) + ' → ' + (tgt ? tgt.name : App.t('fxNoTarget'));
+          const left = num(a.left);
+          // у тика «⏱» уже есть в короткой подписи — второй не ставим
+          const short = fxChipShort(ef).replace(/^⏱\s*/, '');
+          return '<span class="inv-fx-chip" title="' + esc(full) + '">' +
+            (a.name ? '<b>' + esc(a.name) + '</b>' : '') +
+            '<span class="inv-fx-txt">' + esc(short) + (left > 0 ? ' ⏱' + left : '') + '</span>' +
+            '<button type="button" class="inv-fx-x" data-act="item-fx-del" data-fx="' + esc(a.id) + '" title="' + esc(App.t('delete')) + '" aria-label="' + esc(App.t('delete')) + '">×</button>' +
+          '</span>';
+        }).join('') + '</div>'
+      : '';
+    return '<div class="card-body inv-body">' +
+      '<div class="inv-top">' + strip +
+        '<button type="button" class="inv-add" data-act="item-add-menu" aria-label="' + esc(App.t('packAddItem')) + '">＋</button></div>' +
+      '<div class="inv-list">' + (rows || '<div class="inv-empty">' + esc(App.t('itemEmpty')) + '</div>') + '</div>' +
+      total +
+    '</div>';
+  }
+
+  function inventoryRow(card, itemId) {
+    return (card && card.items || []).find(function (it) { return it.id === itemId; }) || null;
+  }
+
+  function itemMemoryKey(row) {
+    return row && row.packId && row.itemId ? row.packId + ':' + row.itemId : '';
+  }
+
+  // v98: цели запоминаются по предмету набора и переживают удаление строки.
+  // v111: теперь по каждой цели эффекта (массив), как у снаряжения; старая
+  // запись-строка читается как общая цель разовых эффектов.
+  function rememberItemTarget(card, row) {
+    const key = itemMemoryKey(row);
+    if (!key) return;
+    if (!card.itemTargets || typeof card.itemTargets !== 'object') card.itemTargets = {};
+    const list = (effectiveInventoryRow(row).effects || []).map(function (ef) { return ef.target || null; });
+    if (list.some(Boolean)) card.itemTargets[key] = list;
+    else delete card.itemTargets[key];
+  }
+
+  function growInventoryCard(card) {
+    if (!card) return;
+    const mn = minSize(card);
+    if (!card.h || card.h < mn.h) card.h = mn.h;
+  }
+
+  function sameInventoryItem(a, b) {
+    const fields = ['itemId', 'packId', 'name', 'icon', 'category', 'weight', 'damage', 'price', 'description', 'equipped', 'target', 'revealed'];
+    for (let i = 0; i < fields.length; i++) {
+      if (String(a[fields[i]] == null ? '' : a[fields[i]]) !== String(b[fields[i]] == null ? '' : b[fields[i]])) return false;
+    }
+    return JSON.stringify(a.effects || []) === JSON.stringify(b.effects || []) &&
+      JSON.stringify(a.secret || null) === JSON.stringify(b.secret || null);
+  }
+
+  function rollItemExpr(expr) {
+    let s = String(expr == null ? '' : expr).trim().replace(/\s+/g, '');
+    if (!s) return null;
+    if (/^[+-]?\d+(?:[.,]\d+)?$/.test(s)) {
+      const n = Number(s.replace(',', '.'));
+      return Number.isFinite(n) ? { total: n, text: s } : null;
+    }
+    const m = /^([+-]?)(\d*)d(\d+)([+-]\d+)?$/i.exec(s);
+    if (!m) return null;
+    const sign = m[1] === '-' ? -1 : 1;
+    const count = Math.max(1, parseInt(m[2], 10) || 1);
+    const sides = parseInt(m[3], 10);
+    if (!(sides > 1)) return null;
+    let total = parseInt(m[4] || '0', 10) || 0;
+    const parts = [];
+    for (let i = 0; i < count; i++) { const v = 1 + Math.floor(Math.random() * sides); total += v; parts.push(v); }
+    return { total: sign * total, text: (sign < 0 ? '−' : '') + parts.join(' + ') + (m[4] ? ' ' + m[4] : '') };
+  }
+
+  function closeInvMenu() { closeMenuById('invMenu'); }
+  function openInvMenu(anchor, html, onClick, opts) {
+    opts = opts || {};
+    const menu = document.createElement('div');
+    menu.className = 'ctxmenu inv-menu';
+    menu.id = 'invMenu';
+    menu.innerHTML = html;
+    menu.addEventListener('click', function (e) { onClick(e, menu); });
+    mountMenu(menu, anchor, { align: 'right', side: opts.left ? 'left' : '', toggle: !!opts.toggle });
+  }
+
+  function useInventoryItem(cardId, itemId) {
+    const row = inventoryRow(findCard(cardId), itemId);
+    if (!row) return;
+    const e = effectiveInventoryRow(row);
+    // v122: расходник-пустышка (реагент) ни на что не влияет — просто тратится,
+    // цель ему не нужна
+    if (!(e.effects || []).length) {
+      useBlankItem(cardId, itemId);
+      return;
+    }
+    // v111: цель живёт в каждом разовом эффекте, а не одна на строку.
+    // v114: временные/тикающие эффекты тоже считаются готовыми к применению.
+    // v115: выдача щита — тоже применение.
+    const instant = (e.effects || []).filter(function (ef) {
+      return (ef.field === 'current' || ef.field === 'shield') && ef.mode !== 'tick' && effectReady(ef);
+    });
+    const timed = (e.effects || []).filter(function (ef) {
+      return timedItemEffect(ef);
+    });
+    if (!instant.length && !timed.length) {
+      toast(App.t('itemChooseTarget'));
+      openInventoryItemView(cardId, itemId);
+      return;
+    }
+    applyInventoryItem(cardId, itemId);
+  }
+
+  // v122: «Использовать» без эффектов — только списать количество.
+  function useBlankItem(cardId, itemId) {
+    const card = findCard(cardId);
+    const row = inventoryRow(card, itemId);
+    if (!card || !row) return;
+    const nm = effectiveInventoryRow(row).name;
+    mutate(function () {
+      row.qty = Math.max(0, num(row.qty) - 1);
+      if (row.qty <= 0) card.items = card.items.filter(function (x) { return x.id !== row.id; });
+    });
+    closeInvMenu();
+    closeModal();
+    toast(App.tf('itemUsedBlank', { name: nm }));
+  }
+
+  // v114: эффект, который живёт во времени: тик или модификатор с длительностью.
+  // Разовое «текущее» без длительности применяется сразу, а не создаёт бафф.
+  // v115: щит — разовая выдача запаса, у него своя длительность на карточке.
+  function timedItemEffect(ef) {
+    if (!ef || !ef.target || !findCard(ef.target)) return false;
+    if (ef.field === 'shield') return false;
+    // v120: преимущество/помеха с предмета — это временный (или постоянный,
+    // пока не выключат) бафф; без этого «Использовать» просил выбрать цель
+    if (ef.mode === 'tick' || ef.mode === 'adv' || ef.mode === 'dis') return true;
+    return num(ef.duration) > 0 && effectField(ef) !== 'current';
+  }
+
+  // v124: временные эффекты предмета живут на карточке инвентаря, в полосе
+  // активных эффектов. Ключ источника один на предмет: повторное применение
+  // заменяет прошлые записи, а не плодит дубли.
+  function addItemActive(card, row, effects, name) {
+    if (!card) return;
+    const key = row.packId ? 'pack:' + row.packId + ':' + row.itemId : 'own:' + row.id;
+    if (!Array.isArray(card.itemActive)) card.itemActive = [];
+    card.itemActive = card.itemActive.filter(function (a) { return a.srcKey !== key; });
+    effects.forEach(function (ef) {
+      const c = normalizeEffect(ef);
+      c.target = ef.target || null;
+      const uses = c.mode === 'adv' || c.mode === 'dis';
+      const left = uses ? null : (num(c.duration) > 0 ? num(c.duration) : null);
+      card.itemActive.push({ id: uid(), srcKey: key, name: name || '', ef: c, left: left });
+    });
+  }
+
+  function applyInventoryItem(cardId, itemId) {
+    const card = findCard(cardId);
+    const row = inventoryRow(card, itemId);
+    if (!row) return;
+    const e = effectiveInventoryRow(row);
+    // разовые эффекты: у каждого своя цель, одинаковые цели складываются
+    const byTarget = {};
+    const shieldBy = {};
+    (e.effects || []).forEach(function (ef) {
+      if (!ef.target || !findCard(ef.target)) return;
+      if (ef.field === 'shield') {
+        const r = rollItemExpr(ef.value);
+        if (!r) return;
+        const slot = shieldBy[ef.target] || (shieldBy[ef.target] = { sum: 0, left: 0 });
+        slot.sum += r.total;
+        slot.left = Math.max(slot.left, num(ef.duration) || 0);
+        slot.name = e.name;
+        slot.srcKey = row.packId ? 'pack:' + row.packId + ':' + row.itemId : 'own:' + row.id;
+        slot.from = card.id;
+        return;
+      }
+      if (ef.field !== 'current' || ef.mode === 'tick') return;
+      const r = rollItemExpr(ef.value);
+      if (!r) return;
+      const slot = byTarget[ef.target] || (byTarget[ef.target] = { sum: 0 });
+      slot.sum += r.total;
+    });
+    const ids = Object.keys(byTarget);
+    const shieldIds = Object.keys(shieldBy);
+    const timed = (e.effects || []).filter(timedItemEffect);
+    if (!ids.length && !shieldIds.length && !timed.length) { toast(App.t('itemNoEffect')); return; }
+    const applied = {};
+    mutate(function () {
+      ids.forEach(function (tid) {
+        const t = findCard(tid);
+        const sum = byTarget[tid].sum;
+        if (!t || t.type !== 'counter' || !sum) return;
+        applied[tid] = applyEvent(t, sum >= 0 ? { kind: 'heal', value: sum } : { kind: 'damage', value: -sum });
+      });
+      shieldIds.forEach(function (tid) {
+        const t = findCard(tid);
+        if (!t || t.type !== 'counter') return;
+        const r = applyEvent(t, { kind: 'shield', value: shieldBy[tid].sum, left: shieldBy[tid].left, name: shieldBy[tid].name, srcKey: shieldBy[tid].srcKey, from: shieldBy[tid].from });
+        applied[tid] = applied[tid] || { hp: 0, shield: 0 };
+        applied[tid].shield += r.shield;
+      });
+      if (timed.length) addItemActive(card, row, timed, e.name);
+      rememberItemTarget(card, row);
+      row.qty = Math.max(0, num(row.qty) - 1);
+      if (row.qty <= 0) card.items = card.items.filter(function (x) { return x.id !== row.id; });
+    });
+    closeInvMenu();
+    closeModal();
+    const bits = Object.keys(applied).map(function (tid) {
+      const t = findCard(tid);
+      const r = applied[tid];
+      const nm = t ? t.name : '';
+      const sub = [];
+      if (r.hp) sub.push((r.hp > 0 ? '+' : '−') + Math.abs(r.hp));
+      if (r.shield) sub.push((r.shield > 0 ? '+' : '−') + Math.abs(r.shield) + ' ' + App.t('shieldShort'));
+      return sub.length ? nm + ' ' + sub.join(' / ') : nm + ' ' + App.t('itemNoChange');
+    }).filter(Boolean);
+    if (timed.length) bits.push(App.t('itemTimedShort'));
+    toast(row.name + ': ' + (bits.join(', ') || App.t('itemNoEffect')));
+  }
+
+  function rollInventoryDamage(cardId, itemId) {
+    const row = inventoryRow(findCard(cardId), itemId);
+    if (!row) return;
+    const e = effectiveInventoryRow(row);
+    const r = rollItemExpr(e.damage);
+    toast(r ? App.tf('itemDamageResult', { n: r.total, dice: r.text }) : App.tf('itemDamageText', { text: e.damage }));
+  }
+
+  // v108: одно правило «надето» для кнопки строки и редактора.
+  // Без своего mutate: вызывающий сам решает, когда сохранять.
+  // При количестве > 1 надевается одна штука (строка делится), при снятии
+  // одинаковая строка складывается обратно — иначе в списке копились бы
+  // невидимые пары. Возвращает строку, которая осталась «живой».
+  function setRowEquipped(card, row, on) {
+    if (!card || !row || !!row.equipped === !!on) return row;
+    if (!on) {
+      row.equipped = false;
+      const twin = card.items.find(function (x) {
+        return x !== row && !x.equipped && !x.revealed && x.name === row.name &&
+          x.category === row.category && x.packId === row.packId && !x.secret;
+      });
+      if (twin) { twin.qty += row.qty; card.items = card.items.filter(function (x) { return x !== row; }); return twin; }
+      return row;
+    }
+    if (row.qty > 1) {
+      const idx = card.items.indexOf(row);
+      const one = JSON.parse(JSON.stringify(row));
+      one.id = uid();
+      one.qty = 1;
+      one.equipped = true;
+      row.qty -= 1;
+      row.equipped = false;
+      card.items.splice(idx, 1, one, row);
+      return one;
+    }
+    row.equipped = true;
+    return row;
+  }
+
+  function toggleInventoryEquip(cardId, itemId) {
+    const card = findCard(cardId);
+    const row = inventoryRow(card, itemId);
+    if (!row) return;
+    const wasEquipped = !!row.equipped;
+    const nm = effectiveInventoryRow(row).name;
+    mutate(function () { setRowEquipped(card, row, !wasEquipped); });
+    toast(nm + ' · ' + App.t(wasEquipped ? 'itemUnequipped' : 'itemEquipped'));
+  }
+
+  // v108: действия строки инвентаря в одном меню — и на холсте, и в слое.
+  // «Открыть» оставляем для быстрого просмотра; «Изменить» — только у своей
+  // вещи, предмет набора правится в настройках набора.
+  function deleteInventoryRow(cardId, itemId, anchor) {
+    const card = findCard(cardId);
+    const row = inventoryRow(card, itemId);
+    if (!row) return;
+    const nm = effectiveInventoryRow(row).name;
+    askDelete({ text: App.tf('itemDeleteConfirm', { name: nm }), anchor: anchor, onYes: function () {
+      mutate(function () {
+        card.items = (card.items || []).filter(function (x) { return x.id !== itemId; });
+      });
+      toast(App.tf('deletedGeneric', { name: nm }));
+    } });
+  }
+
+  function openInventoryItemMenu(cardId, itemId, anchor) {
+    const card = findCard(cardId);
+    const row = inventoryRow(card, itemId);
+    if (!row) return;
+    // v109: «Открыть» убрано — просмотр открывается тапом по иконке или имени.
+    // В меню остаётся то, чего нельзя сделать тапом: правка/обновление и удаление.
+    let html = '';
+    if (!row.packId) html += '<button type="button" data-im="edit">' + esc(App.t('edit')) + '</button>';
+    else html += '<button type="button" data-im="refresh">' + esc(App.t('itemRefresh')) + '</button>';
+    html += '<button type="button" data-im="del">' + esc(App.t('delete')) + '</button>';
+    openInvMenu(anchor, html, function (e) {
+      const b = e.target.closest('[data-im]');
+      if (!b) return;
+      const what = b.dataset.im;
+      closeInvMenu();
+      if (what === 'edit') openInventoryItemEditor(cardId, itemId);
+      else if (what === 'refresh') refreshInventoryFromPack(cardId, itemId);
+      else if (what === 'del') deleteInventoryRow(cardId, itemId, anchor);
+    }, { toggle: true });
+  }
+
+  // v102: круглая стрелка «Обновить» в шапке окна предмета (как иконка ресета)
+  const ITEM_REFRESH_SVG = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3.5 12a8.5 8.5 0 1 0 2.6-6.1"/><path d="M3 4v5h5"/></svg>';
+
+  function openInventoryItemView(cardId, itemId) {
+    const card = findCard(cardId);
+    const row = inventoryRow(card, itemId);
+    if (!row) return;
+    const e = effectiveInventoryRow(row);
+    // v111: цель выбирается у каждого эффекта одинаково — и у разового
+    // «текущего», и у модификатора. Для предмета набора это единственное место.
+    // v112: у «Прочего» эффектов нет — в просмотре не показываем даже старые
+    const fx = e.category === 'misc' ? '' : (e.effects || []).map(function (ef, i) {
+      const field = effectField(ef);
+      const chip = '<span class="inv-view-fx">' + esc(ef.label || fxShort(ef)) + '</span>';
+      const live = effectReady(ef);
+      const missing = ef.target && !findCard(ef.target);
+      const opts = '<option value="">' + esc(App.t('fxNoTargetPick')) + '</option>' +
+        (missing ? '<option value="' + esc(ef.target) + '" selected>' + esc(App.t('fxNoTarget')) + '</option>' : '') +
+        effectTargetCards(field).map(function (c) {
+          return '<option value="' + esc(c.id) + '"' + (ef.target === c.id ? ' selected' : '') + '>' + esc(c.name) + '</option>';
+        }).join('');
+      return '<div class="inv-fx-line' + (live ? '' : ' off') + '">' + chip +
+        '<select class="inv-fx-target" data-fx-target="' + i + '" aria-label="' + esc(App.t('itemTarget')) + '">' + opts + '</select></div>';
+    }).join('');
+    // v102: в окне предмета — только «Обновить» (иконка в шапке); надеть/использовать
+    // живут кнопками в строке инвентаря, закрытие — тап мимо или Esc
+    const refreshBtn = row.packId
+      ? '<button type="button" class="modal-icon-btn" data-item-refresh="1" title="' + esc(App.t('itemRefresh')) +
+        '" aria-label="' + esc(App.t('itemRefresh')) + '">' + ITEM_REFRESH_SVG + '</button>'
+      : '';
+    // v108: у своей вещи из просмотра можно сразу перейти в редактор
+    const editBtn = !row.packId
+      ? '<button type="button" class="modal-icon-btn" data-item-edit="1" title="' + esc(App.t('edit')) +
+        '" aria-label="' + esc(App.t('edit')) + '">✎</button>'
+      : '';
+    const trueTag = (row.secret && row.revealed)
+      ? '<div class="inv-true">' + esc(App.t('itemTrueItem')) + '</div>' : '';
+    const strange = (row.secret && !row.revealed)
+      ? '<div class="inv-strange">' + esc(App.tf('itemStrange', { name: e.name })) + '</div>' : '';
+    openModal(e.name,
+      refreshBtn + editBtn +
+      '<div class="inv-view-head"><span class="inv-view-ic">' + itemIconChar(e.icon, e.category) + '</span>' +
+        '<span class="inv-view-meta">' + esc(itemCategoryLabel(e.category)) +
+        (e.weight != null ? ' · ' + fmt(e.weight) + ' кг' : '') +
+        ' · ×' + row.qty + (e.equipped ? ' · ' + esc(App.t('itemEquipped')) : '') +
+        (e.price ? ' · ' + esc(e.price) : '') + '</span></div>' +
+      (e.damage ? '<button type="button" class="inv-view-dmg" data-item-damage="1">' + esc(e.damage) + '</button>' : '') +
+      (fx ? '<div class="inv-view-fxrow">' + fx + '</div>' : '') +
+      '<div class="full-text">' + esc(e.description || '') + '</div>' +
+      trueTag + strange,
+      []);
+    const modal = document.getElementById('modal');
+    // v111: цель эффекта меняется прямо в окне просмотра — у предметов набора
+    // другого места нет, а у своей вещи это быстрый способ без полной формы.
+    // Здесь же выбирается цель разового эффекта (раньше был отдельный селект).
+    const fxHost = modal.querySelector('.inv-view-fxrow');
+    if (fxHost) fxHost.addEventListener('change', function (ev) {
+      const sel = ev.target.closest('[data-fx-target]');
+      if (!sel) return;
+      const i = +sel.dataset.fxTarget;
+      const val = sel.value || null;
+      mutate(function () {
+        const live = effectiveInventoryRow(inventoryRow(card, itemId));
+        if (live.effects && live.effects[i]) live.effects[i].target = val;
+        rememberItemTarget(card, row);
+      });
+      const line = sel.closest('.inv-fx-line');
+      const liveEf = effectiveInventoryRow(inventoryRow(card, itemId)).effects[i];
+      if (line) line.classList.toggle('off', !effectReady(liveEf));
+      toast(App.t('itemTargetSaved'));
+    });
+    const refreshBtnEl = modal.querySelector('[data-item-refresh]');
+    if (refreshBtnEl) refreshBtnEl.addEventListener('click', function () { refreshInventoryFromPack(cardId, itemId); });
+    const editBtnEl = modal.querySelector('[data-item-edit]');
+    if (editBtnEl) editBtnEl.addEventListener('click', function () {
+      closeModal();
+      openInventoryItemEditor(cardId, itemId);
+    });
+    const dmgBtn = modal.querySelector('[data-item-damage]');
+    if (dmgBtn) dmgBtn.addEventListener('click', function () { rollInventoryDamage(cardId, itemId); });
+  }
+
+
+  function refreshInventoryFromPack(cardId, itemId) {
+    const card = findCard(cardId);
+    const row = inventoryRow(card, itemId);
+    const pack = row && row.packId ? packById(row.packId) : null;
+    const src = pack && (pack.items || []).find(function (x) { return x.id === row.itemId; });
+    if (!row || !src) { toast(App.t('packItemNotFound')); return; }
+    const tpl = normalizePackItem(src);
+    mutate(function () {
+      // v110: цель эффекта живёт в строке, а не в наборе. Обновление не должно
+      // стирать выбор игрока: переносим цель, если поле эффекта не изменилось.
+      const prev = (row.effects || []).slice();
+      row.effects = (tpl.effects || []).map(function (ef, i) {
+        const old = prev[i];
+        if (old && old.field === ef.field && old.target && findCard(old.target)) ef.target = old.target;
+        return ef;
+      });
+      row.name = tpl.name; row.icon = tpl.icon; row.category = tpl.category;
+      row.weight = tpl.weight; row.damage = tpl.damage; row.price = tpl.price;
+      row.description = tpl.description;
+      row.secret = tpl.secret;
+    });
+    closeModal();
+    toast(App.tf('itemRefreshed', { name: row.name }));
+  }
+
+  function openInventoryAddMenu(cardId, anchor) {
+    openInvMenu(anchor,
+      '<button type="button" data-add-create="1">' + esc(App.t('itemCreate')) + '</button>' +
+      '<button type="button" data-add-picker="1">' + esc(App.t('itemAdd')) + '</button>',
+      function (e) {
+        if (e.target.closest('[data-add-create]')) { closeInvMenu(); addCustomInventoryItem(cardId); }
+        else if (e.target.closest('[data-add-picker]')) { closeInvMenu(); openItemPicker(cardId); }
+      }, { toggle: true, left: true });
+  }
+
+  function addCustomInventoryItem(cardId) {
+    const card = findCard(cardId);
+    if (!card) return;
+    const row = normalizeInventoryRow({
+      id: uid(), name: App.t('packItemNew'), category: 'misc', qty: 1,
+      weight: null, damage: '', price: '', description: '', effects: [], secret: null
+    });
+    mutate(function () { card.items.push(row); growInventoryCard(card); });
+    pendingNewItem = { cardId: cardId, itemId: row.id };
+    openInventoryItemEditor(cardId, row.id);
+  }
+
+  function openItemPicker(cardId) {
+    const ch = activeChar();
+    if (!ch) return;
+    const packs = packsList().filter(function (p) { return charPacks(ch)[p.id]; });
+    if (!packs.length) { toast(App.t('itemNoPacks')); return; }
+    const catOpts = '<option value="">' + esc(App.t('itemAllCategories')) + '</option>' +
+      ITEM_CATEGORIES.map(function (c) { return '<option value="' + c.id + '">' + esc(App.t(c.labelKey)) + '</option>'; }).join('');
+    openModal(App.t('itemPickerTitle'),
+      '<div class="field"><input id="item-pick-search" type="text" autocomplete="off" spellcheck="false" placeholder="' + esc(App.t('itemSearch')) + '"></div>' +
+      '<div class="fx-pair"><div class="field"><label>' + esc(App.t('itemCategory')) + '</label><select id="item-pick-cat">' + catOpts + '</select></div>' +
+      '<div class="field"><label>' + esc(App.t('itemQty')) + '</label><input id="item-pick-qty" type="number" min="1" value="1"></div></div>' +
+      '<div id="item-pick-list" class="item-pick-list"></div>',
+      [{ label: App.t('close'), cls: 'primary' }]);
+    const list = document.getElementById('item-pick-list');
+    function render() {
+      const q = (document.getElementById('item-pick-search').value || '').trim().toLowerCase();
+      const cat = document.getElementById('item-pick-cat').value;
+      const rows = [];
+      packs.forEach(function (pack) {
+        (pack.items || []).forEach(function (it) {
+          if (cat && it.category !== cat) return;
+          if (q && String(it.name || '').toLowerCase().indexOf(q) === -1) return;
+          rows.push('<button type="button" class="item-pick-row" data-pack="' + esc(pack.id) + '" data-item="' + esc(it.id) + '">' +
+            '<span class="inv-ic">' + itemIconChar(it.icon, it.category) + '</span>' +
+            '<span class="item-pick-txt"><b>' + esc(it.name) + '</b><small>' + esc(itemCategoryLabel(it.category)) +
+              (it.weight != null ? ' · ' + fmt(it.weight) + ' кг' : '') + (it.damage ? ' · ' + esc(it.damage) : '') + '</small></span>' +
+            '<span class="item-pick-plus">+</span></button>');
+        });
+      });
+      list.innerHTML = rows.join('') || '<div class="set-empty">' + esc(App.t('itemPickerEmpty')) + '</div>';
+    }
+    document.getElementById('item-pick-search').addEventListener('input', render);
+    document.getElementById('item-pick-cat').addEventListener('change', render);
+    list.addEventListener('click', function (e) {
+      const b = e.target.closest('[data-pack]');
+      if (!b) return;
+      const qty = Math.max(1, parseInt(document.getElementById('item-pick-qty').value, 10) || 1);
+      addFromPack(cardId, b.dataset.pack, b.dataset.item, qty);
+    });
+    render();
+  }
+
+  function addFromPack(cardId, packId, itemId, qty) {
+    const card = findCard(cardId);
+    const pack = packById(packId);
+    const src = pack && (pack.items || []).find(function (it) { return it.id === itemId; });
+    if (!card || !src) return;
+    const row = normalizeInventoryRow(Object.assign({}, src, {
+      id: uid(), itemId: src.id, packId: pack.id, qty: Math.max(1, qty || 1),
+      equipped: false, targets: null, revealed: false
+    }));
+    const memKey = pack.id + ':' + src.id;
+    const mem = card.itemTargets && card.itemTargets[memKey];
+    // v111: помним цели по эффектам (массив); старая запись-строка — общая
+    // цель разовых эффектов
+    if (mem) {
+      if (Array.isArray(mem)) {
+        row.effects.forEach(function (ef, i) {
+          if (mem[i] && findCard(mem[i])) ef.target = mem[i];
+        });
+      } else if (findCard(mem)) {
+        row.effects.forEach(function (ef) {
+          if (ef.field === 'current' && !ef.target) ef.target = mem;
+        });
+      }
+    }
+    mutate(function () {
+      const same = card.items.find(function (x) { return sameInventoryItem(x, row); });
+      if (same) same.qty += row.qty;
+      else card.items.push(row);
+      growInventoryCard(card);
+    });
+    closeModal();
+    toast(App.tf('itemAdded', { name: row.name }));
+  }
+
+  // v108: своя вещь правится тем же компонентом, что и предмет набора.
+  // Дополнительно — количество, «надето» и цель применения. «Надето»
+  // меняем помощником setRowEquipped: при количестве > 1 надевается одна
+  // штука, при снятии одинаковые строки снова складываются.
+  function openInventoryItemEditor(cardId, itemId) {
+    const card = findCard(cardId);
+    const row = inventoryRow(card, itemId);
+    if (!row || row.packId) return;
+    const e = effectiveInventoryRow(row);
+    openItemForm({
+      mode: 'own',
+      title: App.t('itemEditTitle'),
+      draft: {
+        name: row.name, category: e.category, icon: e.icon, weight: row.weight,
+        price: row.price, damage: row.damage, description: row.description,
+        effects: row.effects || [], secret: row.secret || null,
+        qty: row.qty, equipped: !!row.equipped
+      },
+      onSave: function (out) {
+        const wasEquipped = !!row.equipped;
+        const wantEquipped = !!out.equipped;
+        const isNew = !!pendingNewItem;
+        mutate(function () {
+          const next = normalizeInventoryRow(Object.assign({}, row, out, {
+            id: row.id, itemId: row.itemId, packId: row.packId,
+            equipped: row.equipped,   // «надето» — отдельным помощником, см. ниже
+            revealed: row.revealed
+          }));
+          Object.keys(next).forEach(function (k) { row[k] = next[k]; });
+          if (wantEquipped !== wasEquipped) setRowEquipped(card, row, wantEquipped);
+          growInventoryCard(card);
+        }, isNew);
+        pendingNewItem = null;
+        toast(App.tf(isNew ? 'createdGeneric' : 'savedGeneric', { name: out.name }));
+        return true;
+      },
+      onDelete: function () {
+        const nm = effectiveInventoryRow(row).name;
+        mutate(function () {
+          card.items = (card.items || []).filter(function (x) { return x.id !== row.id; });
+        });
+        pendingNewItem = null;
+        toast(App.tf('deletedGeneric', { name: nm }));
+        closeModal();
+      },
+      onSaveToPack: function (packId, out) {
+        const pack = packById(packId);
+        if (!pack) return;
+        // цель — привязка к карточкам листа; в общий набор она не переносится
+        const stripTarget = function (ef) { const c = normalizeEffect(ef); c.target = null; return c; };
+        const copy = normalizePackItem({
+          id: uid(), name: out.name, category: out.category, icon: out.icon,
+          weight: out.weight, damage: out.damage, price: out.price, description: out.description,
+          effects: (out.effects || []).map(stripTarget),
+          secret: out.secret ? Object.assign({}, out.secret, {
+            effects: (out.secret.effects || []).map(stripTarget)
+          }) : null
+        });
+        pack.items.push(copy);
+        savePacks();
+        toast(App.tf('itemSavedToPack', { name: pack.name || App.t('packDefaultName') }));
+      }
+    });
   }
 
   function noteBody(card) {
     return '<div class="card-body"><div class="note-text">' + esc(card.text || '') + '</div></div>';
+  }
+
+  // v98: долгий тап по иконке предмета раскрывает «истинный предмет».
+  // v99: иконка кликабельна у всех предметов; удержание даёт одинаковый отклик,
+  // а анимация — только если у предмета есть скрытая часть. Отпускание после
+  // начала вспышки не прерывает: вспышка догорает, затем строка обновляется.
+  // Тайминги: 0.5 с удержание, 2.8 с линия, 1.2 с затухающая вспышка. Без тостов.
+  function bindInventoryReveal(card, el) {
+    el.querySelectorAll('.inv-row').forEach(function (rowEl) {
+      const icon = rowEl.querySelector('.inv-ic');
+      if (!icon) return;
+      let holdTimer = null;
+      let timers = [];
+      let phase = '';            // '' | 'hold' | 'draw' | 'flash'
+      let suppressClick = false;
+
+      function clearTimers() {
+        timers.forEach(clearTimeout);
+        timers = [];
+      }
+      function cancelHold() {
+        if (holdTimer) { clearTimeout(holdTimer); holdTimer = null; }
+        rowEl.classList.remove('holding');
+        if (phase === 'hold') phase = '';
+      }
+      function clearReveal() {
+        clearTimers();
+        phase = '';
+        rowEl.classList.remove('revealing', 'inv-flash', 'inv-flash-solo', 'holding');
+        const layer = rowEl.querySelector('.inv-reveal-layer');
+        if (layer) layer.remove();
+      }
+      function makeLayer(w, h) {
+        // путь строим в пикселях строки: так скругления не плющит, как при preserveAspectRatio
+        const r = 7;
+        const cx = Math.round(w / 2), t = 1, b = h - 1, l = 1, rt = w - 1;
+        const rightPath = 'M' + cx + ',' + t + ' H' + (rt - r) +
+          ' Q' + rt + ',' + t + ' ' + rt + ',' + (t + r) +
+          ' V' + (b - r) + ' Q' + rt + ',' + b + ' ' + (rt - r) + ',' + b + ' H' + cx;
+        const leftPath = 'M' + cx + ',' + t + ' H' + (l + r) +
+          ' Q' + l + ',' + t + ' ' + l + ',' + (t + r) +
+          ' V' + (b - r) + ' Q' + l + ',' + b + ' ' + (l + r) + ',' + b + ' H' + cx;
+        const layer = document.createElement('div');
+        layer.className = 'inv-reveal-layer';
+        layer.innerHTML = '<svg class="inv-reveal-stroke" viewBox="0 0 ' + w + ' ' + h + '" preserveAspectRatio="none" aria-hidden="true">' +
+          '<path pathLength="100" d="' + rightPath + '"/>' +
+          '<path pathLength="100" d="' + leftPath + '"/>' +
+        '</svg><div class="inv-reveal-flash"></div><div class="inv-reveal-ring"></div>';
+        return layer;
+      }
+      function addLayer(row) {
+        const w = Math.max(40, Math.round(row.clientWidth));
+        const h = Math.max(20, Math.round(row.clientHeight));
+        row.appendChild(makeLayer(w, h));
+        return row;
+      }
+      // v100: раскрытие применяется В МОМЕНТ вспышки, а не после затухания —
+      // под вспышкой уже новая строка, вспышка только плавно гаснет.
+      function revealNow() {
+        const live = inventoryRow(findCard(card.id), rowEl.dataset.item);
+        if (live) {
+          pushUndo();
+          live.revealed = true;
+          if (live.secret && (live.secret.category || live.category) === 'equipment') live.equipped = true;
+          save();
+        }
+        // render() пересобирает список — сохраняем прокрутку, иначе строка улетает вверх
+        const scrollers = Array.prototype.slice.call(document.querySelectorAll('.inv-list'))
+          .map(function (el) { return { el: el, top: el.scrollTop }; });
+        render();
+        if (layerCardId) refreshLayer();
+        scrollers.forEach(function (s) { if (s.el.isConnected) s.el.scrollTop = s.top; });
+
+        const itemId = rowEl.dataset.item;
+        const rows = [];
+        const canvasRow = document.querySelector('.card[data-id="' + card.id + '"] .inv-row[data-item="' + itemId + '"]');
+        if (canvasRow) rows.push(canvasRow);
+        document.querySelectorAll('#labelLayer .inv-row[data-item="' + itemId + '"]').forEach(function (r2) { rows.push(r2); });
+        rows.forEach(function (r2) {
+          addLayer(r2);
+          r2.classList.add('inv-flash', 'inv-flash-solo');
+        });
+      }
+      function start() {
+        phase = 'draw';
+        addLayer(rowEl);
+        rowEl.classList.add('revealing');
+        timers.push(setTimeout(function () {
+          if (phase !== 'draw') return;
+          phase = 'flash';
+          revealNow();
+        }, 2800));
+        timers.push(setTimeout(function () {
+          clearTimers();
+          phase = '';
+          document.querySelectorAll('.inv-flash-solo').forEach(function (r2) {
+            r2.classList.remove('inv-flash', 'inv-flash-solo', 'revealing');
+            const l = r2.querySelector('.inv-reveal-layer');
+            if (l) l.remove();
+          });
+        }, 4400));
+      }
+
+      icon.addEventListener('pointerdown', function (e) {
+        if (editMode || phase) return;
+        suppressClick = false;
+        if (icon.setPointerCapture && e.pointerId != null) {
+          try { icon.setPointerCapture(e.pointerId); } catch (_) {}
+        }
+        cancelHold();
+        phase = 'hold';
+        rowEl.classList.add('holding');
+        holdTimer = setTimeout(function () {
+          holdTimer = null;
+          rowEl.classList.remove('holding');
+          suppressClick = true;    // удержание — это не клик по предмету
+          const live = inventoryRow(findCard(card.id), rowEl.dataset.item);
+          if (!live || !live.secret || live.revealed) { phase = ''; return; }
+          start();
+        }, 500);
+      });
+      icon.addEventListener('pointerup', function () {
+        cancelHold();
+        if (phase === 'draw') clearReveal();   // после начала вспышки не прерываем
+      });
+      icon.addEventListener('pointerleave', function () {
+        cancelHold();
+      });
+      icon.addEventListener('pointercancel', function () {
+        cancelHold();
+        if (phase === 'draw' || phase === 'flash') clearReveal();
+      });
+      icon.addEventListener('click', function () {
+        if (suppressClick) { suppressClick = false; return; }
+        openInventoryItemView(card.id, rowEl.dataset.item);
+      });
+      icon.addEventListener('contextmenu', function (e) { e.preventDefault(); });
+    });
   }
 
   function buffTargetName(ef) {
@@ -2561,14 +3803,20 @@ window.App = window.App || {};
       ? '<button type="button" class="buff-chip buff-chip-more" data-act="buff-expand" title="' + esc(App.t('buffAllEffects')) + '">+' + more + '</button>'
       : '';
     const desc = (card.description || '').trim();
+    // v114: таймер — только у временного баффа
+    const dur = num(card.duration);
+    const left = Math.max(0, num(card.left));
+    const timer = dur > 0
+      ? '<span class="buff-chip buff-timer" title="' + esc(App.tf('buffTimerHint', { n: left })) + '">⏱ ' + left + '</span>'
+      : '';
     // v91: описание показываем всегда — на 120 одной строкой, на 200 двумя.
     // Длинный текст всё равно живёт в ⤢; пустое место внизу карточки выглядело
     // как незаконченный макет.
     const showDesc = !!desc;
     const descCls = (desk && h < 200) ? ' one-line' : '';
     return '<div class="card-body buff-body">' +
-      (chips || moreBtn
-        ? '<div class="buff-chips">' + chips + moreBtn + '</div>'
+      (chips || moreBtn || timer
+        ? '<div class="buff-chips">' + timer + chips + moreBtn + '</div>'
         : '<div class="buff-empty">' + esc(App.t('buffNoEffects')) + '</div>') +
       (showDesc ? '<div class="desc-text buff-desc' + descCls + '">' + esc(desc) + '</div>' : '') +
     '</div>';
@@ -2587,15 +3835,6 @@ window.App = window.App || {};
       desc.classList.add('readable');
       desc.addEventListener('click', function () { openTextModal(card.name, card.description); });
     }
-    // то же для описаний предметов инвентаря
-    el.querySelectorAll('.item-row.has-desc').forEach(function (row) {
-      const it = (card.items || []).find(function (x) { return x.id === row.dataset.item; });
-      if (!it || !(it.description || '').trim()) return;
-      const descEl = row.querySelector('.idesc');
-      if (!descEl) return;
-      descEl.classList.add('readable');
-      descEl.addEventListener('click', function (e) { e.stopPropagation(); openTextModal(it.name, it.description); });
-    });
     // заметка: прокрутка внутри карточки + клик — просмотр полного текста
     const note = el.querySelector('.note-text');
     if (note && (card.text || '').trim()) {
@@ -2700,10 +3939,14 @@ window.App = window.App || {};
         if (downT && Date.now() - downT > 650) return;
         mutate(function () {
           const c = findCard(card.id);
-          if (c) c.on = !c.on;
+          if (!c) return;
+          c.on = !c.on;
+          // v114: включили временный бафф — таймер начинается заново
+          if (c.on && num(c.duration) > 0) c.left = num(c.duration);
         });
       });
     }
+    if (card.type === 'inventory') bindInventoryReveal(card, el);
     // v48: долгий тап больше не «Перенести на лист» (это теперь пункт в кебабе) —
     // он поднимает карточку для перестановки (см. initColumnDrag)
   }
@@ -3066,14 +4309,202 @@ window.App = window.App || {};
     return set.nameKey ? App.t(set.nameKey) : (set.name || '');
   }
   function stateSetOf(ch) { return charSet(ch, 'states'); }
-  function itemSetOf(ch) { return charSet(ch, 'items'); }
   function stateEntries(ch) {
     const set = stateSetOf(ch);
     return set && Array.isArray(set.entries) ? set.entries : [];
   }
-  function itemEntries(ch) {
-    const set = itemSetOf(ch);
-    return set && Array.isArray(set.entries) ? set.entries : [];
+
+  // ===== Паки предметов (v94) =====
+  // Отдельный ключ: каталог не входит в state, не попадает в undo и не
+  // переписывается при каждом изменении листа. У персонажа — только галочки.
+  let packsStore = null;
+
+  function itemCategoryLabel(id) {
+    const cat = ITEM_CATEGORIES.find(function (c) { return c.id === id; }) || ITEM_CATEGORIES[2];
+    return App.t(cat.labelKey);
+  }
+
+  function normalizePackItem(raw) {
+    const it = raw && typeof raw === 'object' ? raw : {};
+    const cat = ITEM_CATEGORIES.some(function (c) { return c.id === it.category; }) ? it.category : 'misc';
+    const secret = it.secret && typeof it.secret === 'object' ? {
+      text: String(it.secret.text || ''),
+      name: String(it.secret.name || ''),
+      category: ITEM_CATEGORIES.some(function (c) { return c.id === it.secret.category; }) ? it.secret.category : '',
+      damage: String(it.secret.damage || ''),
+      weight: (it.secret.weight === '' || it.secret.weight == null) ? null : num(it.secret.weight),
+      price: String(it.secret.price || ''),
+      description: String(it.secret.description || ''),
+      effects: Array.isArray(it.secret.effects) ? it.secret.effects.map(normalizeItemEffect) : []
+    } : null;
+    return {
+      id: String(it.id || uid()),
+      name: String(it.name || ''),
+      icon: itemIconId(it.icon, cat),
+      category: cat,
+      weight: (it.weight === '' || it.weight == null) ? null : num(it.weight),
+      damage: String(it.damage || ''),
+      price: String(it.price || ''),
+      description: String(it.description || it.effect || ''),
+      secret: secret,
+      effects: Array.isArray(it.effects) ? it.effects.map(normalizeItemEffect) : []
+    };
+  }
+
+  // v115: старые «переполнения» (current > max) становятся явным щитом.
+  // Максимум берём только числовой: выражения на этапе загрузки не посчитать,
+  // такие карточки оставляем как есть (их поправит первый рендер/правка).
+  function migrateShields(st) {
+    (st.characters || []).forEach(function (ch) {
+      (ch.cards || []).forEach(function (card) {
+        if (card.type !== 'counter') return;
+        if (!Array.isArray(card.shieldParts)) card.shieldParts = [];
+        const old = num(card.shield);
+        if (old > 0 && !card.shieldParts.length) {
+          card.shieldParts.push({ id: uid(), amount: old, left: null });
+        }
+        const rawMax = typeof card.max === 'number' ? card.max
+          : (typeof card.max === 'string' && /^\s*-?\d+(?:[.,]\d+)?\s*$/.test(card.max) ? Number(String(card.max).replace(',', '.')) : null);
+        if (rawMax != null && rawMax > 0 && num(card.current) > rawMax) {
+          const excess = num(card.current) - rawMax;
+          card.current = rawMax;
+          card.shieldParts.push({ id: uid(), amount: excess, left: null });
+        }
+        card.shield = card.shieldParts.reduce(function (s, p) { return s + num(p.amount); }, 0);
+      });
+    });
+  }
+
+  // v111: старая цель строки (row.target / targets) переезжает в разовые эффекты.
+  // Идемпотентно: если у эффекта уже есть цель, не трогаем.
+  function migrateItemTargets(st) {
+    (st.characters || []).forEach(function (ch) {
+      (ch.cards || []).forEach(function (card) {
+        if (card.type !== 'inventory') return;
+        (card.items || []).forEach(function (row) {
+          const legacy = row.target || (Array.isArray(row.targets) && row.targets[0]);
+          if (!legacy) return;
+          const fill = function (list) {
+            (list || []).forEach(function (ef) {
+              if (ef && ef.field === 'current' && !ef.target) ef.target = String(legacy);
+            });
+          };
+          fill(row.effects);
+          if (row.secret) fill(row.secret.effects);
+        });
+      });
+    });
+  }
+
+  function normalizeInventoryRow(raw) {
+    const base = normalizePackItem(raw);
+    const row = Object.assign(base, {
+      itemId: raw && raw.itemId ? String(raw.itemId) : null,
+      packId: raw && raw.packId ? String(raw.packId) : null,
+      qty: Math.max(1, Math.round(num(raw && raw.qty) || 1)),
+      equipped: !!(raw && raw.equipped),
+      target: raw && raw.target ? String(raw.target) : (raw && Array.isArray(raw.targets) && raw.targets[0] ? String(raw.targets[0]) : null),
+      targets: raw && Array.isArray(raw.targets) ? raw.targets.slice() : null,
+      revealed: !!(raw && raw.revealed)
+    });
+    // v111: цель разового эффекта переехала из строки в сам эффект.
+    // Старые строки (row.target, массив targets) читаем без потери выбора.
+    const legacy = row.target || (row.targets && row.targets[0]);
+    if (legacy) {
+      row.effects.forEach(function (ef) {
+        if (ef.field === 'current' && !ef.target) ef.target = String(legacy);
+      });
+    }
+    return row;
+  }
+
+  function effectiveInventoryRow(row) {
+    if (!row.revealed || !row.secret) return row;
+    const s = row.secret;
+    const cat = s.category || row.category;
+    return Object.assign({}, row, {
+      name: s.name || row.name,
+      icon: itemIconId(row.icon, cat),
+      category: cat,
+      damage: s.damage || row.damage,
+      weight: (s.weight !== '' && s.weight != null) ? s.weight : row.weight,
+      price: s.price || row.price,
+      description: s.description || row.description,
+      effects: (s.effects && s.effects.length) ? s.effects : row.effects,
+      equipped: row.equipped
+    });
+  }
+
+  // v107: эффект предмета нормализуется общим способом и больше не теряет
+  // цель/длительность/незнакомые поля (раньше timing и target выбрасывались).
+  function normalizeItemEffect(ef) {
+    return normalizeEffect(ef, { mode: 'add', field: 'bonus', target: null });
+  }
+
+  function readPacks() {
+    if (packsStore) return packsStore;
+    try {
+      const raw = JSON.parse(localStorage.getItem(PACKS_KEY) || 'null');
+      if (raw && Array.isArray(raw.packs)) {
+        packsStore = {
+          version: 1,
+          seeded: true,
+          packs: raw.packs.map(function (p) {
+            return {
+              id: String(p.id || uid()),
+              name: String(p.name || App.t('packDefaultName')),
+              items: Array.isArray(p.items) ? p.items.map(normalizePackItem) : []
+            };
+          })
+        };
+        return packsStore;
+      }
+    } catch (e) { /* битый файл — начинаем с пустого */ }
+    packsStore = { version: 1, seeded: false, packs: [] };
+    return packsStore;
+  }
+
+  function savePacks() {
+    try { localStorage.setItem(PACKS_KEY, JSON.stringify(readPacks())); }
+    catch (e) { toast(App.t('packSaveError')); }
+  }
+
+  function packsList() { return readPacks().packs; }
+  function packById(id) { return packsList().find(function (p) { return p.id === id; }) || null; }
+  function charPacks(ch) {
+    if (!ch) return {};
+    if (!ch.packs || typeof ch.packs !== 'object') ch.packs = {};
+    return ch.packs;
+  }
+  function packUsedBy(packId) {
+    return state.characters.filter(function (c) { return !!charPacks(c)[packId]; }).length;
+  }
+
+  function ensurePacks() {
+    const store = readPacks();
+    let changed = false;
+    state.characters.forEach(function (ch) {
+      if (!ch.packs || typeof ch.packs !== 'object') { ch.packs = {}; changed = true; }
+    });
+    if (!store.packs.length && !store.seeded) {
+      // миграция старой заготовки наборов предметов (v71), если там что-то было
+      const legacySets = state.libraries && Array.isArray(state.libraries.items) ? state.libraries.items : [];
+      const legacy = legacySets.find(function (s) { return s && Array.isArray(s.entries) && s.entries.length; });
+      const pack = {
+        id: uid(),
+        name: legacy ? setDisplayName(legacy) : App.t('packDefaultName'),
+        items: legacy ? legacy.entries.map(function (e) { return normalizePackItem(e); }) : []
+      };
+      store.packs.push(pack);
+      store.seeded = true;
+      changed = true;
+      if (legacy) {
+        state.characters.forEach(function (ch) {
+          if (ch.itemSets && ch.itemSets[0] === legacy.id) charPacks(ch)[pack.id] = true;
+        });
+      }
+    }
+    if (changed) savePacks();
   }
 
   // Демонстрационный второй набор (одноразово): показывает, как выглядит
@@ -3650,44 +5081,116 @@ window.App = window.App || {};
   }
 
   // ===== Тики (слой 2) =====
-  // Тик — не модификатор: он меняет current один раз и помнит, что сработал.
-  // duration уменьшается в конце хода/при ручном применении; 0 — снять состояние.
-  function hasTicksOrDuration(card) {
-    return (card.conditions || []).some(function (s) {
-      return (s.effects || []).some(function (ef) { return ef.mode === 'tick'; }) || num(s.duration) > 0;
+  // Тик — не модификатор: он меняет current один раз. Источником может быть
+  // состояние, бафф с тиком или надетое снаряжение — все они приходят из
+  // collectEffects. Длительность уменьшается в конце хода/при ручном
+  // применении; у состояния на нуле оно снимается, у баффа — выключается.
+  function hasTicksOrDuration(ch) {
+    return (ch && ch.cards || []).some(function (card) {
+      if (card.type === 'condition') {
+        return (card.conditions || []).some(function (s) {
+          return (s.effects || []).some(function (ef) { return ef.mode === 'tick'; }) || num(s.duration) > 0;
+        });
+      }
+      if (card.type === 'buff') {
+        return !!card.on && (num(card.duration) > 0 ||
+          (card.effects || []).some(function (ef) { return ef.mode === 'tick'; }));
+      }
+      if (card.type === 'inventory') {
+        return (card.items || []).some(function (row) {
+          return row.equipped && (effectiveInventoryRow(row).effects || []).some(function (ef) { return ef.mode === 'tick'; });
+        }) || (card.itemActive || []).some(function (a) {
+          return a.ef && (a.ef.mode === 'tick' || num(a.left) > 0);
+        });
+      }
+      if (card.type === 'counter') {
+        return shieldPartsOf(card).some(function (p) { return num(p.left) > 0; });
+      }
+      return false;
     });
   }
   function applyTicksForChar(ch, timing, manual) {
     const parts = [], expired = [];
     let durationChanged = false;
-    (ch.cards || []).forEach(function (card) {
-      if (card.type !== 'condition') return;
-      const keep = [];
-      (card.conditions || []).forEach(function (snap) {
-        let remove = false;
-        (snap.effects || []).forEach(function (ef) {
-          if (ef.mode !== 'tick') return;
-          if (!manual && (ef.timing || 'start') !== timing) return;
-          const t = findCard(ef.target);
-          if (!t || t.type !== 'counter') return;
-          const delta = exprNumber(t, ef.value);
-          if (delta == null || !Number.isFinite(delta) || delta === 0) return;
-          t.current = num(t.current) + delta;
-          // v88: в тосте — кто сработал и что изменилось: «Яд: Здоровье −1»
-          parts.push((snap.name ? snap.name + ': ' : '') + t.name + ' ' + (delta > 0 ? '+' : '−') + Math.abs(delta));
-        });
-        if (manual || timing === 'end') {
-          const dur = num(snap.duration);
-          if (dur > 0) {
-            snap.duration = dur - 1;
-            durationChanged = true;
-            if (snap.duration <= 0) { expired.push(snap.name || ''); remove = true; }
-          }
-        }
-        if (!remove) keep.push(snap);
-      });
-      card.conditions = keep;
+    // 1. события: кто угодно с mode:'tick' — через единый реестр эффектов
+    collectEffects(ch).forEach(function (it) {
+      const ef = it.ef;
+      if (!ef || ef.mode !== 'tick') return;
+      if (!manual && (ef.timing || 'start') !== timing) return;
+      const t = findCard(ef.target);
+      if (!t || t.type !== 'counter') return;
+      const delta = exprNumber(t, ef.value);
+      if (delta == null || !Number.isFinite(delta) || delta === 0) return;
+      const res = applyEvent(t, delta > 0 ? { kind: 'heal', value: delta } : { kind: 'damage', value: -delta });
+      const bits = [];
+      if (res.hp) bits.push((res.hp > 0 ? '+' : '−') + Math.abs(res.hp));
+      if (res.shield) bits.push((res.shield > 0 ? '+' : '−') + Math.abs(res.shield) + ' ' + App.t('shieldShort'));
+      if (!bits.length) return;   // лечение в полный максимум ничего не изменило
+      // v88: в тосте — кто сработал и что изменилось: «Яд: Здоровье −1»
+      parts.push((it.name ? it.name + ': ' : '') + t.name + ' ' + bits.join(' / '));
     });
+    // 2. длительности — один раз за проход
+    if (manual || timing === 'end') {
+      (ch.cards || []).forEach(function (card) {
+        if (card.type === 'condition') {
+          const keep = [];
+          (card.conditions || []).forEach(function (snap) {
+            const dur = num(snap.duration);
+            if (dur > 0) {
+              snap.duration = dur - 1;
+              durationChanged = true;
+              if (snap.duration <= 0) { expired.push(snap.name || ''); return; }
+            }
+            keep.push(snap);
+          });
+          card.conditions = keep;
+        } else if (card.type === 'buff' && card.on) {
+          const dur = num(card.duration);
+          if (dur > 0) {
+            const at = num(card.left) > 0 ? num(card.left) : dur;
+            card.left = Math.max(0, at - 1);
+            durationChanged = true;
+            if (card.left <= 0) { card.on = false; expired.push(card.name || ''); }
+          }
+        } else if (card.type === 'inventory') {
+          // v124: временные эффекты предметов тикают в карточке инвентаря
+          const list = card.itemActive || [];
+          if (!list.length) return;
+          let changed = false;
+          const keep = [];
+          list.forEach(function (a) {
+            const l = num(a.left);
+            if (l > 0) {
+              a.left = l - 1;
+              changed = true;
+              durationChanged = true;
+              if (a.left > 0) keep.push(a);
+            } else {
+              keep.push(a);
+            }
+          });
+          if (changed) card.itemActive = keep;
+        } else if (card.type === 'counter') {
+          // v115: временный щит снимается по ходам, постоянный остаётся
+          const parts = shieldPartsOf(card);
+          if (!parts.length) return;
+          let changed = false;
+          const keep = [];
+          parts.forEach(function (p) {
+            const l = num(p.left);
+            if (l > 0) {
+              p.left = l - 1;
+              changed = true;
+              durationChanged = true;
+              if (p.left > 0) keep.push(p);
+            } else {
+              keep.push(p);
+            }
+          });
+          if (changed) { card.shieldParts = keep; syncShield(card); }
+        }
+      });
+    }
     return { parts: parts, expired: expired, durationChanged: durationChanged };
   }
   function ticksSummary(sum) {
@@ -3701,7 +5204,7 @@ window.App = window.App || {};
   function applyTicksManual() {
     const ch = activeChar();
     if (!ch) return;
-    if (!(ch.cards || []).some(hasTicksOrDuration)) { toast(App.t('condTicksNone')); return; }
+    if (!hasTicksOrDuration(ch)) { toast(App.t('condTicksNone')); return; }
     let sum = null;
     mutate(function () { sum = applyTicksForChar(ch, 'end', true); });
     let msg = ticksSummary(sum);
@@ -3749,11 +5252,13 @@ window.App = window.App || {};
   // Эффект хранится на карточке (card.condEffects по ключу состояния), а не в наборе:
   // набор общий для всех персонажей устройства, а цель — id карточки конкретного листа.
   // Поэтому набор может отключаться/сменяться без потери привязок.
-  const FX_MODE_KEYS = { add: 'fxOpAdd', mul: 'fxOpMul', set: 'fxOpSet', cap: 'fxOpCap', dice: 'fxOpDice', block: 'fxOpBlock', tick: 'fxOpTick' };
+  const FX_MODE_KEYS = { add: 'fxOpAdd', mul: 'fxOpMul', set: 'fxOpSet', cap: 'fxOpCap', dice: 'fxOpDice', block: 'fxOpBlock', tick: 'fxOpTick', adv: 'fxOpAdv', dis: 'fxOpDis' };
+  const FX_MODE_SHORT_KEYS = { add: 'fxOpAddShort' };
+  function fxModeShort(mode) { return App.t(FX_MODE_SHORT_KEYS[mode] || FX_MODE_KEYS[mode] || 'fxOpAdd'); }
   // подсказка живёт прямо в поле «Значение» и зависит от режима —
   // иначе при «умножить» висело «например -2 или 1d6»
-  const FX_MODE_PH = { add: 'fxPhAdd', mul: 'fxPhMul', set: 'fxPhSet', cap: 'fxPhCap', dice: 'fxPhDice', tick: 'fxPhTick' };
-  const FX_FIELD_KEYS = { bonus: 'fxFieldBonus', max: 'fxFieldMax', value: 'fxFieldValue', charges: 'fxFieldCharges', current: 'fxFieldCurrent' };
+  const FX_MODE_PH = { add: 'fxPhAdd', mul: 'fxPhMul', set: 'fxPhSet', cap: 'fxPhCap', dice: 'fxPhDice', tick: 'fxPhTick', adv: 'fxPhUses', dis: 'fxPhUses' };
+  const FX_FIELD_KEYS = { bonus: 'fxFieldBonus', max: 'fxFieldMax', value: 'fxFieldValue', charges: 'fxFieldCharges', current: 'fxFieldCurrent', shield: 'fxFieldShield' };
   // v91: короткие имена полей для чипов на карточке; полные остаются в редакторе
   // и в подсказке, чтобы «−2 макс» не превращалось в «−2 максимум → Здоровье».
   const FX_SHORT_FIELD_KEYS = { bonus: 'fxShortBonus', max: 'fxShortMax', value: 'fxShortValue', charges: 'fxShortCharges', current: 'fxShortCurrent' };
@@ -3762,6 +5267,8 @@ window.App = window.App || {};
   function fxChipShort(ef) {
     const f = App.t(FX_SHORT_FIELD_KEYS[effectField(ef)] || 'fxShortBonus');
     if (ef.mode === 'block') return App.t('fxOpBlockShort');
+    if (ef.mode === 'adv') return App.t('fxOpAdvShort') + (num(ef.value) > 1 ? ' ×' + num(ef.value) : '');
+    if (ef.mode === 'dis') return App.t('fxOpDisShort') + (num(ef.value) > 1 ? ' ×' + num(ef.value) : '');
     let s = String(ef.value == null ? '' : ef.value).trim();
     if (ef.mode === 'dice') return '+' + s.replace(/^\+/, '');
     if (ef.mode === 'mul') return '×' + s.replace(/^[*×]/, '') + ' ' + f;
@@ -3774,6 +5281,8 @@ window.App = window.App || {};
   function fxShort(ef) {
     const f = fxFieldText(effectField(ef));
     if (ef.mode === 'block') return App.t('fxOpBlock');
+    if (ef.mode === 'adv') return App.t('fxOpAdv') + ' → ' + f + (num(ef.value) > 1 ? ' ×' + num(ef.value) : '');
+    if (ef.mode === 'dis') return App.t('fxOpDis') + ' → ' + f + (num(ef.value) > 1 ? ' ×' + num(ef.value) : '');
     if (ef.mode === 'tick') return '⏱ ' + (ef.value == null ? '' : ef.value) + ' ' + f;
     if (ef.mode === 'dice') return '+' + (ef.value || '') + ' ' + f;
     if (ef.mode === 'mul') return '×' + String(ef.value == null ? '' : ef.value).replace(/^[*×]/, '') + ' ' + f;
@@ -3859,7 +5368,11 @@ window.App = window.App || {};
     const val = function (id) { const n = el(id); return n ? n.value : ''; };
     function fieldsOf(tId) {
       const t = findCard(tId);
-      return t ? (MOD_FIELDS[t.type] || []) : [];
+      if (!t) return [];
+      const f = (MOD_FIELDS[t.type] || []).slice();
+      // v121: у счётчика доступно «текущее» — для тика
+      if (t.type === 'counter') f.push('current');
+      return f;
     }
     // v78: block — только у заклинания и только для бонуса: гасим «Применить»,
     // кубик при этом бросается как обычно (просьба юзера). К зарядам запрет не применяем.
@@ -3870,6 +5383,8 @@ window.App = window.App || {};
       // кубик есть только у навыка и заклинания и только для бонуса: «кубик в значение»
       // на деле прибавлялся к броску — убираем эту двусмысленность
       if (t && t.die && (t.type === 'skill' || t.type === 'spell') && field === 'bonus') out.push('dice');
+      // v121: преимущество/помеха — к бонусу любой карточки с кубиком
+      if (t && t.die && field === 'bonus') out.push('adv', 'dis');
       if (t && t.type === 'spell' && field === 'charges') out.push('block');
       return out;
     }
@@ -3884,6 +5399,8 @@ window.App = window.App || {};
       input.placeholder = block ? '—' : App.t(FX_MODE_PH[mode] || 'fxPhAdd');
       // при переходе в «запретить» старое число не должно оставаться в поле
       if (block) input.value = '';
+      // v121: у преимущества/помехи значение — число бросков, по умолчанию 1
+      if (!block && (mode === 'adv' || mode === 'dis') && !String(input.value).trim()) input.value = '1';
       const tw = el('fx-timing-wrap');
       if (tw) tw.style.display = tick ? '' : 'none';
     }
@@ -3915,7 +5432,8 @@ window.App = window.App || {};
         const mode = val('fx-mode');
         const target = val('fx-target');
         const value = val('fx-value').trim();
-        if (mode !== 'block' && !value) { toast(App.t('fxValueNeeded')); return false; }
+        // v121: запрету и преимуществу/помехе значение не обязательно
+        if (mode !== 'block' && mode !== 'adv' && mode !== 'dis' && !value) { toast(App.t('fxValueNeeded')); return false; }
         editStateEffect(cardId, st.key, index, {
           mode: mode, field: val('fx-field'), value: mode === 'block' ? '' : value,
           label: val('fx-label').trim(), target: target,
@@ -4054,7 +5572,7 @@ window.App = window.App || {};
       const refreshBtn = q('refresh');
       if (refreshBtn) refreshBtn.disabled = !items.length;
       const tickBtn = q('applyticks');
-      if (tickBtn) tickBtn.disabled = !(activeChar().cards || []).some(hasTicksOrDuration);
+      if (tickBtn) tickBtn.disabled = !hasTicksOrDuration(activeChar());
     }
 
     panel._condRefresh = refresh;
@@ -4105,8 +5623,12 @@ window.App = window.App || {};
     layerCardId = cardId;
     ov.innerHTML = '';
     ov.appendChild(buildConditionPanel(card));
+    ov.setAttribute('aria-label', card.name || App.t('typeCondition'));
     ov.classList.remove('hidden');
     updateScrollLock();
+    // v127: фокус в диалог — как у слоя ярлыка (первая кнопка шапки панели)
+    const first = ov.querySelector('button, input, textarea, [tabindex="0"]');
+    if (first) { try { first.focus({ preventScroll: true }); } catch (e) { first.focus(); } }
   }
 
   // ===== Modals =====
@@ -4118,16 +5640,30 @@ window.App = window.App || {};
     document.body.classList.toggle('no-scroll', modalOpen || layerOpen);
   }
 
+  let modalReturnFocus = null;
+  let modalPrimaryBtn = null;
   function openModal(title, bodyHTML, actions) {
     document.getElementById('backdrop').classList.remove('hidden');
     const m = document.getElementById('modal');
+    // v126: запоминаем, откуда открыли, и возвращаем фокус после закрытия.
+    // При замене одного окна другим (настройки из формы) не перезаписываем.
+    const wasHidden = m.classList.contains('hidden');
+    if (wasHidden) modalReturnFocus = document.activeElement;
+    m.classList.remove('settings-modal');
     m.classList.remove('hidden');
+    m.setAttribute('role', 'dialog');
+    m.setAttribute('aria-modal', 'true');
+    m.setAttribute('aria-label', title || '');
+    m.setAttribute('tabindex', '-1');   // v126: фокус на само окно — диктор читает заголовок
     m.innerHTML = '<h2>' + esc(title) + '</h2>' + bodyHTML + '<div class="m-actions"></div>';
+    modalPrimaryBtn = null;
     const actDiv = m.querySelector('.m-actions');
     (actions || []).forEach(function (a) {
       const btn = document.createElement('button');
       btn.textContent = a.label;
       btn.className = a.cls || '';
+      // Enter в форме = «Сохранить»; «Закрыть» и подтверждения Enter не жмут
+      if (a.cls === 'primary' && a.label === App.t('save')) modalPrimaryBtn = btn;
       btn.addEventListener('click', function () {
         const keepOpen = a.onClick ? (a.onClick() === false) : false;
         if (!keepOpen) {
@@ -4141,16 +5677,98 @@ window.App = window.App || {};
       actDiv.appendChild(btn);
     });
     updateScrollLock();
+    // v126: фокус внутрь диалога. Именно на окно, а не на первое поле:
+    // иначе на телефоне сразу выезжает клавиатура и перекрывает форму.
+    if (wasHidden) {
+      try { m.focus({ preventScroll: true }); } catch (e) { m.focus(); }
+    }
+  }
+  // v106: редактор только что созданной сущности закрыли без сохранения —
+  // убираем пустышку. Для существующих объектов pending пуст, их не трогаем.
+  // Создание было последним mutate, поэтому его шаг отката тоже убираем:
+  // иначе Ctrl+Z после «Отмены» возвращал пустую карточку.
+  function cancelPendingCreation() {
+    const ch = activeChar();
+    const cardId = pendingNewCardId;
+    const item = pendingNewItem;
+    pendingNewCardId = null;
+    pendingNewItem = null;
+    if (!ch) return;
+    const hasCard = !!(cardId && ch.cards.some(function (c) { return c.id === cardId; }));
+    const inv = item ? ch.cards.find(function (c) { return c.id === item.cardId; }) : null;
+    const hasItem = !!(inv && (inv.items || []).some(function (x) { return x.id === item.itemId; }));
+    if (!hasCard && !hasItem) return;
+    editScratch.editCard = null;
+    if (hasCard) ch.cards = ch.cards.filter(function (c) { return c.id !== cardId; });
+    if (hasItem) inv.items = inv.items.filter(function (x) { return x.id !== item.itemId; });
+    if (undoStack.length) undoStack.pop();
+    commit();
   }
   function closeModal() {
+    cancelPendingCreation();
     closeRefMenu();   // пикер живёт на document.body — прибираем за модалкой
-    document.getElementById('backdrop').classList.add('hidden');
     const modal = document.getElementById('modal');
+    const wasOpen = !modal.classList.contains('hidden');
+    const ret = modalReturnFocus;
+    modalReturnFocus = null;
+    modalPrimaryBtn = null;
+    document.getElementById('backdrop').classList.add('hidden');
     modal.classList.remove('settings-modal');
     modal.classList.add('hidden');
     modal.innerHTML = '';
     updateScrollLock();
+    // v126: фокус возвращается на кнопку, которая открыла окно
+    if (wasOpen && ret && ret.isConnected && !modal.contains(ret)) {
+      try { ret.focus({ preventScroll: true }); } catch (e) { ret.focus(); }
+    }
   }
+
+  // v126: клавиатура в модалке — Esc закрывает, Enter сохраняет, Tab не уходит наружу
+  function onModalKey(e) {
+    const modal = document.getElementById('modal');
+    if (!modal || modal.classList.contains('hidden')) return;
+    // открытое меню/пикер/вопрос забирают клавишу себе (их обработчики выше)
+    if (mountedMenu || document.getElementById('refmenu') || document.getElementById('inlineAsk')) return;
+    if (e.key === 'Escape') {
+      e.preventDefault();
+      e.stopPropagation();
+      closeModal();
+      return;
+    }
+    if (e.key === 'Enter') {
+      const t = e.target;
+      if (!t || t.isContentEditable) return;
+      const tag = (t.tagName || '').toLowerCase();
+      if (tag === 'textarea' || tag === 'button' || tag === 'select' || tag === 'a') return;
+      if (t.type === 'checkbox' || t.type === 'radio') return;
+      if (modalPrimaryBtn && !modalPrimaryBtn.disabled && modal.contains(modalPrimaryBtn)) {
+        e.preventDefault();
+        e.stopPropagation();
+        modalPrimaryBtn.click();
+      }
+      return;
+    }
+    if (e.key !== 'Tab') return;
+    const items = Array.from(modal.querySelectorAll(
+      'button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [href], [tabindex]:not([tabindex="-1"])'
+    )).filter(function (el) { return el.offsetParent !== null; });
+    if (!items.length) return;
+    const first = items[0], last = items[items.length - 1];
+    const a = document.activeElement;
+    // фокус на самом окне (tabindex -1) считаем «вне списка»: Shift+Tab с него
+    // иначе уходил бы к кнопке под окном
+    const outside = a === modal || !modal.contains(a);
+    if (e.shiftKey) {
+      if (a === first || outside) {
+        e.preventDefault();
+        last.focus();
+      }
+    } else if (a === last || outside) {
+      e.preventDefault();
+      first.focus();
+    }
+  }
+  document.addEventListener('keydown', onModalKey, true);
 
   function confirmDialog(msg, onYes, title, labels) {
     labels = labels || {};
@@ -4158,6 +5776,15 @@ window.App = window.App || {};
       { label: labels.no || App.t('cancel') },
       { label: labels.yes || App.t('delete'), cls: labels.yesCls || 'danger', onClick: onYes }
     ]);
+  }
+
+  // v106: одно подтверждение удаления на всё приложение. Крупный объект —
+  // модалка (его видно целиком), строку списка — инлайн у кнопки (не уводит
+  // взгляд). Текст и кнопки одни и те же, поэтому «Выбросить» больше не
+  // встречается рядом с «Удалить предмет».
+  function askDelete(opts) {
+    if (opts.anchor) askInline(opts.anchor, opts.text, opts.onYes);
+    else confirmDialog(opts.text, opts.onYes, opts.title || App.t('delete'));
   }
 
   // Полный текст (описание перка/заклинания) отдельным окном
@@ -4217,21 +5844,30 @@ window.App = window.App || {};
       // единственное отличие — активные кнопки правки (✎⧉✕ + ресайз) в шапке
       ov.appendChild(buildLayerCard(card));
     }
+    ov.setAttribute('aria-label', card.name || App.t('menu'));
     ov.classList.remove('hidden');
     updateScrollLock();
+    // v126: диалог получает фокус (на телефоне поле заметки не автофокусим —
+    // иначе сразу выезжает клавиатура, поэтому берём первую кнопку шапки)
+    const firstFocus = ov.querySelector('button, textarea, input, [tabindex="0"]');
+    if (firstFocus) {
+      try { firstFocus.focus({ preventScroll: true }); } catch (e) { firstFocus.focus(); }
+    }
   }
 
   // Тулзы шапки слоя. На телефоне — ТОЛЬКО кебаб (меню с теми же действиями
   // плюс «Размер» и «На страницу…»): иначе в шапке оказывались и кебаб, и три
   // кнопки с ПК-версии (баг v48).
-  function layerToolsHTML() {
+  function layerToolsHTML(card) {
     if (!isDesktop()) {
       return '<div class="tools">' +
         '<button type="button" class="layer-menu" title="' + esc(App.t('menu')) + '" aria-label="' + esc(App.t('menu')) + '">' +
           '<span></span><span></span><span></span></button></div>';
     }
+    // v108: у инвентаря нет полей самой карточки — ✎ вела в пустоту
+    const canEdit = !card || card.type !== 'inventory';
     return '<div class="tools">' +
-      '<button class="card-edit" title="' + esc(App.t('edit')) + '">✎</button>' +
+      (canEdit ? '<button class="card-edit" title="' + esc(App.t('edit')) + '">✎</button>' : '') +
       '<button class="card-dup" title="' + esc(App.t('duplicate')) + '">⧉</button>' +
       '<button class="card-del" title="' + esc(App.t('delete')) + '">' + TRASH_SVG + '</button>' +
       '</div>';
@@ -4268,7 +5904,7 @@ window.App = window.App || {};
     const head = document.createElement('div');
     head.className = 'layer-head';
     head.innerHTML =
-      '<span class="card-name">' + esc(card.name) + '</span>' + layerToolsHTML();
+      '<span class="card-name">' + esc(card.name) + '</span>' + layerToolsHTML(card);
     wireLayerTools(head, card);
     return head;
   }
@@ -4287,7 +5923,7 @@ window.App = window.App || {};
     const head = document.createElement('div');
     head.className = 'card-head';
     head.innerHTML =
-      '<span class="card-name">' + esc(card.name) + '</span>' + layerToolsHTML();
+      '<span class="card-name">' + esc(card.name) + '</span>' + layerToolsHTML(card);
     wireLayerTools(head, card);
     el.appendChild(head);
     // cardBody уже возвращает обёртку .card-body — вставляем как есть
@@ -4297,18 +5933,8 @@ window.App = window.App || {};
     el.querySelectorAll('[data-act]').forEach(function (btn) {
       btn.addEventListener('click', function (e) { handleAction(card.id, btn.dataset, e); });
     });
-    // описания предметов инвентаря: клик — окно полного текста ПОВЕРХ слоя (как редактор)
-    el.querySelectorAll('.item-row.has-desc').forEach(function (row) {
-      const it = (card.items || []).find(function (x) { return x.id === row.dataset.item; });
-      if (!it || !(it.description || '').trim()) return;
-      const descEl = row.querySelector('.idesc');
-      if (!descEl) return;
-      descEl.classList.add('readable');
-      descEl.addEventListener('click', function (e) {
-        e.stopPropagation();
-        openTextModal(it.name, it.description);
-      });
-    });
+    // v98: раскрытие «истинного предмета» работает и в слое ярлыка (мобилка)
+    if (card.type === 'inventory') bindInventoryReveal(card, el);
     // ресайз — активная кнопка правки: уголок копии меняет размер НАСТОЯЩЕЙ карточки
     if (desktop) {
       const rh = document.createElement('span');
@@ -4388,6 +6014,7 @@ window.App = window.App || {};
   function closeLabelLayer() {
     const ov = document.getElementById('labelLayer');
     if (ov.classList.contains('hidden')) return;
+    const closedCardId = layerCardId;
     // заметка: несохранённый правки текст пишем при закрытии (undo/redo работают)
     const ta = ov.querySelector('.layer-note');
     if (ta && layerCardId) {
@@ -4398,7 +6025,13 @@ window.App = window.App || {};
     layerCardId = null;
     ov.classList.add('hidden');
     ov.innerHTML = '';
+    ov.removeAttribute('aria-label');
     updateScrollLock();
+    // v126: фокус возвращается на язычок ярлыка, который открыл слой
+    if (closedCardId) {
+      const el = document.querySelector('.card[data-id="' + closedCardId + '"] .fold-tab');
+      if (el) { try { el.focus({ preventScroll: true }); } catch (e) { el.focus(); } }
+    }
   }
 
   // Сворачивание/разворот — ТОЛЬКО язычок. Состояние пишем через pushUndo+save
@@ -4592,10 +6225,14 @@ window.App = window.App || {};
   }
 
   // ===== Бафф: поля редактора (v91) =====
-  // В баффе нет «текущего» счётчика: это тик, а не модификатор. Поэтому
-  // набор полей — те же, что у состояний, минус current.
+  // v114: у баффа появились тики (урон/лечение по ходам), поэтому счётчику
+  // доступно ещё и «текущее» — только для режима «тик».
   function buffTargetFields(type) {
-    return (MOD_FIELDS[type] || []).filter(function (f) { return f !== 'current'; });
+    const f = (MOD_FIELDS[type] || []).slice();
+    // «текущее» доступно только у счётчика и только для режима «тик»;
+    // первым полем остаётся обычное (max), чтобы новая строка не начиналась с тика
+    if (type === 'counter') f.push('current');
+    return f;
   }
   function buffTargets() {
     return (activeChar().cards || []).filter(function (c) {
@@ -4603,13 +6240,18 @@ window.App = window.App || {};
     });
   }
   function buffModesFor(t, field) {
+    // «текущее» в баффе — только событие по ходам, иначе режим молча не работает
+    if (field === 'current') return ['tick'];
     const out = ['add', 'mul', 'set', 'cap'];
-    // кубик — только к бонусу и только если у цели вообще есть кубик
+    // кубик — только к бонусу и только если у цели вообще есть кубик;
+    // преимущество/помеха — к бонусу любой карточки с кубиком
     if (t && t.die && (t.type === 'skill' || t.type === 'spell') && field === 'bonus') out.push('dice');
+    if (t && t.die && field === 'bonus') out.push('adv', 'dis');
     if (t && t.type === 'spell' && field === 'charges') out.push('block');
     return out;
   }
   function normalizeBuffEffect(ef) {
+    if (ef.mode === 'tick') ef.field = 'current';
     const t = findCard(ef.target);
     const fields = t ? buffTargetFields(t.type) : [];
     if (fields.indexOf(ef.field) === -1) ef.field = fields[0] || 'bonus';
@@ -4623,12 +6265,15 @@ window.App = window.App || {};
       return {
         mode: ef.mode || 'add', field: effectField(ef),
         value: ef.value == null ? '' : String(ef.value), label: ef.label || '',
-        target: ef.target || null
+        target: ef.target || null, timing: ef.timing || 'start'
       };
     });
     const col = card.color || '#d4a93c';
     return '<div class="field"><label>' + esc(App.t('description')) + '</label>' +
         '<textarea id="f-desc" placeholder="' + esc(App.t('description')) + '…">' + esc(card.description || '') + '</textarea></div>' +
+      '<div class="field"><label>' + esc(App.t('buffDuration')) + '</label>' +
+        '<input id="f-buff-duration" type="number" min="0" max="999" step="1" inputmode="numeric" value="' + (num(card.duration) > 0 ? num(card.duration) : '') + '" placeholder="—">' +
+        '<div class="formula-help">' + esc(App.t('buffDurationHint')) + '</div></div>' +
       '<div class="field"><label>' + esc(App.t('buffEffects')) + '</label>' +
         '<div id="f-bfx-list" class="st-fx-list"></div>' +
         '<button type="button" id="f-bfx-add" class="st-add-fx small">+ ' + esc(App.t('fxAdd')) + '</button>' +
@@ -4656,13 +6301,19 @@ window.App = window.App || {};
       return '<option value="' + m + '"' + (m === ef.mode ? ' selected' : '') + '>' + esc(fxModeText(m)) + '</option>';
     }).join('');
     const block = ef.mode === 'block';
-    const ph = block ? '—' : App.t(FX_MODE_PH[ef.mode] || 'fxPhAdd');
+    const tick = ef.mode === 'tick';
+    const flag = block;   // значение не нужно только запрету
+    const ph = flag ? '—' : App.t(FX_MODE_PH[ef.mode] || 'fxPhAdd');
     return '<div class="st-fx-form bfx-form" data-bfx-i="' + i + '">' +
       '<div class="bfx-grid">' +
         '<div class="field bfx-wide"><label>' + esc(App.t('fxTarget')) + '</label><select data-bfx="target">' + tOpts + '</select></div>' +
         '<div class="field"><label>' + esc(App.t('fxField')) + '</label><select data-bfx="field">' + fOpts + '</select></div>' +
         '<div class="field"><label>' + esc(App.t('fxMode')) + '</label><select data-bfx="mode">' + mOpts + '</select></div>' +
-        '<div class="field bfx-wide"><label>' + esc(App.t('fxValue')) + '</label><input data-bfx="value" type="text" autocomplete="off" spellcheck="false" value="' + esc(block ? '' : ef.value) + '" placeholder="' + esc(ph) + '"' + (block ? ' disabled' : '') + '></div>' +
+        '<div class="field"' + (tick ? '' : ' style="display:none"') + '><label>' + esc(App.t('fxTiming')) + '</label><select data-bfx="timing">' +
+          '<option value="start"' + ((ef.timing || 'start') !== 'end' ? ' selected' : '') + '>' + esc(App.t('fxTimingStart')) + '</option>' +
+          '<option value="end"' + (ef.timing === 'end' ? ' selected' : '') + '>' + esc(App.t('fxTimingEnd')) + '</option>' +
+        '</select></div>' +
+        '<div class="field bfx-wide"><label>' + esc(App.t('fxValue')) + '</label><input data-bfx="value" type="text" autocomplete="off" spellcheck="false" value="' + esc(flag ? '' : ef.value) + '" placeholder="' + esc(ph) + '"' + (flag ? ' disabled' : '') + '></div>' +
         '<div class="field bfx-wide"><label>' + esc(App.t('fxLabelField')) + '</label><input data-bfx="label" type="text" autocomplete="off" spellcheck="false" value="' + esc(ef.label) + '" placeholder="' + esc(App.t('fxLabelPh')) + '"></div>' +
       '</div>' +
       '<div class="st-fx-actions"><button type="button" class="small danger" data-bfx-del="' + i + '">' + TRASH_SVG + ' ' + esc(App.t('delete')) + '</button></div>' +
@@ -4700,6 +6351,8 @@ window.App = window.App || {};
       if (!ef) return;
       const key = sel.dataset.bfx;
       ef[key] = sel.value;
+      // v121: преимущество/помеха — число бросков, по умолчанию 1
+      if (key === 'mode' && (ef.mode === 'adv' || ef.mode === 'dis') && !String(ef.value == null ? '' : ef.value).trim()) ef.value = '1';
       if (key === 'target' || key === 'field' || key === 'mode') renderBuffFx();
     });
     host.addEventListener('input', function (e) {
@@ -4741,7 +6394,6 @@ window.App = window.App || {};
           bonusToggleFields(card.bonus);
       case 'spell': return spellFields(card);
       case 'currency': return currencyFields(card);
-      case 'inventory': return inventoryFields(card);
       case 'note': return noteFields(card);
       case 'initiative': return initiativeFields(card);
       // v65: у состояния настраивается только подпись — сами состояния в слое
@@ -4826,14 +6478,6 @@ window.App = window.App || {};
       checkField('f-autoconv', App.t('autoconvert'), !!card.autoconvert);
   }
 
-  function inventoryFields(card) {
-    editScratch.items = JSON.parse(JSON.stringify(card.items || []));
-    return '<div class="field"><label>' + esc(App.t('items')) + '</label>' +
-      '<div class="sublist" id="f-items"></div>' +
-      '<button type="button" class="small" id="f-additem">+ ' + esc(App.t('addItem')) + '</button></div>' +
-      checkField('f-showweight', App.t('totalWeight'), !!card.showWeight);
-  }
-
   function bindCurrencyEditor() {
     const container = document.getElementById('f-units');
     const units = editScratch.units;
@@ -4860,35 +6504,6 @@ window.App = window.App || {};
     document.getElementById('f-addunit').addEventListener('click', function () {
       units.push({ id: uid(), name: '', base: 1 });
       renderUnits();
-    });
-  }
-
-  function bindInventoryEditor() {
-    const container = document.getElementById('f-items');
-    const items = editScratch.items;
-    function renderItems() {
-      container.innerHTML = items.map(function (it, i) {
-        return '<div class="srow" data-i="' + i + '">' +
-          '<input type="text" data-k="name" value="' + esc(it.name) + '" placeholder="' + esc(App.t('itemName')) + '">' +
-          '<input type="text" data-k="description" value="' + esc(it.description || '') + '" placeholder="' + esc(App.t('itemDescription')) + '">' +
-          '<input type="number" data-k="qty" value="' + num(it.qty) + '" title="' + esc(App.t('qty')) + '" placeholder="1" class="small">' +
-          '<input type="number" data-k="weight" value="' + (it.weight == null ? '' : it.weight) + '" title="' + esc(App.t('weight')) + '" placeholder="0" class="small">' +
-          '<button type="button" class="small danger" data-del="' + i + '">✕</button>' +
-          '</div>';
-      }).join('');
-      container.querySelectorAll('.srow').forEach(function (row) {
-        const i = Number(row.dataset.i);
-        row.querySelector('input[data-k="name"]').addEventListener('input', function (e) { items[i].name = e.target.value; });
-        row.querySelector('input[data-k="description"]').addEventListener('input', function (e) { items[i].description = e.target.value; });
-        row.querySelector('input[data-k="qty"]').addEventListener('input', function (e) { items[i].qty = num(e.target.value); });
-        row.querySelector('input[data-k="weight"]').addEventListener('input', function (e) { const v = e.target.value; items[i].weight = v === '' ? null : num(v); });
-        row.querySelector('[data-del]').addEventListener('click', function () { items.splice(i, 1); renderItems(); });
-      });
-    }
-    renderItems();
-    document.getElementById('f-additem').addEventListener('click', function () {
-      items.push({ id: uid(), name: '', description: '', qty: 1, weight: null });
-      renderItems();
     });
   }
 
@@ -4956,11 +6571,8 @@ window.App = window.App || {};
     upd();
   }
 
-  function bindAppearance() {}   // ОФОРМЛЕНИЕ убрано (v15)
-
   function postInitEditor(card) {
     if (card.type === 'currency') bindCurrencyEditor();
-    if (card.type === 'inventory') bindInventoryEditor();
     if (card.type === 'buff') bindBuffEditor();
     if (card.type === 'spell') bindChargesToggle();
     bindExprFields();   // v25: поля-выражения (максимум/бонус/значение) — чипы-параметры
@@ -5076,9 +6688,6 @@ window.App = window.App || {};
       chip.querySelector('.tok-mv[data-dir="1"]').disabled = !chip.nextElementSibling;
     });
   }
-  function refreshAllChips() {
-    refreshChips(document.getElementById('f-expr'));
-  }
   // строка выражения → содержимое поля: {Имя} / {Имя.бонус} → чип, остальное — текст как есть
   function renderExprInto(area, str) {
     area.innerHTML = '';
@@ -5109,15 +6718,6 @@ window.App = window.App || {};
       return out;
     }
     return ser(area);
-  }
-  function previewValue(card, part) {
-    if (part === 'bonus') return cardBonus(card);
-    switch (card.type) {
-      case 'counter': return num(card.current);
-      case 'skill': return skillValueNum(card);
-      case 'spell': return chargesCurrent(card);
-      default: return 0;
-    }
   }
   // последняя позиция курсора в поле выражения (чтобы вставка чипа из пикера
   // шла туда, где курсор был, а не в начало поля после фокуса на поиске).
@@ -5193,6 +6793,8 @@ window.App = window.App || {};
     const menu = document.createElement('div');
     menu.className = 'refmenu';
     menu.id = 'refmenu';
+    menu.setAttribute('role', 'dialog');
+    menu.setAttribute('aria-label', App.t('fxTarget'));
     const search = document.createElement('input');
     search.type = 'text';
     search.className = 'refmenu-search';
@@ -5238,17 +6840,35 @@ window.App = window.App || {};
     // меняет высоту окна и раньше гасила список сразу после открытия)
     document.addEventListener('pointerdown', onRefMenuDocDown, true);
     window.addEventListener('resize', placeRefMenu);
+    window.addEventListener('keydown', onRefMenuKey, true);
+    window.addEventListener('scroll', onRefMenuScroll, true);
+  }
+  function onRefMenuKey(e) {
+    if (e.key !== 'Escape') return;
+    e.preventDefault();
+    e.stopPropagation();
+    closeRefMenu(true);
+  }
+  function onRefMenuScroll(e) {
+    const menu = document.getElementById('refmenu');
+    if (menu && !menu.contains(e.target)) closeRefMenu();
   }
   function onRefMenuDocDown(e) {
     const menu = document.getElementById('refmenu');
     if (menu && !menu.contains(e.target) && !(refMenuAnchor && refMenuAnchor.contains(e.target))) closeRefMenu();
   }
-  function closeRefMenu() {
+  function closeRefMenu(refocus) {
     const menu = document.getElementById('refmenu');
     if (menu) menu.parentNode.removeChild(menu);
     document.removeEventListener('pointerdown', onRefMenuDocDown, true);
     window.removeEventListener('resize', placeRefMenu);
+    window.removeEventListener('keydown', onRefMenuKey, true);
+    window.removeEventListener('scroll', onRefMenuScroll, true);
+    const anchor = refMenuAnchor;
     refMenuAnchor = null;
+    if (refocus && anchor && anchor.isConnected) {
+      try { anchor.focus({ preventScroll: true }); } catch (e) { anchor.focus(); }
+    }
   }
   function readCharges(card) {
     const charges = card.charges || { mode: 'own' };
@@ -5335,10 +6955,6 @@ window.App = window.App || {};
         for (const k in card.amounts) if (ids.indexOf(k) === -1) delete card.amounts[k];
         break;
       }
-      case 'inventory':
-        card.items = (editScratch.items || card.items).map(function (it) { return { id: it.id, name: it.name, description: it.description || '', qty: num(it.qty), weight: it.weight }; });
-        card.showWeight = readCheck('f-showweight');
-        break;
       case 'note':
         card.text = readText('f-text');
         break;
@@ -5348,16 +6964,30 @@ window.App = window.App || {};
         card.description = readText('f-desc');
         const colEl = document.getElementById('f-buff-color');
         card.color = (colEl && /^#[0-9a-f]{6}$/i.test(colEl.value)) ? colEl.value : (card.color || '#d4a93c');
+        // v114: длительность в ходах; пусто — постоянный бафф.
+        const durEl = document.getElementById('f-buff-duration');
+        const dur = durEl ? Math.max(0, parseInt(durEl.value, 10) || 0) : 0;
+        const prevDur = num(card.duration);
+        card.duration = dur > 0 ? dur : null;
+        if (card.duration) {
+          // новая длительность или истёкший счётчик — начинаем заново
+          if (!(num(card.left) > 0) || dur !== prevDur) card.left = card.duration;
+          else card.left = Math.min(num(card.left), card.duration);
+        } else {
+          card.left = null;
+        }
         card.effects = (editScratch.buffEffects || []).map(function (ef) {
           const e = {
             mode: ef.mode, field: effectField(ef),
             value: ef.value == null ? '' : String(ef.value),
             label: ef.label || '', target: ef.target || null
           };
+          if (e.mode === 'tick') { e.field = 'current'; e.timing = ef.timing || 'start'; }
           if (e.mode === 'block') e.value = '';
           return e;
         }).filter(function (ef) {
-          return ef.target && findCard(ef.target) && (ef.mode === 'block' || String(ef.value).trim() !== '');
+          return ef.target && findCard(ef.target) &&
+            (ef.mode === 'block' || ef.mode === 'adv' || ef.mode === 'dis' || String(ef.value).trim() !== '');
         });
         break;
       }
@@ -5367,7 +6997,10 @@ window.App = window.App || {};
   function openCardEditor(cardId) {
     const card = findCard(cardId);
     if (!card) return;
+    // v102: у инвентаря нет редактора карточки — всё живёт в строках предметов
+    if (card.type === 'inventory') return;
     editScratch.editCard = card;   // для живого предпросмотра в полях-выражениях
+    if (card._new) pendingNewCardId = card.id;
     let body = '<div class="field"><label>' + esc(App.t('name')) + '</label><input id="f-name" type="text" value="' + esc(card.name) + '" placeholder="' + esc(nameExample(card.type)) + '"></div>';
     body += typeFields(card);
     openModal(typeLabel(card.type), body, [
@@ -5384,6 +7017,7 @@ window.App = window.App || {};
     if (card.type !== 'condition' && !name) { toast(App.t('uniqueNameError')); return false; }
     if (name && isNameUsed(name, card.id)) { toast(App.t('uniqueNameError')); return false; }
     const oldName = card.name;
+    const wasNew = !!card._new;
     // v25: ссылки теперь живут не только в формулах — переименовываем их
     // во всех полях-выражениях (бонус, максимум, значение, максимум зарядов)
     const renameExpr = function (v) {
@@ -5408,7 +7042,9 @@ window.App = window.App || {};
       const mn = minSize(card);
       card.w = Math.max(mn.w, card.w || mn.w);
       card.h = Math.max(mn.h, card.h || mn.h);
-    });
+    }, wasNew);
+    pendingNewCardId = null;
+    toast(App.tf(wasNew ? 'createdGeneric' : 'savedGeneric', { name: card.name }));
     return true;
   }
 
@@ -5491,9 +7127,9 @@ window.App = window.App || {};
           (editable ? ' data-edit-state="' + esc(eid) + '" data-set-id="' + esc(set.id) + '"' : '') + '>' + ic +
           '<span class="set-txt"><span class="set-name">' + esc(nm) + '</span>' +
           '<span class="set-desc">' + esc(ds) + '</span></span>' +
-          (editable ? '<button type="button" class="set-row-edit" aria-label="' + esc(App.t('edit')) + '" title="' + esc(App.t('edit')) + '">✎</button>' : '') +
+          (editable ? '<button type="button" class="set-row-edit" aria-label="' + esc(App.t('edit')) + '">✎</button>' : '') +
           (editable && !set.builtin
-            ? '<button type="button" class="set-row-del" data-del-state="' + esc(eid) + '" data-set-id="' + esc(set.id) + '" aria-label="' + esc(App.t('stDelete')) + '" title="' + esc(App.t('stDelete')) + '">' + TRASH_SVG + '</button>'
+            ? '<button type="button" class="set-row-del" data-del-state="' + esc(eid) + '" data-set-id="' + esc(set.id) + '" aria-label="' + esc(App.t('stDelete')) + '">' + TRASH_SVG + '</button>'
             : (editable ? '<span class="set-row-slot"></span>' : '')) +
           '</div>';
       }).join('');
@@ -5504,9 +7140,9 @@ window.App = window.App || {};
           '<span class="set-title"><b>' + esc(setDisplayName(set)) + '</b>' +
             '<span class="set-meta">' + esc(App.tf(isStates ? 'statesCount' : 'itemsCount', { n: entries.length })) +
             ' · ' + esc(App.tf('setUsedBy', { n: used })) + '</span></span>' +
-          (isStates ? '<button type="button" class="set-plus" data-add-state="' + esc(set.id) + '" aria-label="' + esc(App.t('stAddState')) + '" title="' + esc(App.t('stAddState')) + '">+</button>' : '') +
+          (isStates ? '<button type="button" class="set-plus" data-add-state="' + esc(set.id) + '" aria-label="' + esc(App.t('stAddState')) + '">+</button>' : '') +
           (set.id === activeId ? '<span class="set-flag">' + esc(App.t('setHere')) + '</span>' : '') +
-          (!set.builtin ? '<button type="button" class="set-ren" data-rename-set="' + esc(set.id) + '" aria-label="' + esc(App.t('setRename')) + '" title="' + esc(App.t('setRename')) + '">✎</button>' : '') +
+          (!set.builtin ? '<button type="button" class="set-ren" data-rename-set="' + esc(set.id) + '" aria-label="' + esc(App.t('setRename')) + '">✎</button>' : '') +
           (entries.length
             ? '<button type="button" class="set-exp" data-export="' + esc(set.id) + '" aria-label="' + esc(App.t('setExportShort')) + '">' + SET_EXPORT_SVG + '</button>'
             : '') +
@@ -5519,13 +7155,58 @@ window.App = window.App || {};
         '</div></div>';
     }).join('');
     return '<div class="s-panel hidden" data-panel="' + kind + '">' +
+      (isStates
+        ? '<div class="field"><label>' + esc(App.t('setStatesLabel')) + '</label><select id="s-stateset">' +
+          libSets('states').map(function (s) {
+            return '<option value="' + esc(s.id) + '"' + (s.id === activeId ? ' selected' : '') + '>' + esc(setDisplayName(s)) + '</option>';
+          }).join('') + '</select></div>'
+        : '') +
       '<div class="set-cards">' + cards + '</div>' +
       '<div class="set-foot">' +
         (isStates ? '<button type="button" id="s-set-import">' + esc(App.t('setImport')) + '</button>' : '') +
       '</div></div>';
   }
 
-  // ===== Редактор шаблона состояния (v81) =====
+  // v94: паки предметов — отдельный экран. В отличие от наборов состояний
+  // паков может быть много, у персонажа — галочки, а содержимое строки — снимок.
+  function settingsPacksPanel(ch) {
+    const packs = packsList();
+    const cards = packs.map(function (pack) {
+      const items = pack.items || [];
+      const used = packUsedBy(pack.id);
+      const rows = items.map(function (it) {
+        const cat = ITEM_CATEGORIES.find(function (c) { return c.id === it.category; }) || ITEM_CATEGORIES[2];
+        const wt = it.weight == null ? '—' : fmt(it.weight) + ' кг';
+        return '<div class="set-row editable" data-edit-pack-item="' + esc(it.id) + '" data-pack-id="' + esc(pack.id) + '">' +
+          '<span class="set-ic">' + itemIconChar(it.icon, it.category) + '</span>' +
+          '<span class="set-txt"><span class="set-name">' + esc(it.name || '—') + '</span>' +
+          '<span class="set-desc">' + esc(App.t(cat.labelKey)) + ' · ' + esc(wt) + (it.damage ? ' · ' + esc(it.damage) : '') + '</span></span>' +
+          '<button type="button" class="set-row-edit" aria-label="' + esc(App.t('edit')) + '">✎</button>' +
+          '<button type="button" class="set-row-del" data-del-pack-item="' + esc(it.id) + '" data-pack-id="' + esc(pack.id) + '" aria-label="' + esc(App.t('delete')) + '">' + TRASH_SVG + '</button>' +
+        '</div>';
+      }).join('');
+      return '<div class="set-card open" data-pack="' + esc(pack.id) + '">' +
+        '<div class="set-head">' +
+          '<span class="set-chev"></span>' +
+          '<span class="set-title"><b>' + esc(pack.name) + '</b>' +
+            '<span class="set-meta">' + esc(App.tf('packItemsCount', { n: items.length })) +
+            ' · ' + esc(App.tf('packUsedBy', { n: used })) + '</span></span>' +
+          '<button type="button" class="set-plus" data-add-pack-item="' + esc(pack.id) + '" aria-label="' + esc(App.t('packAddItem')) + '">+</button>' +
+          '<button type="button" class="set-chars" data-pack-chars="' + esc(pack.id) + '" aria-label="' + esc(App.t('tabPacks')) + '">👥 ' + used + '</button>' +
+          '<button type="button" class="set-ren" data-rename-pack="' + esc(pack.id) + '" aria-label="' + esc(App.t('packRename')) + '">✎</button>' +
+          '<button type="button" class="set-exp" data-export-pack="' + esc(pack.id) + '" aria-label="' + esc(App.t('packExport')) + '">' + SET_EXPORT_SVG + '</button>' +
+          '<button type="button" class="set-del" data-del-pack="' + esc(pack.id) + '" aria-label="' + esc(App.t('delete')) + '">' + TRASH_SVG + '</button>' +
+        '</div>' +
+        '<div class="set-body"><div class="set-rows">' +
+          (rows || '<div class="set-empty">' + esc(App.t('packEmpty')) + '</div>') +
+        '</div></div></div>';
+    }).join('');
+    return '<div class="s-panel hidden" data-panel="items">' +
+      '<div class="set-cards">' + (cards || '<div class="set-empty">' + esc(App.t('packNone')) + '</div>') + '</div>' +
+      '<div class="set-foot"><button type="button" id="s-pack-add">+ ' + esc(App.t('packAdd')) + '</button>' +
+      '<button type="button" id="s-pack-import">' + esc(App.t('packImport')) + '</button></div></div>';
+  }
+
   // Набор общий на устройство, поэтому здесь НЕТ выбора цели. Цель появляется
   // только в окне состояний на карточке. Здесь — имя, вид и значения по умолчанию.
   const STATE_ICON_KEYS = ['skull', 'drop', 'snow', 'star', 'heart', 'flame', 'curse', 'bolt', 'eye', 'bang', 'grip', 'fall', 'net', 'zzz', 'weary'];
@@ -5688,12 +7369,614 @@ window.App = window.App || {};
     const entry = (set.entries || []).find(function (e) { return e.entryId === entryId || e.key === entryId; });
     if (!entry) return;
     const name = entry.nameKey ? App.t(entry.nameKey) : (entry.name || '');
-    const msg = set.builtin
-      ? App.tf('stDeleteBuiltinConfirm', { name: name })
-      : App.tf('stDeleteConfirm', { name: name });
-    askInline(anchor, msg, function () {
+    const msg = App.tf('stDeleteConfirm', { name: name });
+    askDelete({ text: msg, anchor: anchor, onYes: function () {
       mutate(function () { removeStateEntry(set, entryId); });
+      toast(App.tf('deletedGeneric', { name: name }));
       openSettings('states');
+    } });
+  }
+
+  function openPackCharsMenu(packId, anchor) {
+    closePackCharsMenu();
+    const pack = packById(packId);
+    if (!pack) return;
+    const menu = document.createElement('div');
+    menu.className = 'ctxmenu pack-chars-menu';
+    menu.id = 'packCharsMenu';
+    menu.innerHTML = '<div class="ask-text">' + esc(App.t('packChars')) + '</div>' +
+      (state.characters.length ? state.characters.map(function (c) {
+        const on = !!charPacks(c)[packId];
+        return '<button type="button" data-char="' + esc(c.id) + '"><span class="pcm-check">' + (on ? '✓' : '') + '</span> ' + esc(c.name) + '</button>';
+      }).join('') : '<div class="ask-text">—</div>') +
+      '<div class="ask-actions"><button type="button" data-close="1">' + esc(App.t('close')) + '</button></div>';
+    menu.addEventListener('click', function (e) {
+      const btn = e.target.closest('[data-char]');
+      if (btn) {
+        const ch = state.characters.find(function (c) { return c.id === btn.dataset.char; });
+        if (!ch) return;
+        const on = !charPacks(ch)[packId];
+        mutate(function () { charPacks(ch)[packId] = on; });
+        btn.querySelector('.pcm-check').textContent = on ? '✓' : '';
+        anchor.textContent = '👥 ' + packUsedBy(packId);
+        const meta = anchor.closest('.set-card').querySelector('.set-meta');
+        if (meta) meta.textContent = App.tf('packItemsCount', { n: (pack.items || []).length }) + ' · ' + App.tf('packUsedBy', { n: packUsedBy(packId) });
+        return;
+      }
+      if (e.target.closest('[data-close]')) closePackCharsMenu();
+    });
+    mountMenu(menu, anchor, { align: 'right' });
+  }
+
+  function closePackCharsMenu() { closeMenuById('packCharsMenu'); }
+
+  function renamePackInline(packId, anchor) {
+    const pack = packById(packId);
+    if (!pack) return;
+    askInlineInput(anchor, pack.name, function (name) {
+      pack.name = name;
+      savePacks();
+      const card = anchor.closest('.set-card');
+      const title = card && card.querySelector('.set-title b');
+      if (title) title.textContent = name;
+      toast(App.tf('renamedGeneric', { name: name }));
+    });
+  }
+
+  function askInlineInput(anchor, initial, onDone) {
+    closeInlineAsk();
+    if (!anchor) return;
+    askAnchor = anchor;
+    const pop = document.createElement('div');
+    pop.className = 'ctxmenu inline-ask';
+    pop.id = 'inlineAsk';
+    pop.innerHTML = '<div class="ask-text">' + esc(App.t('packRename')) + '</div>' +
+      '<input class="ask-input" type="text" autocomplete="off" spellcheck="false" value="' + esc(initial) + '">' +
+      '<div class="ask-actions">' +
+        '<button type="button" class="ask-yes" data-yes="1">' + esc(App.t('save')) + '</button>' +
+        '<button type="button" data-no="1">' + esc(App.t('cancel')) + '</button>' +
+      '</div>';
+    document.body.appendChild(pop);
+    const r = anchor.getBoundingClientRect();
+    pop.style.left = Math.max(8, Math.min(r.right - pop.offsetWidth, window.innerWidth - pop.offsetWidth - 8)) + 'px';
+    pop.style.top = Math.min(r.bottom + 6, window.innerHeight - pop.offsetHeight - 8) + 'px';
+    const inp = pop.querySelector('.ask-input');
+    inp.focus();
+    inp.select();
+    pop.addEventListener('click', function (e) {
+      if (e.target.closest('[data-no]')) { closeInlineAsk(); return; }
+      if (e.target.closest('[data-yes]')) {
+        const v = inp.value.trim();
+        if (!v) { inp.focus(); return; }
+        const fn = onDone;
+        closeInlineAsk();
+        fn(v);
+      }
+    });
+    inp.addEventListener('keydown', function (e) {
+      if (e.key === 'Enter') { e.preventDefault(); pop.querySelector('[data-yes]').click(); }
+    });
+    document.addEventListener('pointerdown', onAskDocDown, true);
+    window.addEventListener('keydown', onAskKey, true);
+  }
+
+  function openPackNameModal(packId) {
+    const pack = packId ? packById(packId) : null;
+    openModal(pack ? App.t('packRename') : App.t('packAdd'),
+      '<div class="field"><label>' + esc(App.t('packName')) + '</label>' +
+      '<input id="packNameInput" type="text" autocomplete="off" spellcheck="false" value="' + esc(pack ? pack.name : App.t('packDefaultName')) + '"></div>',
+      [
+        { label: App.t('cancel'), onClick: function () { openSettings('items'); return false; } },
+        { label: App.t('save'), cls: 'primary', onClick: function () {
+          const inp = document.getElementById('packNameInput');
+          const name = inp ? inp.value.trim() : '';
+          if (!name) { toast(App.t('packNameNeeded')); return false; }
+          if (pack) pack.name = name;
+          else packsList().push({ id: uid(), name: name, items: [] });
+          savePacks();
+          openSettings('items');
+          return false;
+        } }
+      ]);
+    const inp = document.getElementById('packNameInput');
+    if (inp) { inp.focus(); inp.select(); }
+  }
+
+  function deletePack(packId, anchor) {
+    const pack = packById(packId);
+    if (!pack) return;
+    askDelete({ text: App.tf('packDeleteConfirm', { name: pack.name }), anchor: anchor, onYes: function () {
+      packsStore.packs = packsList().filter(function (p) { return p.id !== packId; });
+      state.characters.forEach(function (ch) { delete charPacks(ch)[packId]; });
+      savePacks();
+      save();
+      toast(App.tf('deletedGeneric', { name: pack.name }));
+      openSettings('items');
+    } });
+  }
+
+  function deletePackItem(packId, itemId, anchor) {
+    const pack = packById(packId);
+    const item = pack && (pack.items || []).find(function (it) { return it.id === itemId; });
+    if (!item) return;
+    askDelete({ text: App.tf('packItemDeleteConfirm', { name: item.name || '—' }), anchor: anchor, onYes: function () {
+      pack.items = (pack.items || []).filter(function (it) { return it.id !== itemId; });
+      savePacks();
+      toast(App.tf('deletedGeneric', { name: item.name || '—' }));
+      openSettings('items');
+    } });
+  }
+
+  function exportPack(packId) {
+    const pack = packById(packId);
+    if (!pack) return;
+    download(safeName(pack.name || 'pack') + '.json', JSON.stringify({
+      app: 'custplay', kind: 'items-pack', version: 1,
+      pack: { id: pack.id, name: pack.name, items: pack.items }
+    }, null, 2));
+    toast(App.t('packExported'));
+  }
+
+  function importPack(txt) {
+    try {
+      const data = JSON.parse(txt);
+      const src = data && data.pack;
+      if (!src || !Array.isArray(src.items)) throw new Error('bad');
+      const incoming = {
+        id: String(src.id || uid()),
+        name: String(src.name || App.t('packDefaultName')),
+        items: src.items.map(normalizePackItem)
+      };
+      const sameId = packById(incoming.id);
+      if (sameId) {
+        sameId.name = incoming.name;
+        sameId.items = incoming.items;
+      } else {
+        incoming.id = uid();
+        let name = incoming.name, i = 2;
+        while (packsList().some(function (p) { return p.name === name; })) { name = incoming.name + ' (' + i + ')'; i++; }
+        incoming.name = name;
+        packsList().push({ id: incoming.id, name: incoming.name, items: incoming.items });
+      }
+      savePacks();
+      toast(App.t('packImported'));
+      openSettings('items');
+    } catch (e) { toast(App.t('packImportError')); }
+  }
+
+  // v114: тик — эффект-событие, он меняет текущее значение счётчика. Поэтому
+  // режим доступен только для поля «Текущее». Остальные режимы — как раньше.
+  // v115: щит — разовая выдача запаса, только «прибавить».
+  function effectModesFor(field) {
+    if (field === 'shield') return ['add'];
+    const out = ['add', 'mul', 'set', 'cap'];
+    if (field === 'current') out.push('tick');
+    if (field === 'bonus') out.push('dice', 'adv', 'dis');
+    if (field === 'charges') out.push('block');
+    return out;
+  }
+
+  // v108: старые записи с mode:'block' могли хранить поле bonus; приводим
+  // к зарядам, иначе форма покажет несовместимую пару «бонус + запрет».
+  // v114: тик всегда работает по текущему значению.
+  function draftItemEffect(ef) {
+    const n = normalizeEffect(ef);
+    if (n.mode === 'block') n.field = 'charges';
+    if (n.mode === 'tick') n.field = 'current';
+    return n;
+  }
+
+  // v108: один редактор предмета на два места — набор и свою вещь.
+  // Поля и эффекты общие. Разница в обвязке: у строки инвентаря есть
+  // количество, «надето» и цель применения; у предмета набора их нет —
+  // цель там выбирается в игре. Запись и удаление приходят колбэками:
+  // набор пишет в свой ключ, вещь — в состояние листа через commit().
+  function openItemForm(cfg) {
+    const own = cfg.mode === 'own';
+    const draft = cfg.draft;
+    const ch = own ? activeChar() : null;
+    let fx = (draft.effects || []).map(draftItemEffect);
+    let secFx = draft.secret ? (draft.secret.effects || []).map(draftItemEffect) : [];
+    const el = function (id) { return document.getElementById(id); };
+    const val = function (id) { const n = el(id); return n ? n.value : ''; };
+    const chk = function (id) { const n = el(id); return !!(n && n.checked); };
+    const FIELD_IDS = ['bonus', 'max', 'value', 'charges', 'current'];
+    const packs = own ? packsList().filter(function (p) { return charPacks(ch)[p.id]; }) : [];
+
+    // v112: «Прочее» — без эффектов. Поведение задаёт категория, как у кнопок
+    // «Надеть»/«Использовать»: у прочего нет действия, которое включает эффект.
+    // Истинная часть проверяется по своей эффективной категории: пустая
+    // наследует базовую, поэтому «истинный прочий» тоже без эффектов.
+    const fxAllowedFor = function (cat) { return cat !== 'misc'; };
+    const baseCatNow = function () { return val('if-cat') || draft.category; };
+    const secCatNow = function () { return val('if-sec-cat') || baseCatNow(); };
+    let baseFxOk = null, secFxOk = null;
+
+    function updateFxAvailability() {
+      const baseOk = fxAllowedFor(baseCatNow());
+      const box = el('if-fx-on');
+      if (box) {
+        // при переходе «прочее ↔ остальное» возвращаем/снимаем галочку по факту
+        if (baseOk !== baseFxOk) { box.checked = baseOk ? fx.length > 0 : false; baseFxOk = baseOk; }
+        box.disabled = !baseOk;
+      }
+      const wrap = el('if-fx-wrap');
+      if (wrap) wrap.style.display = (baseOk && chk('if-fx-on')) ? '' : 'none';
+      // v113: у «Прочего» блока эффектов нет совсем — ни галочки, ни подсказки
+      const sect = el('if-fx-sect');
+      if (sect) sect.style.display = baseOk ? '' : 'none';
+
+      const secOk = fxAllowedFor(secCatNow());
+      const sbox = el('if-secfx-on');
+      if (sbox) {
+        if (secOk !== secFxOk) { sbox.checked = secOk ? secFx.length > 0 : false; secFxOk = secOk; }
+        sbox.disabled = !secOk;
+      }
+      const swrap = el('if-secfx-wrap');
+      if (swrap) swrap.style.display = (secOk && chk('if-secfx-on')) ? '' : 'none';
+      const ssect = el('if-secfx-sect');
+      if (ssect) ssect.style.display = secOk ? '' : 'none';
+    }
+
+    // цели эффекта: поле решает, какие карточки вообще могут его принять
+    function targetsFor(field) {
+      return own ? effectTargetCards(field) : [];
+    }
+
+    // v115: щит — только у расходников (разовая выдача запаса)
+    function fieldIdsFor() {
+      const out = FIELD_IDS.slice();
+      if (draft.category === 'consumable') out.push('shield');
+      return out;
+    }
+
+    function fxRowHTML(ef, i) {
+      const modes = effectModesFor(ef.field);
+      const mode = modes.indexOf(ef.mode) !== -1 ? ef.mode : modes[0];
+      const block = mode === 'block';
+      const timed = mode === 'tick';
+      // v121: у adv/dis значение — число бросков; у снаряжения оно не нужно —
+      // пока надето, действует всегда. Длительность adv/dis тоже не нужна.
+      const usesFlag = mode === 'adv' || mode === 'dis';
+      const flag = block || (usesFlag && draft.category !== 'consumable');
+      const fieldOpts = fieldIdsFor();
+      // эффект со «старым» полем не теряем: показываем его отдельным пунктом
+      if (fieldOpts.indexOf(ef.field) === -1) fieldOpts.push(ef.field);
+      // v114: длительность нужна только расходникам (временный эффект);
+      // у снаряжения тик работает, пока надето, и ему важно только «когда».
+      // Ячейка есть всегда, чтобы колонки не съезжали.
+      const showDur = draft.category === 'consumable' && !usesFlag;
+      const durCell = '<label class="pkfx-cell"><span>' + esc(App.t(showDur || usesFlag ? 'fxDuration' : 'fxTiming')) + '</span><span class="fx-dur">' +
+          (showDur ? '<input data-ifx="duration" type="number" min="0" max="999" step="1" inputmode="numeric" value="' + esc(ef.duration == null ? '' : ef.duration) + '" placeholder="—">' : '') +
+          (timed ? '<select data-ifx="timing" aria-label="' + esc(App.t('fxTiming')) + '">' +
+            '<option value="start"' + ((ef.timing || 'start') !== 'end' ? ' selected' : '') + '>' + esc(App.t('fxTimingStart')) + '</option>' +
+            '<option value="end"' + (ef.timing === 'end' ? ' selected' : '') + '>' + esc(App.t('fxTimingEnd')) + '</option>' +
+          '</select>' : '') +
+          ((usesFlag || (!showDur && !timed)) ? '<span class="fx-dash">—</span>' : '') +
+        '</span></label>';
+      // v111: цель есть у любого эффекта своей вещи, включая разовый «текущий»
+      const targetCell = own
+        ? '<label class="pkfx-cell"><span>' + esc(App.t('itemTarget')) + '</span><select data-ifx="target">' +
+            '<option value="">' + esc(App.t('fxNoTargetPick')) + '</option>' +
+            targetsFor(ef.field).map(function (c) {
+              return '<option value="' + esc(c.id) + '"' + (ef.target === c.id ? ' selected' : '') + '>' + esc(c.name) + '</option>';
+            }).join('') + '</select></label>'
+        : '';
+      return '<div class="pk-fx-row' + (own ? ' own' : '') + '" data-i="' + i + '">' +
+        '<label class="pkfx-cell"><span>' + esc(App.t('fxWhat')) + '</span><select data-ifx="field">' +
+          fieldOpts.map(function (f) {
+            return '<option value="' + f + '"' + (f === ef.field ? ' selected' : '') + '>' + esc(fxFieldText(f)) + '</option>';
+          }).join('') + '</select></label>' +
+        '<label class="pkfx-cell"><span>' + esc(App.t('fxHow')) + '</span><select data-ifx="mode">' +
+          modes.map(function (m) {
+            return '<option value="' + m + '"' + (m === mode ? ' selected' : '') + '>' + esc(fxModeShort(m)) + '</option>';
+          }).join('') + '</select></label>' +
+        '<label class="pkfx-cell"><span>' + esc(App.t('fxValue')) + '</span><input data-ifx="value" type="text" autocomplete="off" spellcheck="false" value="' + esc(flag ? '' : ef.value) + '" placeholder="' + esc(flag ? '—' : App.t(FX_MODE_PH[mode] || 'fxPhAdd')) + '"' + (flag ? ' disabled' : '') + '></label>' +
+        durCell +
+        '<label class="pkfx-cell"><span>' + esc(App.t('fxLabelField')) + '</span><input data-ifx="label" type="text" autocomplete="off" spellcheck="false" value="' + esc(ef.label || '') + '" placeholder="' + esc(App.t('fxLabelPh')) + '"></label>' +
+        targetCell +
+        '<button type="button" data-ifx-del="' + i + '">' + TRASH_SVG + '</button>' +
+        '</div>';
+    }
+
+    function fxListHTML(arr) {
+      return arr.length ? arr.map(fxRowHTML).join('') : '<div class="set-empty">' + esc(App.t('itemNoEffects')) + '</div>';
+    }
+
+    function renderFx() {
+      const host = el('if-fx-list');
+      if (host) host.innerHTML = fxListHTML(fx);
+      const secHost = el('if-sec-fx-list');
+      if (secHost) secHost.innerHTML = fxListHTML(secFx);
+      const hint = el('if-fx-hint');
+      if (hint) {
+        hint.textContent = own
+          ? (draft.category === 'equipment' ? App.t('itemFxEquippedHint') : '')
+          : App.t('itemTargetInGame');
+      }
+    }
+
+    function renderIcons() {
+      const host = el('if-icons');
+      if (!host) return;
+      host.innerHTML = itemIconsFor(draft.category).map(function (ic) {
+        return '<button type="button" class="item-icon' + (ic.id === draft.icon ? ' on' : '') + '" data-if-icon="' + ic.id + '">' + ic.ch + '</button>';
+      }).join('');
+    }
+
+    // у своей вещи — количество и «надето» (снаряжение); цели живут в эффектах
+    function ownExtraHTML() {
+      let h = '<div class="fx-pair">' +
+        '<div class="field"><label>' + esc(App.t('itemQty')) + '</label>' +
+          '<input id="if-qty" type="number" min="1" value="' + esc(draft.qty || 1) + '"></div>';
+      if (draft.category === 'equipment') {
+        h += '<div class="field"><label>&nbsp;</label><label class="check"><input type="checkbox" id="if-equipped"' +
+          (draft.equipped ? ' checked' : '') + '> ' + esc(App.t('itemEquip')) + '</label></div>';
+      }
+      return h + '</div>';
+    }
+    function renderOwnExtra() {
+      const host = el('if-own-extra');
+      if (!host) return;
+      const qtyEl = el('if-qty');
+      const qty = qtyEl ? qtyEl.value : null;
+      host.innerHTML = ownExtraHTML();
+      const nextQty = el('if-qty');
+      if (nextQty && qty != null) nextQty.value = qty;
+    }
+
+    function exportEffect(ef) {
+      const out = normalizeEffect(ef);
+      if (out.mode === 'block') out.value = '';
+      // v114: длительность — только если задана; «когда» нужно только тику
+      const dur = num(out.duration);
+      out.duration = dur > 0 ? dur : null;
+      if (out.mode !== 'tick') delete out.timing;
+      if (!own) out.target = null;
+      return out;
+    }
+
+    // единый сборщик: «Сохранить» и «Сохранить в набор» берут одно и то же
+    function collect() {
+      const name = val('if-name').trim();
+      if (!name) { toast(App.t('packNameNeeded')); return null; }
+      const cat = val('if-cat');
+      const w = val('if-weight').trim();
+      const out = {
+        name: name,
+        category: cat,
+        icon: itemIconId(draft.icon, cat),
+        weight: w === '' ? null : num(w),
+        price: val('if-price').trim(),
+        damage: val('if-dmg').trim(),
+        description: val('if-desc').trim(),
+        // v112: у «Прочего» эффектов нет — чистим при сохранении
+        effects: fxAllowedFor(cat) && chk('if-fx-on') ? fx.map(exportEffect) : [],
+        secret: null
+      };
+      if (chk('if-sec-on')) {
+        const sw = val('if-sec-weight').trim();
+        const secCat = val('if-sec-cat') || cat;
+        out.secret = {
+          text: val('if-sec-text').trim(),
+          name: val('if-sec-name').trim(),
+          category: val('if-sec-cat'),
+          damage: val('if-sec-dmg').trim(),
+          weight: sw === '' ? null : num(sw),
+          price: val('if-sec-price').trim(),
+          description: val('if-sec-desc').trim(),
+          // истинная часть без категории наследует базовую — «истинный прочий» без эффектов
+          effects: fxAllowedFor(secCat) && chk('if-secfx-on') ? secFx.map(exportEffect) : []
+        };
+      }
+      if (own) {
+        out.qty = Math.max(1, parseInt(val('if-qty'), 10) || 1);
+        out.equipped = cat === 'equipment' ? chk('if-equipped') : false;
+      }
+      return out;
+    }
+
+    const catOpts = ITEM_CATEGORIES.map(function (c) {
+      return '<option value="' + c.id + '"' + (c.id === draft.category ? ' selected' : '') + '>' + esc(App.t(c.labelKey)) + '</option>';
+    }).join('');
+    const secCatOpts = '<option value="">— ' + esc(App.t('packKeep')) + ' —</option>' + ITEM_CATEGORIES.map(function (c) {
+      return '<option value="' + c.id + '"' + (draft.secret && draft.secret.category === c.id ? ' selected' : '') + '>' + esc(App.t(c.labelKey)) + '</option>';
+    }).join('');
+    const sec = draft.secret || {};
+    const packOpts = packs.map(function (p) {
+      return '<option value="' + esc(p.id) + '">' + esc(p.name || App.t('packDefaultName')) + '</option>';
+    }).join('');
+
+    const body =
+      (own ? '<button type="button" class="modal-icon-btn" id="if-del" title="' + esc(App.t('delete')) + '" aria-label="' + esc(App.t('delete')) + '">' + TRASH_SVG + '</button>' : '') +
+      '<div class="field"><label>' + esc(App.t('name')) + '</label><input id="if-name" value="' + esc(draft.name) + '"></div>' +
+      '<div class="fx-pair">' +
+        '<div class="field"><label>' + esc(App.t('itemCategory')) + '</label><select id="if-cat">' + catOpts + '</select></div>' +
+        '<div class="field"><label>' + esc(App.t('weight')) + '</label><input id="if-weight" value="' + esc(draft.weight == null ? '' : draft.weight) + '" placeholder="—"></div>' +
+      '</div>' +
+      '<div class="field"><label>' + esc(App.t('itemIcon')) + '</label><div id="if-icons" class="item-icon-grid"></div></div>' +
+      '<div class="fx-pair">' +
+        '<div class="field"><label>' + esc(App.t('itemPrice')) + '</label><input id="if-price" value="' + esc(draft.price || '') + '"></div>' +
+        '<div class="field"><label>' + esc(App.t('itemDamage')) + '</label><input id="if-dmg" value="' + esc(draft.damage || '') + '" placeholder="2d8+1"></div>' +
+      '</div>' +
+      '<div class="field"><label>' + esc(App.t('description')) + '</label><textarea id="if-desc">' + esc(draft.description || '') + '</textarea></div>' +
+      (own ? '<div id="if-own-extra"></div>' : '') +
+      '<div class="sect" id="if-fx-sect"><label class="check"><input type="checkbox" id="if-fx-on"' + (fx.length ? ' checked' : '') + '> ' + esc(App.t('itemHasEffects')) + '</label>' +
+        '<div id="if-fx-wrap" style="margin-top:8px' + (fx.length ? '' : ';display:none') + '">' +
+          '<div id="if-fx-list" class="pk-fx-list"></div>' +
+          '<div class="fx-add-row"><button type="button" id="if-fx-add" class="add-btn">+ ' + esc(App.t('fxAdd')) + '</button>' +
+          '<span class="formula-help" id="if-fx-hint"></span></div>' +
+        '</div></div>' +
+      '<div class="sect"><label class="check"><input type="checkbox" id="if-sec-on"' + (draft.secret ? ' checked' : '') + '> ' + esc(App.t('itemTrueItem')) + '</label>' +
+        '<div id="if-sec-wrap" style="margin-top:8px' + (draft.secret ? '' : ';display:none') + '">' +
+          '<div class="field"><label>' + esc(App.t('itemSecretText')) + '</label><input id="if-sec-text" value="' + esc(sec.text || '') + '"></div>' +
+          '<div class="fx-pair">' +
+            '<div class="field"><label>' + esc(App.t('itemSecretName')) + '</label><input id="if-sec-name" value="' + esc(sec.name || '') + '"></div>' +
+            '<div class="field"><label>' + esc(App.t('itemSecretCategory')) + '</label><select id="if-sec-cat">' + secCatOpts + '</select></div>' +
+          '</div>' +
+          '<div class="fx-pair">' +
+            '<div class="field"><label>' + esc(App.t('itemSecretDamage')) + '</label><input id="if-sec-dmg" value="' + esc(sec.damage || '') + '"></div>' +
+            '<div class="field"><label>' + esc(App.t('itemSecretWeight')) + '</label><input id="if-sec-weight" value="' + esc(sec.weight != null ? sec.weight : '') + '"></div>' +
+          '</div>' +
+          '<div class="field"><label>' + esc(App.t('itemSecretPrice')) + '</label><input id="if-sec-price" value="' + esc(sec.price || '') + '"></div>' +
+          '<div class="field"><label>' + esc(App.t('itemSecretDesc')) + '</label><textarea id="if-sec-desc">' + esc(sec.description || '') + '</textarea></div>' +
+          '<div class="sect" id="if-secfx-sect" style="margin-top:8px"><label class="check"><input type="checkbox" id="if-secfx-on"' + (secFx.length ? ' checked' : '') + '> ' + esc(App.t('itemHasTrueEffects')) + '</label>' +
+            '<div id="if-secfx-wrap" style="margin-top:8px' + (secFx.length ? '' : ';display:none') + '">' +
+              '<div id="if-sec-fx-list" class="pk-fx-list"></div>' +
+              '<div class="fx-add-row"><button type="button" id="if-sec-fx-add" class="add-btn">+ ' + esc(App.t('fxAdd')) + '</button>' +
+              '<span class="formula-help">' + esc(App.t('itemTargetInGame')) + '</span></div>' +
+            '</div></div>' +
+        '</div></div>' +
+      (own && packs.length ? '<div class="field" style="margin-top:10px"><label>' + esc(App.t('itemSaveToPack')) + '</label>' +
+        '<div class="fx-add-row" style="margin-top:0"><select id="if-pack">' + packOpts + '</select>' +
+        '<button type="button" id="if-to-pack" class="add-btn">' + esc(App.t('itemSaveToPack')) + '</button></div></div>' : '');
+
+    openModal(cfg.title, body, [
+      { label: App.t('cancel'), onClick: function () { if (cfg.onCancel) return cfg.onCancel(); } },
+      { label: App.t('save'), cls: 'primary', onClick: function () {
+        const out = collect();
+        if (!out) return false;
+        return cfg.onSave(out) === false ? false : undefined;
+      } }
+    ]);
+
+    renderFx();
+    renderIcons();
+    renderOwnExtra();
+    updateFxAvailability();
+
+    el('if-cat').addEventListener('change', function (e) {
+      draft.category = e.target.value;
+      draft.icon = itemIconId(draft.icon, draft.category);
+      renderIcons();
+      renderOwnExtra();
+      renderFx();
+      updateFxAvailability();
+    });
+    el('if-icons').addEventListener('click', function (e) {
+      const b = e.target.closest('[data-if-icon]');
+      if (!b) return;
+      draft.icon = b.dataset.ifIcon;
+      renderIcons();
+    });
+    el('if-fx-on').addEventListener('change', function (e) {
+      el('if-fx-wrap').style.display = e.target.checked ? '' : 'none';
+    });
+    el('if-sec-on').addEventListener('change', function (e) {
+      el('if-sec-wrap').style.display = e.target.checked ? '' : 'none';
+      updateFxAvailability();
+    });
+    el('if-secfx-on').addEventListener('change', function (e) {
+      el('if-secfx-wrap').style.display = e.target.checked ? '' : 'none';
+    });
+    el('if-sec-cat').addEventListener('change', updateFxAvailability);
+
+    function bindFxList(listId, arr) {
+      const host = el(listId);
+      if (!host) return;
+      host.addEventListener('change', function (e) {
+        const sel = e.target.closest('[data-ifx]');
+        if (!sel) return;
+        const rowEl = sel.closest('[data-i]');
+        const i = +rowEl.dataset.i;
+        const item = arr[i];
+        if (!item) return;
+        // пустой пункт цели — это «без цели», а не пустая строка в данных
+        item[sel.dataset.ifx] = (sel.dataset.ifx === 'target' && sel.value === '') ? null : sel.value;
+        if (sel.dataset.ifx === 'field') {
+          const modes = effectModesFor(item.field);
+          if (modes.indexOf(item.mode) === -1) item.mode = modes[0];
+          // цель, несовместимая с новым полем, сбрасывается — иначе эффект молча не сработает
+          if (own && item.target && !targetsFor(item.field).some(function (c) { return c.id === item.target; })) item.target = null;
+          renderFx();
+        } else if (sel.dataset.ifx === 'mode') {
+          if (sel.value === 'block') item.field = 'charges';
+          if (sel.value === 'tick') { item.field = 'current'; item.timing = item.timing || 'start'; }
+          // v121: преимущество/помеха — число бросков, по умолчанию 1
+          if ((sel.value === 'adv' || sel.value === 'dis') && !String(item.value == null ? '' : item.value).trim()) item.value = '1';
+          renderFx();
+        }
+      });
+      host.addEventListener('input', function (e) {
+        const inp = e.target.closest('[data-ifx]');
+        if (!inp) return;
+        const rowEl = inp.closest('[data-i]');
+        const i = +rowEl.dataset.i;
+        const item = arr[i];
+        if (!item) return;
+        if (inp.dataset.ifx === 'value' || inp.dataset.ifx === 'label' || inp.dataset.ifx === 'duration') item[inp.dataset.ifx] = inp.value;
+      });
+      host.addEventListener('click', function (e) {
+        const del = e.target.closest('[data-ifx-del]');
+        if (!del) return;
+        arr.splice(+del.dataset.ifxDel, 1);
+        renderFx();
+      });
+    }
+    bindFxList('if-fx-list', fx);
+    bindFxList('if-sec-fx-list', secFx);
+
+    el('if-fx-add').addEventListener('click', function () {
+      fx.push({ mode: 'add', field: draft.category === 'consumable' ? 'current' : 'bonus', value: '', label: '', target: null, duration: '', timing: 'start' });
+      renderFx();
+    });
+    el('if-sec-fx-add').addEventListener('click', function () {
+      secFx.push({ mode: 'add', field: draft.category === 'consumable' ? 'current' : 'bonus', value: '', label: '', target: null, duration: '', timing: 'start' });
+      renderFx();
+    });
+
+    const ownHost = el('if-own-extra');
+    if (ownHost) {
+      ownHost.addEventListener('input', function (e) {
+        if (e.target.id === 'if-qty') draft.qty = Math.max(1, parseInt(e.target.value, 10) || 1);
+      });
+      ownHost.addEventListener('change', function (e) {
+        if (e.target.id === 'if-equipped') draft.equipped = !!e.target.checked;
+      });
+    }
+
+    const delBtn = el('if-del');
+    if (delBtn) delBtn.addEventListener('click', function () {
+      askDelete({
+        text: App.tf('itemDeleteConfirm', { name: val('if-name').trim() || draft.name }),
+        anchor: delBtn,
+        onYes: function () { cfg.onDelete(); }
+      });
+    });
+    const toPackBtn = el('if-to-pack');
+    if (toPackBtn) toPackBtn.addEventListener('click', function () {
+      const out = collect();
+      if (out) cfg.onSaveToPack(val('if-pack'), out);
+    });
+  }
+
+  // v108: предмет набора — та же форма, но без количества/«надето»/цели
+  // и с записью в отдельный ключ наборов, а не в состояние листа.
+  function openPackItemEditor(packId, itemId) {
+    const pack = packById(packId);
+    if (!pack) return;
+    const existing = itemId ? (pack.items || []).find(function (it) { return it.id === itemId; }) : null;
+    const draft = normalizePackItem(existing || {
+      id: uid(), name: App.t('packItemNew'), category: 'misc', weight: null,
+      damage: '', price: '', description: '', secret: null, effects: []
+    });
+    openItemForm({
+      mode: 'pack',
+      title: existing ? App.t('packItemEdit') : App.t('packItemNew'),
+      draft: draft,
+      onCancel: function () { openSettings('items'); return false; },
+      onSave: function (out) {
+        const next = normalizePackItem(Object.assign({}, draft, out, { id: draft.id }));
+        if (existing) {
+          const idx = pack.items.findIndex(function (it) { return it.id === existing.id; });
+          if (idx !== -1) pack.items[idx] = next;
+        } else {
+          pack.items.push(next);
+        }
+        savePacks();
+        openSettings('items');
+        return false;
+      }
     });
   }
 
@@ -5712,6 +7995,7 @@ window.App = window.App || {};
           if (!name) { toast(App.t('setNameNeeded')); return false; }
           if (name === setDisplayName(set)) { openSettings(kind); return false; }
           mutate(function () { set.name = name; delete set.nameKey; });
+          toast(App.tf('renamedGeneric', { name: name }));
           openSettings(kind);
           return false;
         } }
@@ -5726,7 +8010,7 @@ window.App = window.App || {};
   function stateModesFor(field) {
     if (field === 'current') return ['tick'];
     const out = ['add', 'mul', 'set', 'cap'];
-    if (field === 'bonus') out.push('dice');
+    if (field === 'bonus') out.push('dice', 'adv', 'dis');
     if (field === 'charges') out.push('block');
     return out;
   }
@@ -5779,6 +8063,7 @@ window.App = window.App || {};
       const modes = stateModesFor(field);
       const mode = modes.indexOf(data.mode) !== -1 ? data.mode : modes[0];
       const block = mode === 'block';
+      const flag = block;   // значение не нужно только запрету
       const tick = mode === 'tick';
       const fieldOpts = STATE_FIELDS.map(function (f) {
         return '<option value="' + f + '"' + (f === field ? ' selected' : '') + '>' + esc(fxFieldText(f)) + '</option>';
@@ -5796,7 +8081,7 @@ window.App = window.App || {};
           '<option value="start"' + ((data.timing || 'start') === 'start' ? ' selected' : '') + '>' + esc(App.t('fxTimingStart')) + '</option>' +
           '<option value="end"' + (data.timing === 'end' ? ' selected' : '') + '>' + esc(App.t('fxTimingEnd')) + '</option>' +
         '</select></div>' +
-        '<div class="field"><label>' + esc(App.t('fxValue')) + '</label><input data-f-value type="text" autocomplete="off" spellcheck="false" value="' + esc(block ? '' : (data.value || '')) + '" placeholder="' + esc(fxPlaceholder(mode)) + '"' + (block ? ' disabled' : '') + '></div>' +
+        '<div class="field"><label>' + esc(App.t('fxValue')) + '</label><input data-f-value type="text" autocomplete="off" spellcheck="false" value="' + esc(flag ? '' : (data.value || '')) + '" placeholder="' + esc(fxPlaceholder(mode)) + '"' + (flag ? ' disabled' : '') + '></div>' +
         '<div class="field"><label>' + esc(App.t('fxLabelField')) + '</label><input data-f-label type="text" autocomplete="off" spellcheck="false" value="' + esc(data.label || '') + '" placeholder="' + esc(App.t('fxLabelPh')) + '"></div>' +
         '<div class="st-fx-actions">' +
           '<button type="button" data-f-cancel>' + esc(App.t('cancel')) + '</button>' +
@@ -5834,6 +8119,8 @@ window.App = window.App || {};
       v.disabled = block;
       v.placeholder = fxPlaceholder(mode);
       if (block) v.value = '';
+      // v121: преимущество/помеха — число бросков, по умолчанию 1
+      if (!block && (mode === 'adv' || mode === 'dis') && !String(v.value).trim()) v.value = '1';
       const tw = form.querySelector('[data-f-timing-wrap]');
       if (tw) tw.hidden = !tick;
     }
@@ -6067,7 +8354,7 @@ window.App = window.App || {};
       '<div class="s-tabs">' +
         '<button type="button" class="s-tab active" data-tab="general">' + esc(App.t('tabGeneral')) + '</button>' +
         '<button type="button" class="s-tab" data-tab="states">' + esc(App.t('tabStates')) + '</button>' +
-        '<button type="button" class="s-tab" data-tab="items">' + esc(App.t('tabItems')) + '</button>' +
+        '<button type="button" class="s-tab" data-tab="items">' + esc(App.t('tabPacks')) + '</button>' +
         '<button type="button" class="s-tab" data-tab="data">' + esc(App.t('tabData')) + '</button>' +
       '</div>';
 
@@ -6092,8 +8379,6 @@ window.App = window.App || {};
           (ch ? '<button type="button" id="s-renchar">✎ ' + esc(App.t('renameCharacter')) + '</button>' : '') +
           (ch ? '<button type="button" class="danger" id="s-delchar">' + esc(App.t('deleteCharacter')) + '</button>' : '') +
         '</div></div>' +
-        (ch ? '<div class="field"><label>' + esc(App.t('setStatesLabel')) + '</label><select id="s-stateset">' + setOpts('states') + '</select></div>' : '') +
-        (ch ? '<div class="field"><label>' + esc(App.t('setItemsLabel')) + '</label><select id="s-itemset">' + setOpts('items') + '</select></div>' : '') +
       '</div>';
 
     const dataPanel =
@@ -6108,7 +8393,7 @@ window.App = window.App || {};
         '<div class="field"><button type="button" class="danger" id="s-reset">' + esc(App.t('resetData')) + '</button></div>' +
       '</div>';
 
-    openModal(App.t('settings'), tabs + general + settingsSetPanel('states', ch) + settingsSetPanel('items', ch) + dataPanel,
+    openModal(App.t('settings'), tabs + general + settingsSetPanel('states', ch) + settingsPacksPanel(ch) + dataPanel,
       [{ label: App.t('close'), cls: 'primary' }]);
     document.getElementById('modal').classList.add('settings-modal');
 
@@ -6125,14 +8410,16 @@ window.App = window.App || {};
       if (tb) tb.click();
     }
 
-    document.getElementById('s-lang').addEventListener('change', function (e) { state.settings.language = e.target.value; save(); render(); });
+    document.getElementById('s-lang').addEventListener('change', function (e) {
+      state.settings.language = e.target.value;
+      commit();
+    });
     document.getElementById('s-anim').addEventListener('change', function (e) { state.settings.diceAnimation = e.target.checked; save(); });
     document.getElementById('s-crit').addEventListener('change', function (e) { state.settings.critSuccess = e.target.value.trim(); save(); });
     document.getElementById('s-critfail').addEventListener('change', function (e) { state.settings.critFail = e.target.value.trim(); save(); });
     document.getElementById('s-char').addEventListener('change', function (e) {
       state.activeCharacterId = e.target.value;
-      save();
-      render();
+      commit();
       // v84: пересобрать настройки, иначе вкладка «Состояния» и выбор набора
       // остаются от предыдущего персонажа до повторного открытия меню.
       openSettings('general');
@@ -6140,13 +8427,8 @@ window.App = window.App || {};
     const stSel = document.getElementById('s-stateset');
     if (stSel) stSel.addEventListener('change', function (e) {
       setCharSet(state.activeCharacterId, 'states', e.target.value);
-      // перерисовываем настройки, иначе на вкладке «Состояния» остаётся старая плашка «Выбрано»
-      openSettings('general');
-    });
-    const itSel = document.getElementById('s-itemset');
-    if (itSel) itSel.addEventListener('change', function (e) {
-      setCharSet(state.activeCharacterId, 'items', e.target.value);
-      openSettings('general');
+      // остаёмся во вкладке состояний — выбор набора теперь живёт здесь
+      openSettings('states');
     });
     document.getElementById('s-newchar').addEventListener('click', function () {
       closeModal();
@@ -6154,7 +8436,7 @@ window.App = window.App || {};
     });
     if (ch) document.getElementById('s-delchar').addEventListener('click', function () {
       closeModal();
-      confirmDialog(App.tf('confirmDeleteChar', { name: ch.name }), deleteActiveCharacter, App.t('deleteCharacter'));
+      askDelete({ text: App.tf('confirmDeleteChar', { name: ch.name }), onYes: deleteActiveCharacter, title: App.t('deleteCharacter') });
     });
     if (ch) document.getElementById('s-renchar').addEventListener('click', function () {
       closeModal();
@@ -6166,7 +8448,7 @@ window.App = window.App || {};
     document.getElementById('s-impall').addEventListener('click', function () { pickFile(importAll); });
     document.getElementById('s-reset').addEventListener('click', function () {
       closeModal();
-      confirmDialog(App.t('resetConfirm'), function () { localStorage.removeItem(STORAGE_KEY); location.reload(); }, App.t('settings'));
+      confirmDialog(App.t('resetConfirm'), function () { localStorage.removeItem(STORAGE_KEY); localStorage.removeItem(PACKS_KEY); location.reload(); }, App.t('settings'));
     });
 
     const impStates = document.getElementById('s-set-import');
@@ -6218,6 +8500,36 @@ window.App = window.App || {};
         deleteStateFromSet(b.dataset.setId, b.dataset.delState, b);
       });
     });
+
+    // v94: паки предметов
+    const packAdd = document.getElementById('s-pack-add');
+    if (packAdd) packAdd.addEventListener('click', function () { openPackNameModal(null); });
+    const packImport = document.getElementById('s-pack-import');
+    if (packImport) packImport.addEventListener('click', function () { pickFile(importPack); });
+    m.querySelectorAll('[data-add-pack-item]').forEach(function (b) {
+      b.addEventListener('click', function (e) { e.stopPropagation(); openPackItemEditor(b.dataset.addPackItem, null); });
+    });
+    m.querySelectorAll('[data-edit-pack-item]').forEach(function (row) {
+      row.addEventListener('click', function () { openPackItemEditor(row.dataset.packId, row.dataset.editPackItem); });
+    });
+    m.querySelectorAll('[data-del-pack-item]').forEach(function (b) {
+      b.addEventListener('click', function (e) {
+        e.stopPropagation();
+        deletePackItem(b.dataset.packId, b.dataset.delPackItem, b);
+      });
+    });
+    m.querySelectorAll('[data-rename-pack]').forEach(function (b) {
+      b.addEventListener('click', function (e) { e.stopPropagation(); renamePackInline(b.dataset.renamePack, b); });
+    });
+    m.querySelectorAll('[data-del-pack]').forEach(function (b) {
+      b.addEventListener('click', function (e) { e.stopPropagation(); deletePack(b.dataset.delPack, b); });
+    });
+    m.querySelectorAll('[data-export-pack]').forEach(function (b) {
+      b.addEventListener('click', function (e) { e.stopPropagation(); exportPack(b.dataset.exportPack); });
+    });
+    m.querySelectorAll('[data-pack-chars]').forEach(function (b) {
+      b.addEventListener('click', function (e) { e.stopPropagation(); openPackCharsMenu(b.dataset.packChars, b); });
+    });
   }
 
   // Привязать персонажа к набору (массив ссылок — задел на уровень 3)
@@ -6225,9 +8537,7 @@ window.App = window.App || {};
     const ch = state.characters.find(function (c) { return c.id === charId; });
     if (!ch || !libSetById(kind, setId)) return;
     const key = kind === 'states' ? 'stateSets' : 'itemSets';
-    ch[key] = [setId];
-    save();
-    render();
+    mutate(function () { ch[key] = [setId]; });
   }
 
   // Всплывающий вопрос «Да / Нет» рядом с кнопкой — вместо отдельного окна
@@ -6247,7 +8557,10 @@ window.App = window.App || {};
     closeInlineAsk();
   }
   function onAskKey(e) {
-    if (e.key === 'Escape') closeInlineAsk();
+    if (e.key !== 'Escape') return;
+    e.preventDefault();
+    e.stopPropagation();
+    closeInlineAsk();
   }
   function askInline(anchor, text, onYes) {
     closeInlineAsk();
@@ -6275,10 +8588,10 @@ window.App = window.App || {};
       closeInlineAsk();
       if (yes) onYes();
     });
-    setTimeout(function () {
-      document.addEventListener('pointerdown', onAskDocDown, true);
-      window.addEventListener('keydown', onAskKey, true);
-    }, 0);
+    // Слушатели ставим сразу: событие, которым открыли вопрос, уже не всплывёт
+    // повторно, а setTimeout(0) мог добавить их уже после закрытия.
+    document.addEventListener('pointerdown', onAskDocDown, true);
+    window.addEventListener('keydown', onAskKey, true);
   }
 
   // Удалить набор (только свой, не базовый). Ничего никуда не переносим:
@@ -6289,19 +8602,20 @@ window.App = window.App || {};
     const used = state.characters.filter(function (c) { return charSetId(c, kind) === id; }).length;
     const nm = setDisplayName(set);
     const msg = used ? App.tf('setDeleteUsed', { name: nm, n: used }) : App.tf('setDeleteConfirm', { name: nm });
-    askInline(anchor, msg, function () {
-      state.libraries[kind] = libSets(kind).filter(function (s) { return s.id !== id; });
-      const key = kind === 'states' ? 'stateSets' : 'itemSets';
-      const fallback = libSets(kind).find(function (s) { return s.builtin; }) || libSets(kind)[0];
-      state.characters.forEach(function (ch) {
-        if (Array.isArray(ch[key])) ch[key] = ch[key].filter(function (x) { return x !== id; });
-        // явно переводим на базовый набор, а не оставляем пустой массив
-        if ((!ch[key] || !ch[key].length) && fallback) ch[key] = [fallback.id];
+    askDelete({ text: msg, anchor: anchor, onYes: function () {
+      mutate(function () {
+        state.libraries[kind] = libSets(kind).filter(function (s) { return s.id !== id; });
+        const key = kind === 'states' ? 'stateSets' : 'itemSets';
+        const fallback = libSets(kind).find(function (s) { return s.builtin; }) || libSets(kind)[0];
+        state.characters.forEach(function (ch) {
+          if (Array.isArray(ch[key])) ch[key] = ch[key].filter(function (x) { return x !== id; });
+          // явно переводим на базовый набор, а не оставляем пустой массив
+          if ((!ch[key] || !ch[key].length) && fallback) ch[key] = [fallback.id];
+        });
       });
-      save();
-      render();
+      toast(App.tf('deletedGeneric', { name: nm }));
       openSettings(kind);
-    });
+    } });
   }
 
   function exportLibrarySet(kind, setId) {
@@ -6528,12 +8842,18 @@ window.App = window.App || {};
       state.characters = fresh;
       fresh.forEach(layoutCharacter);
       if (data.settings && typeof data.settings === 'object') state.settings = Object.assign(state.settings, data.settings);
+      if (Array.isArray(data.packs)) {
+        packsStore = { version: 1, seeded: true, packs: data.packs.map(function (p) {
+          return { id: String(p.id || uid()), name: String(p.name || App.t('packDefaultName')), items: Array.isArray(p.items) ? p.items.map(normalizePackItem) : [] };
+        }) };
+        savePacks();
+      }
       state.activeCharacterId = fresh.length ? fresh[0].id : null;
     });
     toast(App.t('imported'));
   }
   function exportAll() {
-    download('custplay-backup.json', JSON.stringify({ app: 'custplay', kind: 'backup', version: 1, characters: state.characters.map(stripTransient), settings: state.settings }, null, 2));
+    download('custplay-backup.json', JSON.stringify({ app: 'custplay', kind: 'backup', version: 1, characters: state.characters.map(stripTransient), settings: state.settings, packs: packsList() }, null, 2));
     toast(App.t('exported'));
   }
 
@@ -6543,6 +8863,8 @@ window.App = window.App || {};
   function normalizeImport(src) {
     if (!src || typeof src !== 'object' || !Array.isArray(src.cards)) throw new Error('bad');
     const ch = { id: uid(), name: String(src.name || App.t('newCharName')), pages: [], cards: [] };
+    if (src.packs && typeof src.packs === 'object') ch.packs = src.packs;
+    if (src.itemSets) ch.itemSets = src.itemSets;
     if (Array.isArray(src.pages)) {
       src.pages.forEach(function (p) {
         if (p && typeof p === 'object' && typeof p.id === 'string') {
@@ -6570,6 +8892,8 @@ window.App = window.App || {};
       }
       ch.cards.push(c);
     });
+    // v115: старые «переполнения» и щит приводим к новой модели и при импорте
+    migrateShields({ characters: [ch] });
     return ch;
   }
 
@@ -6907,8 +9231,78 @@ window.App = window.App || {};
     });
   }
 
+  // ===== Что нового (v139) =====
+  // Версия приложения для окна обновлений. При выпуске новой версии подними
+  // APP_VERSION, добавь запись в NEWS (только новые пункты) и не забудь
+  // style.css?v= в index.html и CACHE_NAME в sw.js.
+  const APP_VERSION = 139;
+  const NEWS_SEEN_KEY = 'custplay-news-seen';   // отдельно от state: не попадает в undo и экспорт
+  const NEWS = {
+    139: {
+      ru: [
+        'Инвентарь: наборы предметов, свои вещи и предметы из наборов — количество, вес, цена, урон, «Надеть» и «Использовать», поиск и категории. Своя вещь правится прямо в игре и обновляется из набора.',
+        'Эффекты предметов: меняют выбранную карточку — значение, длительность, тики. Преимущество и помеха тоже задаются эффектом предмета — числом бросков. Активные эффекты видны полосой в шапке инвентаря, на свёрнутом ярлыке — счётчиком.',
+        'Щиты: запас, который принимает урон первым. Бывает постоянным и временным, с ходами; лечение щит не трогает, «Отдых» снимает.',
+        'Состояния и баффы: эффекты меняют другие карточки (максимум, бонус, заряды), у состояний и баффов есть длительность и тики. Бафф включается тапом, эффектов у него может быть несколько.',
+        'Телефон: плиточная сетка — инициатива занимает два ряда, состояние три, рядом с ними встают обычные карточки. Навык — компактный квадрат, валюта больше не вылезает за край.'
+      ],
+      en: [
+        'Inventory: item packs, your own items and pack items — quantity, weight, price, damage, Equip and Use, search and categories. Your item is edited right in play and refreshed from its pack.',
+        'Item effects: they change a chosen card — value, duration, ticks. Advantage and disadvantage are set as an item effect too — by the number of rolls. Active effects show in the inventory header; a collapsed label shows a counter.',
+        'Shields: a pool that takes damage first. It can be permanent or temporary, with rounds; healing does not touch it, Rest clears it.',
+        'Conditions and buffs: effects change other cards (max, bonus, charges); conditions and buffs have a duration and ticks. A buff toggles on tap and can hold several effects.',
+        'Phone: a tile grid — initiative takes two rows, a condition three, and regular cards fit beside them. The skill card is a compact square, currency no longer spills over the edge.'
+      ]
+    }
+  };
+  function newsSeenVersion() {
+    try { return Math.round(num(localStorage.getItem(NEWS_SEEN_KEY)) || 0); } catch (e) { return APP_VERSION; }
+  }
+  function markNewsSeen() {
+    try { localStorage.setItem(NEWS_SEEN_KEY, String(APP_VERSION)); } catch (e) {}
+  }
+  function clearNewsSeen() {
+    try { localStorage.removeItem(NEWS_SEEN_KEY); } catch (e) {}
+  }
+  // Пункты всех версий, которые пользователь ещё не отметил. У старой версии
+  // с GitHub отметки нет вовсе — ей показываем сразу весь накопленный список.
+  function newsItems() {
+    const lang = (state.settings && state.settings.language) === 'en' ? 'en' : 'ru';
+    const seen = newsSeenVersion();
+    let out = [];
+    Object.keys(NEWS).map(Number).sort(function (a, b) { return a - b; }).forEach(function (v) {
+      if (v <= seen) return;
+      out = out.concat(NEWS[v][lang] || NEWS[v].ru);
+    });
+    return out;
+  }
+  function maybeShowNews(hadSave) {
+    // первый запуск: сравнивать не с чем, окно не нужно
+    if (!hadSave) { markNewsSeen(); return; }
+    if (newsSeenVersion() >= APP_VERSION) return;
+    const items = newsItems();
+    if (!items.length) { markNewsSeen(); return; }
+    const modal = document.getElementById('modal');
+    if (modal && !modal.classList.contains('hidden')) return;   // не перебиваем уже открытое окно
+    setTimeout(function () { showNews(items); }, 600);
+  }
+  function showNews(items) {
+    openModal(App.t('newsTitle'),
+      '<ul class="news-list">' + items.map(function (s) { return '<li>' + esc(s) + '</li>'; }).join('') + '</ul>' +
+      '<label class="field check news-off"><input type="checkbox" id="news-off"><span>' + esc(App.t('newsDontShow')) + '</span></label>',
+      [{ label: App.t('newsOk'), cls: 'primary' }]);
+    // галочка действует до следующей версии: снял — окно снова появится при запуске
+    const cb = document.getElementById('news-off');
+    if (cb) cb.addEventListener('change', function () {
+      if (cb.checked) markNewsSeen(); else clearNewsSeen();
+    });
+  }
+
   function init() {
+    let hadSave = false;
+    try { hadSave = !!localStorage.getItem(STORAGE_KEY); } catch (e) {}
     ensureLibraries();
+    ensurePacks();
     migrateCondEntryIds();
     if (!state.characters.length) {
       newCharacter();   // стартовый персонаж с демо-карточками — тот же путь, что и «Новый персонаж»
@@ -6965,6 +9359,8 @@ window.App = window.App || {};
       const w = document.getElementById('diceWidget');
       if (w && !w.classList.contains('hidden')) applyDwPos(loadDwPos());
     });
+    // v139: «что нового» — после первой отрисовки, чтобы окно не мигало поверх загрузки
+    maybeShowNews(hadSave);
   }
 
   init();
