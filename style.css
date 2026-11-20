@@ -1152,9 +1152,10 @@ body.col-dragging .card { cursor: grabbing; }
   .card.type-currency,
   .card.type-buff { height: auto; min-height: var(--m-row); }
   /* заметка и инвентарь в одном ряду — одной высоты: тянутся друг к другу,
-     даже если строк у них разное количество (тело всё равно прокручивается) */
-  .card.type-note,
-  .card.type-inventory { height: auto; min-height: var(--m-row); align-self: stretch; }
+     даже если строк у них разное количество (тело всё равно прокручивается).
+     Только карточки холста: копия в слое ярлыка не должна тянуться на весь экран. */
+  .canvas > .card.type-note,
+  .canvas > .card.type-inventory { height: auto; min-height: var(--m-row); align-self: stretch; }
   /* нативный зум страницы выключен (жест отдан под масштаб листа):
      только вертикальная прокрутка, без пинч- и двойного тапа-зума */
   html, body { touch-action: pan-y; }
@@ -1934,8 +1935,10 @@ body.col-dragging .card { cursor: grabbing; }
   padding-right: 14px;
 }
 @media (max-width: 720px) {
-  /* на телефоне копия занимает ширину строки (как карточки в колоночном виде) */
-  .layer-card { max-width: 100%; max-height: 92vh; max-height: 92dvh; }
+  /* на телефоне копия занимает ширину строки (как карточки в колоночном виде);
+     высота — по содержимому, но не выше 92dvh. Правила сетки холста к копии
+     больше не применяются: иначе она растягивалась на весь экран. */
+  .layer-card { width: 100%; max-width: 100%; height: auto; max-height: 92vh; max-height: 92dvh; align-self: auto; }
   /* поле слоя уже: 18px по бокам отнимали у карточки 36px на узком экране */
   .label-layer { padding: 12px 10px; }
   /* запас снизу: значок «−−» свисает на 3px ниже последней строки и без запаса
@@ -2138,15 +2141,26 @@ body.col-dragging .card { cursor: grabbing; }
 @media (max-width: 720px) {
   .card.type-condition { padding: 8px 10px 6px; }
   .cond-stage { max-width: 100%; }
-  /* на телефоне колонки друг под другом: сверху кукла и активные, снизу каталог */
-  .cond-panel { width: calc(100vw - 16px); height: min(88vh, 760px); height: min(88dvh, 760px); padding: 10px; }
+  /* v140: на телефоне — компактная шапка (кукла + две кнопки в ряд) и список
+     активных во всю ширину. Панель чуть ниже, чтобы оставалось место для тапа
+     мимо неё; текущие состояния видны так же густо, как каталог. */
+  .cond-panel { width: calc(100vw - 16px); height: min(84vh, 720px); height: min(84dvh, 720px); padding: 10px; }
   /* v127: круглая кнопка сброса — палец должен попадать */
   .cond-reset-btn { width: 34px; height: 34px; }
-  .cond-grid { grid-template-columns: 1fr; grid-template-rows: minmax(0, 1fr) minmax(0, 1fr); gap: 10px; }
-  .cond-col-live { order: -1; }
+  .cond-grid { grid-template-columns: 1fr; grid-template-rows: minmax(0, 1.3fr) minmax(0, 1fr); gap: 10px; }
+  .cond-col-live {
+    order: -1; display: grid;
+    grid-template-columns: 92px minmax(0, 1fr);
+    grid-template-rows: auto minmax(0, 1fr);
+    gap: 6px 10px; align-content: start;
+  }
+  .cond-preview { grid-column: 1; grid-row: 1; max-width: 92px; margin: 0 auto; }
+  .cond-actions { grid-column: 2; grid-row: 1; flex-direction: row; align-self: center; gap: 6px; }
+  .cond-refresh, .cond-tick { flex: 1 1 0; min-height: 32px; padding: 4px 6px; font-size: 11px; }
+  .cond-list { grid-column: 1 / -1; grid-row: 2; }
+  .cond-row { padding: 4px 2px; }
+  .cond-row-desc { display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 1; overflow: hidden; }
   .cond-col-cat { border-right: 0; border-top: 1px solid var(--border); padding: 8px 0 0; }
-  .cond-preview { max-width: 124px; }
-  .cond-row { padding: 6px 4px; }
 }
 
 /* ---------- Настройки: вкладки и наборы (v71) ---------- */
