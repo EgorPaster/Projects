@@ -96,7 +96,7 @@ window.App = window.App || {};
       schemaVersion: 4,
       activeCharacterId: null,
       characters: [],
-      settings: { language: 'ru', critSuccess: '20', critFail: '1' },
+      settings: { language: 'ru', critSuccess: '20', critFail: '1', fillMaxCurrent: false },
       // v71: библиотеки наборов на устройстве (состояния и вещи).
       // Засеваются стандартными на старте — см. ensureLibraries()
       libraries: { states: [], items: [] },
@@ -197,6 +197,43 @@ window.App = window.App || {};
   function mutate(fn, skipUndo) {
     if (!skipUndo) pushUndo();
     fn();
+    commit();
+  }
+
+  // v146: настройка «Добавлять текущее при повышении максимума».
+  // Снимаем максимумы ДО действия и ПОСЛЕ и сдвигаем текущее на разницу.
+  // Так эффекты (состояния/баффы/предметы) дают сразу рабочее значение,
+  // а ручная правка максимума в редакторе идёт обычным mutate и текущее не трогает.
+  function maxSnapshot() {
+    const ch = activeChar();
+    if (!ch) return null;
+    const map = {};
+    ch.cards.forEach(function (c) {
+      if (c.type === 'counter') map[c.id] = counterMaxNum(c);
+    });
+    return map;
+  }
+  function applyMaxDeltas(before) {
+    if (!state.settings.fillMaxCurrent || !before) return;
+    const ch = activeChar();
+    if (!ch) return;
+    ch.cards.forEach(function (c) {
+      if (c.type !== 'counter' || !(c.id in before)) return;
+      const old = before[c.id];
+      const after = counterMaxNum(c);
+      if (old == null || after == null || after === old) return;
+      let v = num(c.current) + (after - old);
+      if (after > 0) v = Math.min(v, after);
+      c.current = Math.max(0, v);
+    });
+  }
+  function mutateWithMaxFill(fn, skipUndo) {
+    if (!state.settings.fillMaxCurrent) { mutate(fn, skipUndo); return; }
+    const before = maxSnapshot();
+    if (!skipUndo) pushUndo();
+    fn();
+    invalidateMods();   // после снятия/включения эффектов максимум считается заново
+    applyMaxDeltas(before);
     commit();
   }
 
@@ -642,7 +679,10 @@ window.App = window.App || {};
   }
 
   function createCard(type, name, extra) {
-    return Object.assign({ id: uid(), type: type, name: name }, defaultsFor(type), extra || {});
+    const card = Object.assign({ id: uid(), type: type, name: name }, defaultsFor(type), extra || {});
+    // v142: у заметки сразу есть первая страница, иначе card.text остался бы без листа
+    if (type === 'note') ensureNotePages(card);
+    return card;
   }
 
   function defaultCardName(type) {
@@ -1568,7 +1608,7 @@ window.App = window.App || {};
     else if (act === 'item-fx-del') {
       const a = (card.itemActive || []).find(function (x) { return x.id === ds.fx; });
       const nm = a ? a.name : '';
-      mutate(function () {
+      mutateWithMaxFill(function () {
         card.itemActive = (card.itemActive || []).filter(function (x) { return x.id !== ds.fx; });
       });
       if (nm) toast(App.tf('deletedGeneric', { name: nm }));
@@ -1599,8 +1639,34 @@ window.App = window.App || {};
         mutate(function () { card.charges.current = next; });
       } else {
         // связанные ячейки только показывают остаток счётчика: пополнять их кликами нельзя
-        const tgt = card.charges && card.charges.linkId ? findCard(card.charges.linkId) : null;
+        const tgt = activeChargeCounter(card);
         if (tgt) toast(App.tf('refillRes', { name: tgt.name }));
+      }
+    }
+    else if (act === 'note-page') {
+      // v142: закладка заметки на карточке — переключить страницу.
+      // v147: после выбора страницы полоса остаётся раскрытой (как в слое) и
+      // сворачивается, только когда мышь ушла с неё или тап был мимо.
+      // Полный render() здесь больше не нужен: он пересоздавал полосу, и она
+      // на мгновение схлопывалась — отсюда было «закрылась и тут же вылезла».
+      if (!ds.page) return;
+      const rail = e && e.currentTarget ? e.currentTarget.closest('.note-tab-rail') : null;
+      if (card.pageId === ds.page) {
+        if (rail) rail.classList.toggle('open');
+        return;
+      }
+      card.pageId = ds.page;
+      save();
+      const page = notePage(card);
+      const cardEl = cardElOf(card.id);
+      if (cardEl) {
+        const txt = cardEl.querySelector('.note-text');
+        if (txt) txt.textContent = page ? (page.text || '') : '';
+        cardEl.querySelectorAll('.note-tab').forEach(function (b) {
+          b.classList.toggle('on', b.dataset.page === ds.page);
+        });
+        const r2 = cardEl.querySelector('.note-tab-rail');
+        if (r2) r2.classList.add('open');
       }
     }
     else if (act === 'curr-inc') mutate(function () { card.amounts[ds.unit] = num(card.amounts[ds.unit]) + 1; normalizeCurrency(card); });
@@ -1736,7 +1802,7 @@ window.App = window.App || {};
         const order = iniSorted(card);
         const first = order[0];
         let sum = null;
-        mutate(function () {
+        mutateWithMaxFill(function () {
           card.phase = 'battle';
           card.round = 1;
           card.turnId = first.id;
@@ -1763,7 +1829,7 @@ window.App = window.App || {};
         setTimeout(function () {
           card._iniAdvancing = false;
           let sum = null;
-          mutate(function () {
+          mutateWithMaxFill(function () {
             card.round = (num(card.round) || 1) + 1;
             card.turnId = first.id;
             card.viewStart = 0;
@@ -1778,7 +1844,7 @@ window.App = window.App || {};
         const prev = iniCur(card);
         const next = order[i + 1];
         let sum = null;
-        mutate(function () {
+        mutateWithMaxFill(function () {
           sum = applyInitiativeTicks(card, prev, next);
           card.turnId = next.id;
         });
@@ -2053,13 +2119,16 @@ window.App = window.App || {};
     if (!ch) return;
     const card = ch.cards.find(function (c) { return c.id === cardId; });
     const nm = card ? card.name : '';
-    mutate(function () { ch.cards = ch.cards.filter(function (c) { return c.id !== cardId; }); });
+    mutateWithMaxFill(function () { ch.cards = ch.cards.filter(function (c) { return c.id !== cardId; }); });
     toast(App.tf('deletedGeneric', { name: nm }));
   }
 
   function doRest() {
     const ch = activeChar();
     if (!ch) return;
+    // v146: для счётчиков без restores снятые временные эффекты могут опустить
+    // максимум — текущее сдвигаем на разницу (у restores оно и так станет максимумом)
+    const before = state.settings.fillMaxCurrent ? maxSnapshot() : null;
     mutate(function () {
       // v114: сначала снимаем временные эффекты — иначе максимум счётчика
       // посчитается вместе с ними, и «отдых» оставит current выше максимума
@@ -2083,6 +2152,18 @@ window.App = window.App || {};
           c.charges.current = mx == null ? 0 : num(mx);
         }
       });
+      if (before) {
+        ch.cards.forEach(function (c) {
+          if (c.type !== 'counter' || c.restores) return;
+          const old = before[c.id];
+          if (old == null) return;
+          const after = counterMaxNum(c);
+          if (after == null || after === old) return;
+          let v = num(c.current) + (after - old);
+          if (after > 0) v = Math.min(v, after);
+          c.current = Math.max(0, v);
+        });
+      }
     });
     toast(App.t('restApplied'));
   }
@@ -2506,13 +2587,31 @@ window.App = window.App || {};
     return CHG_PAL[card.charges && card.charges.mode === 'link' ? 'link' : 'own'];
   }
 
+  // v141: какой счётчик сейчас оплачивает заклинание. Если основной опустел,
+  // а включён резерв — показываем и тратим резервный. Иначе интерфейс врёт:
+  // рисует 0/3 от основного, а «Применить» списывает резерв.
+  function activeChargeCounter(card) {
+    const ch = card.charges || {};
+    if (ch.mode !== 'link') return null;
+    const cost = num(ch.cost) || 1;
+    const main = findCard(ch.linkId);
+    const mainOk = main && main.type === 'counter';
+    if (mainOk && num(main.current) >= cost) return main;
+    const emptyMode = ch.emptyMode || (ch.blockEmpty ? 'block' : 'negative');
+    if (emptyMode === 'reserve') {
+      const res = findCard(ch.reserveId);
+      if (res && res.type === 'counter' && num(res.current) >= cost) return res;
+    }
+    return mainOk ? main : null;
+  }
+
   // «единицы ресурса»: собственные — текущее число зарядов; связанные — floor(текущего счётчика / траты).
   // Счётчик без максимума тоже годится: единицы считаются, предела просто нет (тег без « / N»)
   function chargeUnits(card) {
     const ch = card.charges || {};
     if (ch.mode === 'link') {
-      const t = findCard(ch.linkId);
-      if (t && t.type === 'counter') return Math.floor(num(t.current) / (num(ch.cost) || 1));
+      const t = activeChargeCounter(card);
+      if (t) return Math.floor(num(t.current) / (num(ch.cost) || 1));
       return null;
     }
     return num(ch.current);
@@ -2521,9 +2620,9 @@ window.App = window.App || {};
   function chargeMaxUnits(card) {
     const ch = card.charges || {};
     if (ch.mode === 'link') {
-      const t = findCard(ch.linkId);
+      const t = activeChargeCounter(card);
       // максимум счётчика может быть выражением ({Мана} + 2) — сначала считаем его
-      const tm = t && t.type === 'counter' ? counterMaxNum(t) : null;
+      const tm = t ? counterMaxNum(t) : null;
       if (tm != null) return Math.floor(tm / (num(ch.cost) || 1));
       return null;
     }
@@ -2609,18 +2708,21 @@ window.App = window.App || {};
       ? '<button class="small primary use-btn" type="button" disabled title="' + esc(App.tf('useBlocked', { why: useWhy })) + '">' + esc(App.t('use')) + '</button>'
       : '<button class="small primary use-btn" data-act="use">' + esc(App.t('use')) + '</button>';
     if (ch.mode === 'link') {
-      const target = findCard(ch.linkId);
-      if (target && target.type === 'counter') {
+      // v141: показываем тот счётчик, который сейчас оплатит заклинание:
+      // основной, а когда он опустел — резервный (имя в подсказке тоже его)
+      const act = activeChargeCounter(card);
+      if (act) {
         // счётчик без предела — тег вместо фигур (как при зарядов больше 12)
-        if (target.max == null || forceTag) return '<div class="charges-row">' + chargeBadgeHTML(card) + useBtn + '</div>';
-        const tip = App.tf('linkPipTip', { cost: num(ch.cost) || 1, name: target.name });
+        if (act.max == null || forceTag) return '<div class="charges-row">' + chargeBadgeHTML(card) + useBtn + '</div>';
+        const tip = App.tf('linkPipTip', { cost: num(ch.cost) || 1, name: act.name });
         const figs = chargeFiguresHTML(card, tip);
         // ячеек больше 12 — тег вместо фигур
         return '<div class="charges-row">' + (figs || chargeBadgeHTML(card)) + useBtn + '</div>';
       }
       // потерянная ссылка — старый текстовый вид
-      const nm = target ? target.name : App.t('brokenRef');
-      const remain = target && target.type === 'counter' ? num(target.current) : 0;
+      const linked = findCard(ch.linkId);
+      const nm = linked ? linked.name : App.t('brokenRef');
+      const remain = linked && linked.type === 'counter' ? num(linked.current) : 0;
       return '<div class="charges-row"><span class="meta">' + esc(App.tf('linkedCharges', { name: nm })) + ': ' + remain + '</span>' +
         useBtn + '</div>';
     }
@@ -3242,7 +3344,7 @@ window.App = window.App || {};
     const timed = (e.effects || []).filter(timedItemEffect);
     if (!ids.length && !shieldIds.length && !timed.length) { toast(App.t('itemNoEffect')); return; }
     const applied = {};
-    mutate(function () {
+    mutateWithMaxFill(function () {
       ids.forEach(function (tid) {
         const t = findCard(tid);
         const sum = byTarget[tid].sum;
@@ -3321,7 +3423,7 @@ window.App = window.App || {};
     if (!row) return;
     const wasEquipped = !!row.equipped;
     const nm = effectiveInventoryRow(row).name;
-    mutate(function () { setRowEquipped(card, row, !wasEquipped); });
+    mutateWithMaxFill(function () { setRowEquipped(card, row, !wasEquipped); });
     toast(nm + ' · ' + App.t(wasEquipped ? 'itemUnequipped' : 'itemEquipped'));
   }
 
@@ -3334,7 +3436,7 @@ window.App = window.App || {};
     if (!row) return;
     const nm = effectiveInventoryRow(row).name;
     askDelete({ text: App.tf('itemDeleteConfirm', { name: nm }), anchor: anchor, onYes: function () {
-      mutate(function () {
+      mutateWithMaxFill(function () {
         card.items = (card.items || []).filter(function (x) { return x.id !== itemId; });
       });
       toast(App.tf('deletedGeneric', { name: nm }));
@@ -3590,7 +3692,7 @@ window.App = window.App || {};
         const wasEquipped = !!row.equipped;
         const wantEquipped = !!out.equipped;
         const isNew = !!pendingNewItem;
-        mutate(function () {
+        mutateWithMaxFill(function () {
           const next = normalizeInventoryRow(Object.assign({}, row, out, {
             id: row.id, itemId: row.itemId, packId: row.packId,
             equipped: row.equipped,   // «надето» — отдельным помощником, см. ниже
@@ -3606,7 +3708,7 @@ window.App = window.App || {};
       },
       onDelete: function () {
         const nm = effectiveInventoryRow(row).name;
-        mutate(function () {
+        mutateWithMaxFill(function () {
           card.items = (card.items || []).filter(function (x) { return x.id !== row.id; });
         });
         pendingNewItem = null;
@@ -3633,8 +3735,64 @@ window.App = window.App || {};
     });
   }
 
+  // ===== Страницы заметки (v142) =====
+  // Заметка — набор листов (title/color/text). Раньше был один card.text;
+  // ensureNotePages переносит его в первую страницу и убирает старое поле.
+  const NOTE_COLORS = ['#e6c25a', '#a79bff', '#7fd6a5', '#f09a7f', '#9fd8ff', '#f2a7c3'];
+  function notePages(card) {
+    if (!Array.isArray(card.pages)) card.pages = [];
+    return card.pages;
+  }
+  function notePage(card) {
+    const list = notePages(card);
+    let p = list.find(function (x) { return x.id === card.pageId; });
+    if (!p && list.length) { p = list[0]; card.pageId = p.id; }
+    return p || null;
+  }
+  function ensureNotePages(card) {
+    if (!card || card.type !== 'note') return false;
+    let changed = false;
+    if (!Array.isArray(card.pages) || !card.pages.length) {
+      card.pages = [{
+        id: uid(),
+        title: '',
+        color: NOTE_COLORS[0],
+        text: typeof card.text === 'string' ? card.text : ''
+      }];
+      card.pageId = card.pages[0].id;
+      changed = true;
+    }
+    if (!card.pages.some(function (p) { return p.id === card.pageId; })) {
+      card.pageId = card.pages[0].id;
+      changed = true;
+    }
+    if ('text' in card) { delete card.text; changed = true; }
+    return changed;
+  }
+  function notePageColor(p, i) {
+    return (p && /^#[0-9a-f]{6}$/i.test(p.color || '')) ? p.color : NOTE_COLORS[(i || 0) % NOTE_COLORS.length];
+  }
+  function notePageTitle(p) {
+    return (p && p.title || '').trim() || App.t('notePageNoName');
+  }
+  // Закладки на карточке: номера; подписи раскрываются наведением на полосу
+  function noteTabsHTML(card) {
+    const list = notePages(card);
+    if (list.length < 2) return '';
+    return '<div class="note-tab-rail">' + list.map(function (p, i) {
+      return '<div class="note-tab-wrap"><button type="button" class="note-tab' + (p.id === card.pageId ? ' on' : '') + '"' +
+        ' data-act="note-page" data-page="' + esc(p.id) + '"' +
+        ' style="--tab:' + esc(notePageColor(p, i)) + '"' +
+        ' aria-label="' + esc(notePageTitle(p)) + '">' +
+        '<span class="nt-num">' + (i + 1) + '</span>' +
+        '<span class="nt-nm">' + esc(notePageTitle(p)) + '</span>' +
+      '</button></div>';
+    }).join('') + '</div>';
+  }
   function noteBody(card) {
-    return '<div class="card-body"><div class="note-text">' + esc(card.text || '') + '</div></div>';
+    ensureNotePages(card);
+    const p = notePage(card);
+    return '<div class="card-body"><div class="note-text">' + esc(p ? (p.text || '') : '') + '</div>' + noteTabsHTML(card) + '</div>';
   }
 
   // v98: долгий тап по иконке предмета раскрывает «истинный предмет».
@@ -3828,6 +3986,16 @@ window.App = window.App || {};
     el.querySelectorAll('[data-act]').forEach(function (btn) {
       btn.addEventListener('click', function (e) { handleAction(card.id, btn.dataset, e); });
     });
+    // v147: полоса закладок заметки после выбора страницы остаётся раскрытой,
+    // пока мышь на ней. Ушла мышь — сворачиваем. Для тача не срабатываем:
+    // палец «уходит» сразу после касания, и полоса закрывалась бы на каждом тапе.
+    const noteRail = el.querySelector('.note-tab-rail');
+    if (noteRail) {
+      noteRail.addEventListener('pointerleave', function (ev) {
+        if (ev.pointerType !== 'mouse') return;
+        noteRail.classList.remove('open');
+      });
+    }
     // описание целиком: клик по тексту — модалка «просмотр полностью»
     // v91: у баффа клик по тексту — это тумблер, поэтому «развернуть» только кнопкой ⤢
     const desc = el.querySelector('.desc-text');
@@ -3835,11 +4003,11 @@ window.App = window.App || {};
       desc.classList.add('readable');
       desc.addEventListener('click', function () { openTextModal(card.name, card.description); });
     }
-    // заметка: прокрутка внутри карточки + клик — просмотр полного текста
+    // заметка: прокрутка внутри карточки + клик — страницы во втором слое
     const note = el.querySelector('.note-text');
-    if (note && (card.text || '').trim()) {
+    if (note) {
       note.classList.add('readable');
-      note.addEventListener('click', function () { openTextModal(card.name, card.text); });
+      note.addEventListener('click', function () { openLabelLayer(card.id); });
     }
     const edit = el.querySelector('.card-edit');
     const dup = el.querySelector('.card-dup');
@@ -3937,7 +4105,7 @@ window.App = window.App || {};
         if (e.target.closest('button, .handle, .resize-handle, .kebab, .tools')) return;
         if (Math.abs(e.clientX - downX) > 10 || Math.abs(e.clientY - downY) > 10) return;
         if (downT && Date.now() - downT > 650) return;
-        mutate(function () {
+        mutateWithMaxFill(function () {
           const c = findCard(card.id);
           if (!c) return;
           c.on = !c.on;
@@ -4582,6 +4750,17 @@ window.App = window.App || {};
 
   // v86: память личных эффектов переезжает с key на entryId. Ищем entryId
   // по снимку, активному набору или любому набору; старый ключ удаляем.
+  // v142: старые заметки хранили один card.text — переносим в первую страницу
+  function migrateNotePages() {
+    let changed = false;
+    state.characters.forEach(function (ch) {
+      (ch.cards || []).forEach(function (card) {
+        if (ensureNotePages(card)) changed = true;
+      });
+    });
+    if (changed) save();
+  }
+
   function migrateCondEntryIds() {
     const entryById = {}, entryByKey = {};
     libSets('states').forEach(function (set) {
@@ -4978,7 +5157,7 @@ window.App = window.App || {};
       return (p.entryId && s.entryId === p.entryId) || s.key === key;
     };
     const has = list.some(sameState);
-    mutate(function () {
+    mutateWithMaxFill(function () {
       if (has) card.conditions = list.filter(function (s) { return !sameState(s); });
       else {
         const snap = condSnapshot(p, set ? set.id : null);
@@ -5002,7 +5181,7 @@ window.App = window.App || {};
     const card = findCard(cardId);
     if (!card) return;
     if (!(card.conditions || []).length) return;
-    mutate(function () { card.conditions = []; });
+    mutateWithMaxFill(function () { card.conditions = []; });
   }
 
   // v83: обновить активные снимки на карточке из текущего набора.
@@ -5020,7 +5199,7 @@ window.App = window.App || {};
       if (entry) jobs.push({ snap: snap, entry: entry });
     });
     if (!jobs.length) { toast(App.t('condNothingToRefresh')); return; }
-    mutate(function () {
+    mutateWithMaxFill(function () {
       jobs.forEach(function (job) {
         const snap = job.snap, entry = job.entry;
         const own = condPersonalEffects(card, condMemoryKey(snap), snap.key);
@@ -5206,7 +5385,7 @@ window.App = window.App || {};
     if (!ch) return;
     if (!hasTicksOrDuration(ch)) { toast(App.t('condTicksNone')); return; }
     let sum = null;
-    mutate(function () { sum = applyTicksForChar(ch, 'end', true); });
+    mutateWithMaxFill(function () { sum = applyTicksForChar(ch, 'end', true); });
     let msg = ticksSummary(sum);
     if (!msg && sum && sum.durationChanged) msg = App.t('condTicksTurn');
     toast(msg || App.t('condTicksNone'));
@@ -5581,7 +5760,7 @@ window.App = window.App || {};
       const b = e.target.closest('button');
       if (!b) return;
       if (b.dataset.cond) {
-        mutate(function () {
+        mutateWithMaxFill(function () {
           const c = cur();
           c.conditions = (c.conditions || []).filter(function (s) { return s.id !== b.dataset.cond; });
         });
@@ -5825,20 +6004,15 @@ window.App = window.App || {};
 
   function openLabelLayer(cardId) {
     const card = findCard(cardId);
-    if (!card || !foldable(card) || !isCollapsed(card)) return;
+    if (!card || !foldable(card)) return;
+    // v142: заметку открываем и развёрнутой (клик по тексту), остальные ярлыки — только свёрнутыми
+    if (card.type !== 'note' && !isCollapsed(card)) return;
     const ov = document.getElementById('labelLayer');
     layerCardId = cardId;
     ov.innerHTML = '';
     if (card.type === 'note') {
-      // Заметка — отдельная панель (шапка + большое окно текста); вариант юзера, не трогаем
-      const panel = document.createElement('div');
-      panel.className = 'layer-panel layer-note-panel';
-      panel.appendChild(buildLayerHead(card));
-      const ta = document.createElement('textarea');
-      ta.className = 'layer-note';
-      ta.value = card.text || '';
-      panel.appendChild(ta);
-      ov.appendChild(panel);
+      ensureNotePages(card);
+      ov.appendChild(buildNotePanel(card));
     } else {
       // Валюта/инвентарь — ТОЧНАЯ копия развернутой карточки, без доп рамок:
       // единственное отличие — активные кнопки правки (✎⧉✕ + ресайз) в шапке
@@ -5878,12 +6052,9 @@ window.App = window.App || {};
     const bDel = head.querySelector('.card-del');
     if (bEdit) bEdit.addEventListener('click', function () {
       const ov = document.getElementById('labelLayer');
-      const ta = ov.querySelector('.layer-note');
-      if (ta) {   // заметка: несохранённый текст пишем ДО редактора, иначе он покажет старое
-        const cur = findCard(card.id);
-        const txt = ta.value;
-        if (cur && (cur.text || '') !== txt) mutate(function () { cur.text = txt; });
-      }
+      // v142: у заметки сначала сохраняем несохранённый текст страницы
+      const np = ov.querySelector('.note-pages-panel');
+      if (np && np._noteFlush) np._noteFlush();
       openCardEditor(card.id);
     });
     // дубль: слой закрываем — иначе новая карточка появится ПОД затемнением
@@ -5946,6 +6117,284 @@ window.App = window.App || {};
     return el;
   }
 
+  // ===== Заметка: страницы во втором слое (v142) =====
+  // Панель нарочно повторяет карточку: та же шапка, текст и закладки справа.
+  // По умолчанию закладки сжаты до номеров; наведение (ПК) или тап по активной
+  // (телефон) раскрывает подписи. Кебаб закладки — цвет/переименовать/удалить.
+  function buildNotePanel(card) {
+    ensureNotePages(card);
+    const panel = document.createElement('div');
+    panel.className = 'layer-panel note-pages-panel';
+
+    const head = buildLayerHead(card);
+    panel.appendChild(head);
+
+    const body = document.createElement('div');
+    body.className = 'note-pages-body';
+    const ta = document.createElement('textarea');
+    ta.className = 'note-pages-text';
+    ta.placeholder = App.t('text') + '…';
+    body.appendChild(ta);
+    const rail = document.createElement('div');
+    rail.className = 'note-pages-rail';
+    body.appendChild(rail);
+    panel.appendChild(body);
+
+    const menu = document.createElement('div');
+    menu.className = 'note-tab-menu hidden';
+    panel.appendChild(menu);
+
+    let railOpen = false;
+    let menuFor = -1;
+    let menuAnchor = null;
+
+    function pages() { return notePages(card); }
+    function curPage() { return notePage(card); }
+    function setRailOpen(v) { railOpen = v; rail.classList.toggle('open', v); }
+
+    // текст страницы пишем в данные только при уходе/закрытии: иначе undo
+    // получал бы шаг на каждую букву
+    function flushText(commit) {
+      const p = curPage();
+      if (!p) return;
+      const txt = ta.value;
+      if (txt === (p.text || '')) return;
+      if (commit) mutate(function () { p.text = txt; });
+      else p.text = txt;
+    }
+
+    function cardTabs() {
+      return document.querySelectorAll('.card[data-id="' + card.id + '"] .note-tab');
+    }
+
+    function renderTabs() {
+      rail.innerHTML = '';
+      pages().forEach(function (p, i) {
+        const wrap = document.createElement('div');
+        wrap.className = 'note-tab-wrap';
+        const b = document.createElement('button');
+        b.type = 'button';
+        b.className = 'note-ltab' + (p.id === card.pageId ? ' on' : '');
+        b.style.setProperty('--tab', notePageColor(p, i));
+        b.setAttribute('aria-label', notePageTitle(p));
+        const num = document.createElement('span');
+        num.className = 'nt-num';
+        num.textContent = String(i + 1);
+        const nm = document.createElement('span');
+        nm.className = 'nt-nm';
+        nm.textContent = notePageTitle(p);
+        b.appendChild(num);
+        b.appendChild(nm);
+        b.addEventListener('click', function (e) {
+          e.stopPropagation();
+          if (e.target.tagName === 'INPUT') return;
+          if (p.id === card.pageId) { setRailOpen(!railOpen); return; }
+          flushText(true);
+          card.pageId = p.id;
+          save();
+          render();
+          renderTabs();
+          renderText();
+          setRailOpen(false);
+          closeMenu();
+        });
+        wrap.appendChild(b);
+
+        const k = document.createElement('button');
+        k.type = 'button';
+        k.className = 'note-ltab-kebab';
+        k.textContent = '⋮';
+        k.setAttribute('aria-label', App.t('menu'));
+        k.addEventListener('click', function (e) {
+          e.stopPropagation();
+          openMenu(i, k);
+        });
+        wrap.appendChild(k);
+        rail.appendChild(wrap);
+      });
+
+      const add = document.createElement('button');
+      add.type = 'button';
+      add.className = 'note-rail-add';
+      add.textContent = '＋ ' + App.t('addPage');
+      add.setAttribute('aria-label', App.t('addPage'));
+      add.addEventListener('click', addPage);
+      rail.appendChild(add);
+      rail.classList.toggle('open', railOpen);
+    }
+
+    function renderText() {
+      const p = curPage();
+      ta.value = p ? (p.text || '') : '';
+    }
+
+    function renderAll() {
+      renderTabs();
+      renderText();
+    }
+
+    function addPage() {
+      flushText(true);
+      const id = uid();
+      mutate(function () {
+        card.pages.push({
+          id: id,
+          title: '',
+          color: NOTE_COLORS[pages().length % NOTE_COLORS.length],
+          text: ''
+        });
+        card.pageId = id;
+      });
+      setRailOpen(true);
+      renderAll();
+      startRename(pages().length - 1);
+    }
+
+    function askDelete(i) {
+      const p = pages()[i];
+      if (!p || pages().length <= 1) return;
+      const name = notePageTitle(p);
+      confirmDialog(App.tf('confirmDeletePage', { name: name }), function () {
+        flushText(true);
+        mutate(function () {
+          const list = pages();
+          const idx = list.findIndex(function (x) { return x.id === p.id; });
+          if (idx < 0) return;
+          const wasCur = card.pageId === p.id;
+          list.splice(idx, 1);
+          if (wasCur) card.pageId = list[Math.max(0, idx - 1)].id;
+        });
+        setRailOpen(false);
+        renderAll();
+        toast(App.tf('deletedGeneric', { name: name }));
+      }, App.t('delete'));
+    }
+
+    function startRename(i) {
+      setRailOpen(true);
+      const wrap = rail.querySelectorAll('.note-tab-wrap')[i];
+      const tab = wrap && wrap.querySelector('.note-ltab');
+      const nm = tab && tab.querySelector('.nt-nm');
+      if (!nm || tab.querySelector('input')) return;
+      const input = document.createElement('input');
+      input.className = 'note-tab-input';
+      input.value = (pages()[i].title || '');
+      input.setAttribute('aria-label', App.t('pageName'));
+      nm.replaceWith(input);
+      input.focus();
+      input.select();
+      let done = false;
+      const commit = function (saveIt) {
+        if (done) return;
+        done = true;
+        if (saveIt) {
+          const v = input.value.trim();
+          mutate(function () { pages()[i].title = v; });
+        }
+        renderAll();
+      };
+      input.addEventListener('keydown', function (e) {
+        if (e.key === 'Enter') { e.preventDefault(); commit(true); }
+        else if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); commit(false); }
+      });
+      input.addEventListener('blur', function () { commit(true); });
+    }
+
+    function openMenu(i, anchor) {
+      menuFor = i;
+      menuAnchor = anchor;
+      setRailOpen(true);
+      buildMenu();
+      document.addEventListener('pointerdown', onMenuDocDown, true);
+    }
+
+    function buildMenu() {
+      const i = menuFor;
+      const p = pages()[i];
+      if (!p) return;
+      menu.innerHTML = '';
+      menu.classList.remove('hidden');
+
+      // круглый ярлык цвета; нажатие открывает нативную палитру, без подписи и кода цвета
+      const row = document.createElement('div');
+      row.className = 'note-menu-color';
+      const dot = document.createElement('span');
+      dot.className = 'note-color-dot';
+      dot.style.setProperty('--c', notePageColor(p, i));
+      const color = document.createElement('input');
+      color.type = 'color';
+      color.className = 'note-color-input';
+      color.value = notePageColor(p, i);
+      color.setAttribute('aria-label', App.t('notePageColor'));
+      color.addEventListener('input', function () {
+        p.color = color.value;
+        dot.style.setProperty('--c', color.value);
+        const tab = rail.querySelectorAll('.note-ltab')[i];
+        if (tab) tab.style.setProperty('--tab', color.value);
+        const ct = cardTabs()[i];
+        if (ct) ct.style.setProperty('--tab', color.value);
+      });
+      color.addEventListener('change', function () { save(); });
+      row.appendChild(dot);
+      row.appendChild(color);
+      menu.appendChild(row);
+
+      const ren = document.createElement('button');
+      ren.type = 'button';
+      ren.className = 'note-menu-item';
+      ren.textContent = App.t('noteRename');
+      ren.addEventListener('click', function () { closeMenu(); startRename(i); });
+      menu.appendChild(ren);
+
+      const del = document.createElement('button');
+      del.type = 'button';
+      del.className = 'note-menu-item danger';
+      del.textContent = App.t('delete');
+      del.disabled = pages().length <= 1;
+      del.addEventListener('click', function () { closeMenu(); askDelete(i); });
+      menu.appendChild(del);
+
+      placeMenu();
+    }
+
+    function placeMenu() {
+      if (!menuAnchor) return;
+      const pr = panel.getBoundingClientRect();
+      const ar = menuAnchor.getBoundingClientRect();
+      const mw = menu.offsetWidth, mh = menu.offsetHeight;
+      const left = Math.max(8, Math.min(ar.left - pr.left - mw - 8, pr.width - mw - 8));
+      const top = Math.max(8, Math.min(ar.top - pr.top, pr.height - mh - 8));
+      menu.style.left = Math.round(left) + 'px';
+      menu.style.top = Math.round(top) + 'px';
+    }
+
+    function onMenuDocDown(e) {
+      if (menu.contains(e.target)) return;
+      if (menuAnchor && menuAnchor.contains(e.target)) return;
+      closeMenu();
+    }
+
+    function closeMenu() {
+      menuFor = -1;
+      menuAnchor = null;
+      menu.classList.add('hidden');
+      menu.innerHTML = '';
+      document.removeEventListener('pointerdown', onMenuDocDown, true);
+    }
+
+    // клик по тексту/пустому месту закрывает раскрытую полосу и меню
+    body.addEventListener('pointerdown', function (e) {
+      if (e.target.closest('.note-pages-rail') || e.target.closest('.note-tab-menu')) return;
+      setRailOpen(false);
+      closeMenu();
+    });
+
+    renderAll();
+    // закрытие/редактор сначала сохраняют несохранённый текст текущей страницы
+    panel._noteFlush = function () { flushText(true); };
+    return panel;
+  }
+
   // Ресайз из слоя: тянем уголок — размер пишется в карточку ПО ОТПУСКАНИИ
   // (один pushUndo на всё действие, как у ресайза на холсте; во время тяки меняем только стиль)
   function startLayerResize(e, card, el) {
@@ -5983,6 +6432,17 @@ window.App = window.App || {};
     if (!layerCardId) return;
     const card = findCard(layerCardId);
     if (!card) { closeLabelLayer(); return; }
+    // v142: заметка сама обновляет панель страниц; слой не закрываем, даже когда
+    // карточка развёрнута (обычный ярлык в этом случае закрывается)
+    if (card.type === 'note') {
+      const ov = document.getElementById('labelLayer');
+      const panel = ov.querySelector('.note-pages-panel');
+      if (panel) {
+        const nameEl = panel.querySelector('.layer-head .card-name');
+        if (nameEl) nameEl.textContent = card.name;
+      }
+      return;
+    }
     // v65: слой состояния перестраиваем целиком — список и кнопки зависят от данных
     if (card.type === 'condition') {
       const ov = document.getElementById('labelLayer');
@@ -5995,17 +6455,6 @@ window.App = window.App || {};
     }
     if (!foldable(card) || !isCollapsed(card)) { closeLabelLayer(); return; }
     const ov = document.getElementById('labelLayer');
-    // заметка: текст в окне слоя может быть ещё не сохранён — тело не трогаем,
-    // но имя и текст после редактора обновляем. Иначе сценарий «ярлык → ✎ →
-    // напечатал → Сохранить → закрыл слой» откатывал текст: closeLabelLayer
-    // писал из textarea старое значение (баг, найден юзером).
-    const ta = ov.querySelector('.layer-note');
-    if (ta) {
-      const nm = ov.querySelector('.layer-head .card-name');
-      if (nm) nm.textContent = card.name;
-      if (ta.value !== (card.text || '')) ta.value = card.text || '';
-      return;
-    }
     const old = ov.querySelector('.layer-card');
     if (old) old.replaceWith(buildLayerCard(card));
     else closeLabelLayer();
@@ -6015,13 +6464,10 @@ window.App = window.App || {};
     const ov = document.getElementById('labelLayer');
     if (ov.classList.contains('hidden')) return;
     const closedCardId = layerCardId;
-    // заметка: несохранённый правки текст пишем при закрытии (undo/redo работают)
-    const ta = ov.querySelector('.layer-note');
-    if (ta && layerCardId) {
-      const card = findCard(layerCardId);
-      const txt = ta.value;
-      if (card && (card.text || '') !== txt) mutate(function () { card.text = txt; });
-    }
+    // v142: заметка — сохраняем несохранённый текст текущей страницы,
+    // но только если карточка ещё существует (её могли удалить из слоя)
+    const np = ov.querySelector('.note-pages-panel');
+    if (np && np._noteFlush && layerCardId && findCard(layerCardId)) np._noteFlush();
     layerCardId = null;
     ov.classList.add('hidden');
     ov.innerHTML = '';
@@ -6466,7 +6912,7 @@ window.App = window.App || {};
   }
 
   function noteFields(card) {
-    return '<div class="field"><label>' + esc(App.t('text')) + '</label><textarea id="f-text" style="min-height:160px" placeholder="' + esc(App.t('text')) + '…">' + esc(card.text || '') + '</textarea></div>';
+    return '<div class="formula-help">' + esc(App.t('noteTextInLayer')) + '</div>';
   }
 
   function currencyFields(card) {
@@ -6956,7 +7402,7 @@ window.App = window.App || {};
         break;
       }
       case 'note':
-        card.text = readText('f-text');
+        // текст и страницы правятся во втором слое, в окне — только имя
         break;
       case 'buff': {
         // v91: эффекты храним только с существующей целью; пустую строку,
@@ -8364,6 +8810,7 @@ window.App = window.App || {};
         '<select id="s-lang"><option value="ru"' + (lang === 'ru' ? ' selected' : '') + '>Русский</option>' +
         '<option value="en"' + (lang === 'en' ? ' selected' : '') + '>English</option></select></div>' +
         '<div class="field check"><input id="s-anim" type="checkbox"' + (state.settings.diceAnimation !== false ? ' checked' : '') + '><label for="s-anim">' + esc(App.t('diceAnimation')) + '</label></div>' +
+        '<div class="field check"><input id="s-fillmax" type="checkbox"' + (state.settings.fillMaxCurrent ? ' checked' : '') + '><label for="s-fillmax">' + esc(App.t('fillMaxCurrent')) + '</label></div>' +
         '<div class="field"><label>' + esc(App.t('critValues')) + '</label>' +
           '<div class="f-row">' +
             '<span class="f-lbl">' + esc(App.t('critOk')) + '</span>' +
@@ -8415,6 +8862,7 @@ window.App = window.App || {};
       commit();
     });
     document.getElementById('s-anim').addEventListener('change', function (e) { state.settings.diceAnimation = e.target.checked; save(); });
+    document.getElementById('s-fillmax').addEventListener('change', function (e) { state.settings.fillMaxCurrent = e.target.checked; save(); });
     document.getElementById('s-crit').addEventListener('change', function (e) { state.settings.critSuccess = e.target.value.trim(); save(); });
     document.getElementById('s-critfail').addEventListener('change', function (e) { state.settings.critFail = e.target.value.trim(); save(); });
     document.getElementById('s-char').addEventListener('change', function (e) {
@@ -9235,10 +9683,18 @@ window.App = window.App || {};
   // Версия приложения для окна обновлений. При выпуске новой версии подними
   // APP_VERSION, добавь запись в NEWS (только новые пункты) и не забудь
   // style.css?v= в index.html и CACHE_NAME в sw.js.
-  const APP_VERSION = 140;
+  const APP_VERSION = 147;
   const NEWS_SEEN_KEY = 'custplay-news-seen';   // отдельно от state: не попадает в undo и экспорт
   const NEWS = {
-    // 140 — хотфикс мобильных слоёв: новых возможностей нет, окно не показываем
+    // 140–141 — хотфиксы, 142–145 — заметки со страницами, 146 — режим максимума,
+    // 147 — полоса закладок заметки: тексты окна не задавались
+    147: { ru: [], en: [] },
+    146: { ru: [], en: [] },
+    145: { ru: [], en: [] },
+    144: { ru: [], en: [] },
+    143: { ru: [], en: [] },
+    142: { ru: [], en: [] },
+    141: { ru: [], en: [] },
     140: { ru: [], en: [] },
     139: {
       ru: [
@@ -9306,6 +9762,7 @@ window.App = window.App || {};
     ensureLibraries();
     ensurePacks();
     migrateCondEntryIds();
+    migrateNotePages();
     if (!state.characters.length) {
       newCharacter();   // стартовый персонаж с демо-карточками — тот же путь, что и «Новый персонаж»
       save();
@@ -9336,6 +9793,13 @@ window.App = window.App || {};
     document.addEventListener('pointerdown', function (e) {
       if (e.target && e.target.closest && e.target.closest('.card')) return;
       clearCounterSteps();
+    }, true);
+    // v147: раскрытая полоса закладок заметки закрывается тапом мимо неё —
+    // на мыши это делает pointerleave, а на телефоне наведения нет
+    document.addEventListener('pointerdown', function (e) {
+      const t = e.target;
+      if (t && t.closest && t.closest('.note-tab-rail')) return;
+      document.querySelectorAll('.note-tab-rail.open').forEach(function (r) { r.classList.remove('open'); });
     }, true);
     initDwDrag();
     // v20c: на мобильном журнал «История» закрывается тапом мимо окна (pointerdown capture на document).

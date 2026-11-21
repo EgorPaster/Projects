@@ -789,6 +789,39 @@ body.col-dragging .card { cursor: grabbing; }
   overflow-wrap: anywhere;
 }
 .desc-text { white-space: pre-wrap; color: var(--muted); font-size: 13px; }
+/* v142: страницы заметки — закладки на правом краю карточки.
+   Полоса устроена как в раскрытой версии: сжата до номеров, наведение
+   (ПК) или тап по активной (телефон) выдвигает поле с подписями. */
+.card.type-note { padding-right: 12px; }
+/* текст отступает от полосы закладок, а шапка с тулзами идёт до края —
+   так кнопки правки стоят ровно у правого края */
+.card.type-note .card-body { padding-right: 30px; }
+.note-tab-rail {
+  position: absolute; right: 6px; top: 34px; bottom: 8px; width: 32px; z-index: var(--z-card-inner);
+  display: flex; flex-direction: column; gap: 4px; padding: 2px;
+  overflow-y: auto; overflow-x: hidden; border-radius: var(--radius-sm);
+  scrollbar-width: thin;
+  transition: width .18s ease, background .18s ease, box-shadow .18s ease;
+}
+.note-tab-rail:hover, .note-tab-rail.open {
+  width: 120px; background: var(--bg2); box-shadow: -6px 0 16px rgba(0,0,0,.4);
+}
+.note-tab-wrap { flex: 0 0 auto; width: 100%; }
+.note-tab {
+  width: 100%; height: 22px; padding: 0; border: 0; border-radius: 5px;
+  background: var(--tab); color: #1a1508; font: inherit; font-size: 9px; font-weight: 800;
+  display: flex; align-items: center; justify-content: center;
+  cursor: pointer; overflow: hidden; white-space: nowrap;
+  filter: brightness(.94); transition: filter .15s ease;
+}
+.note-tab:hover { filter: brightness(1.04); }
+.note-tab.on { filter: brightness(1.14); box-shadow: inset 0 0 0 1px rgba(255,255,255,.35); }
+.note-tab .nt-nm { display: none; }
+.note-tab-rail:hover .note-tab, .note-tab-rail.open .note-tab { justify-content: flex-start; padding: 0 8px; }
+.note-tab-rail:hover .note-tab .nt-num, .note-tab-rail.open .note-tab .nt-num { display: none; }
+.note-tab-rail:hover .note-tab .nt-nm, .note-tab-rail.open .note-tab .nt-nm {
+  display: block; overflow: hidden; text-overflow: ellipsis;
+}
 /* описание: клик — просмотр полностью */
 .desc-text.readable { cursor: pointer; }
 .desc-text.readable:hover { color: var(--text); }
@@ -1894,26 +1927,106 @@ body.col-dragging .card { cursor: grabbing; }
   color: var(--muted);
 }
 .layer-head .tools button:hover { color: var(--text); background: var(--panel2); }
-/* Заметка: большое окно текста; ползунок прикреплён к правому краю карточки,
-   отступ текста от него сохраняется (кастомный тонкий скроллбар занимает
-   свою полосу и не наезжает на паддинг — та же механика у .full-text ниже) */
-.layer-note-panel { width: min(560px, 92vw); height: min(70vh, 620px); height: min(70dvh, 620px); }
-.layer-note {
-  flex: 1 1 auto;
-  min-height: 0;
-  width: 100%;
-  border: 0;
-  border-radius: 0;
-  background: var(--bg2);
-  color: var(--text);
-  font: inherit;
-  font-size: 14px;
-  line-height: 1.5;
-  padding: 10px 14px;
-  resize: none;
-  display: block;
-  overflow-y: auto;
+/* v142: заметка — тот же вид, что у карточки, только больше.
+   Закладки справа сжаты до номеров; наведение (ПК) или тап по активной
+   (телефон) раскрывает подписи, текст остаётся широким. */
+.note-pages-panel {
+  width: min(720px, 94vw);
+  height: min(78dvh, 620px);
+  max-width: none;
+  max-height: none;
+  padding: 0;
+  position: relative;
 }
+.note-pages-panel .layer-head { padding-right: 6px; }   /* тулзы — к самому краю */
+.note-pages-body {
+  flex: 1 1 auto; min-height: 0; position: relative;
+  display: flex; padding: 10px 48px 10px 12px;
+}
+.note-pages-text {
+  flex: 1 1 auto; min-height: 0; width: 100%; resize: none;
+  background: var(--panel); border: 1px solid var(--border);
+  border-radius: var(--radius-sm); color: var(--text);
+  padding: 9px 12px; font: inherit; font-size: 14px; line-height: 1.5;
+}
+.note-pages-text:focus { outline: none; border-color: var(--accent2); }
+.note-pages-rail {
+  position: absolute; top: 10px; right: 8px; bottom: 10px; width: 34px; z-index: var(--z-card-inner);
+  display: flex; flex-direction: column; gap: 5px; padding: 2px;
+  overflow-y: auto; overflow-x: hidden; border-radius: var(--radius-sm);
+  scrollbar-width: thin;
+  transition: width .18s ease, background .18s ease, box-shadow .18s ease;
+}
+.note-pages-rail:hover, .note-pages-rail.open {
+  width: 140px; background: var(--bg2); box-shadow: -8px 0 22px rgba(0,0,0,.4);
+}
+.note-tab-wrap { position: relative; flex: 0 0 auto; width: 100%; }
+.note-ltab {
+  width: 100%; height: 30px; border: 0; border-radius: 7px;
+  background: var(--tab); color: #1a1508; padding: 0;
+  display: flex; align-items: center; justify-content: center;
+  font: inherit; font-size: 12px; font-weight: 650;
+  cursor: pointer; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  filter: brightness(.92); transition: filter .15s ease;
+}
+.note-ltab:hover { filter: brightness(1.02); }
+.note-ltab.on { filter: brightness(1.12); box-shadow: inset 0 0 0 1px rgba(255,255,255,.35); }
+.note-ltab .nt-nm { display: none; }
+.note-pages-rail:hover .note-ltab, .note-pages-rail.open .note-ltab {
+  justify-content: flex-start; padding: 0 26px 0 10px; text-align: left;
+}
+.note-pages-rail:hover .note-ltab .nt-num, .note-pages-rail.open .note-ltab .nt-num { display: none; }
+.note-pages-rail:hover .note-ltab .nt-nm, .note-pages-rail.open .note-ltab .nt-nm {
+  display: block; overflow: hidden; text-overflow: ellipsis;
+}
+.note-ltab-kebab {
+  display: none; position: absolute; right: 4px; top: calc(50% - 11px);
+  width: 22px; height: 22px; padding: 0; border: 0; border-radius: 50%;
+  background: transparent; color: #1a1508; font: inherit; font-size: 15px; line-height: 1;
+  cursor: pointer; z-index: 2;
+}
+.note-pages-rail:hover .note-ltab-kebab, .note-pages-rail.open .note-ltab-kebab { display: grid; place-items: center; }
+.note-ltab-kebab:hover { background: rgba(255,255,255,.45); }
+.note-rail-add {
+  flex: 0 0 auto; margin-top: 2px; border: 1px dashed var(--border); border-radius: 7px;
+  background: transparent; color: var(--muted); font: inherit; font-size: 12px;
+  padding: 5px 8px; text-align: left; cursor: pointer; white-space: nowrap;
+}
+.note-rail-add:hover { color: var(--text); border-color: var(--accent2); }
+.note-pages-rail:not(:hover):not(.open) .note-rail-add { font-size: 0; padding: 5px 0; text-align: center; }
+.note-pages-rail:not(:hover):not(.open) .note-rail-add::before { content: "+"; font-size: 15px; }
+.note-tab-input {
+  width: 100%; min-width: 0; border: 1px solid var(--border); border-radius: 4px;
+  padding: 0 4px; background: #fff; color: #1a1508;
+  font: inherit; font-size: 12px; font-weight: 650;
+}
+.note-tab-menu {
+  position: absolute; z-index: 5; width: 184px; padding: 8px;
+  background: var(--bg2); border: 1px solid var(--border);
+  border-radius: var(--radius-sm); box-shadow: var(--shadow);
+}
+.note-tab-menu.hidden { display: none; }
+.note-menu-color {
+  position: relative; width: 24px; height: 24px; margin: 0 0 8px;
+  border-radius: 50%; border: 1px solid var(--border); background: var(--panel2);
+}
+.note-menu-color:hover { border-color: var(--accent2); }
+.note-color-dot {
+  position: absolute; inset: 3px; border-radius: 50%;
+  background: var(--c); border: 1px solid rgba(255,255,255,.28); pointer-events: none;
+}
+.note-color-input {
+  position: absolute; inset: 0; width: 100%; height: 100%;
+  opacity: 0; cursor: pointer; border: 0; padding: 0;
+}
+.note-menu-item {
+  display: block; width: 100%; text-align: left; border: 0; background: none;
+  color: var(--text); font: inherit; font-size: 13px; padding: 6px 4px;
+  border-radius: var(--radius-xs); cursor: pointer;
+}
+.note-menu-item:hover { background: var(--panel2); }
+.note-menu-item.danger { color: var(--danger); }
+.note-menu-item:disabled { opacity: .35; cursor: default; background: none; }
 /* Единая механика скроллбара: окно полного текста (просмотр описаний/заметок) */
 .full-text {
   padding-right: 12px;
@@ -1939,6 +2052,11 @@ body.col-dragging .card { cursor: grabbing; }
      высота — по содержимому, но не выше 92dvh. Правила сетки холста к копии
      больше не применяются: иначе она растягивалась на весь экран. */
   .layer-card { width: 100%; max-width: 100%; height: auto; max-height: 92vh; max-height: 92dvh; align-self: auto; }
+  /* v142: заметка на телефоне — почти весь экран, закладки у правого края */
+  .note-pages-panel { width: 100%; height: 88dvh; }
+  .note-pages-body { padding: 8px 44px 8px 8px; }
+  .note-pages-rail { top: 8px; right: 6px; bottom: 8px; }
+  .note-pages-rail:hover, .note-pages-rail.open { width: 132px; }
   /* поле слоя уже: 18px по бокам отнимали у карточки 36px на узком экране */
   .label-layer { padding: 12px 10px; }
   /* запас снизу: значок «−−» свисает на 3px ниже последней строки и без запаса
