@@ -3380,8 +3380,8 @@ window.App = window.App || {};
     const row = inventoryRow(card, itemId);
     if (!row) return;
     const e = effectiveInventoryRow(row);
-    // разовые эффекты: у каждого своя цель, одинаковые цели складываются
-    const byTarget = {};
+    // разовые эффекты по «текущему»: у каждого своя цель, применяем по порядку
+    const instantBy = {};
     const shieldBy = {};
     (e.effects || []).forEach(function (ef) {
       if (!ef.target || !findCard(ef.target)) return;
@@ -3399,10 +3399,10 @@ window.App = window.App || {};
       if (ef.field !== 'current' || ef.mode === 'tick') return;
       const r = rollItemExpr(ef.value);
       if (!r) return;
-      const slot = byTarget[ef.target] || (byTarget[ef.target] = { sum: 0 });
-      slot.sum += r.total;
+      const list = instantBy[ef.target] || (instantBy[ef.target] = []);
+      list.push({ mode: ef.mode || 'add', value: r.total });
     });
-    const ids = Object.keys(byTarget);
+    const ids = Object.keys(instantBy);
     const shieldIds = Object.keys(shieldBy);
     const timed = (e.effects || []).filter(timedItemEffect);
     if (!ids.length && !shieldIds.length && !timed.length) { toast(App.t('itemNoEffect')); return; }
@@ -3410,9 +3410,30 @@ window.App = window.App || {};
     mutateWithMaxFill(function () {
       ids.forEach(function (tid) {
         const t = findCard(tid);
-        const sum = byTarget[tid].sum;
-        if (!t || t.type !== 'counter' || !sum) return;
-        applied[tid] = applyEvent(t, sum >= 0 ? { kind: 'heal', value: sum } : { kind: 'damage', value: -sum });
+        if (!t || t.type !== 'counter') return;
+        let hp = 0, sh = 0;
+        instantBy[tid].forEach(function (step) {
+          const cur = num(t.current);
+          let next = cur;
+          if (step.mode === 'set') next = step.value;
+          else if (step.mode === 'mul') next = cur * step.value;
+          else if (step.mode === 'cap') next = Math.min(cur, step.value);
+          else next = cur + step.value;
+          // v163: как и обычное лечение — не выше максимума, в минус можно
+          const max = counterMaxNum(t);
+          if (max != null && max > 0 && next > max) next = max;
+          const delta = next - cur;
+          if (!delta) return;
+          if (step.mode === 'add' && delta < 0) {
+            // «прибавить отрицательное» — это урон: сначала щит
+            const r = applyEvent(t, { kind: 'damage', value: -delta });
+            hp += r.hp; sh += r.shield;
+          } else {
+            t.current = next;
+            hp += delta;
+          }
+        });
+        applied[tid] = { hp: hp, shield: sh };
       });
       shieldIds.forEach(function (tid) {
         const t = findCard(tid);
@@ -10171,11 +10192,12 @@ window.App = window.App || {};
   // Версия приложения для окна обновлений. При выпуске новой версии подними
   // APP_VERSION, добавь запись в NEWS (только новые пункты) и не забудь
   // style.css?v= в index.html и CACHE_NAME в sw.js.
-  const APP_VERSION = 162;
+  const APP_VERSION = 163;
   const NEWS_SEEN_KEY = 'custplay-news-seen';   // отдельно от state: не попадает в undo и экспорт
   const NEWS = {
     // 140–141 — хотфиксы, 142–145 — заметки со страницами, 146 — режим максимума,
     // 147 — полоса закладок заметки, 148–151 — состояния, 152 — щит баффов.
+    163: { ru: [], en: [] },
     162: { ru: [], en: [] },
     161: {
       ru: [
