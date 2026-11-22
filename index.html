@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
 <title>CustPlay</title>
-<link rel="stylesheet" href="style.css?v=147">   <!-- ?v=N: подъём при каждой правке стилей — иначе телефон/ПК может держать старый CSS эвристическим кэшем (SW network-first не всегда спасает) -->
+<link rel="stylesheet" href="style.css?v=161">   <!-- ?v=N: подъём при каждой правке стилей — иначе телефон/ПК может держать старый CSS эвристическим кэшем (SW network-first не всегда спасает) -->
 <link rel="manifest" href="manifest.json">
 <link rel="icon" type="image/png" sizes="192x192" href="icons/icon-192.png">
 <link rel="apple-touch-icon" href="icons/icon-180.png">
@@ -30,6 +30,15 @@ if ('serviceWorker' in navigator && location.protocol !== 'file:') {
 
 <div id="backdrop" class="backdrop hidden"></div>
 <div id="modal" class="modal hidden" role="dialog"></div>
+
+<!-- v153: слой редактора эффекта — открывается ПОВЕРХ окна (настройки, предмет),
+     поэтому отдельный слой, а не второй openModal: нижнее окно должно остаться живым -->
+<div id="fxBackdrop" class="backdrop fx-backdrop hidden"></div>
+<div id="fxModal" class="modal fx-modal hidden" role="dialog" aria-modal="true" aria-labelledby="fxTitle" tabindex="-1">
+  <h2 id="fxTitle"></h2>
+  <div id="fxBody"></div>
+  <div class="m-actions" id="fxActions"></div>
+</div>
 
 <!-- Второй слой ярлыка (свернутые И/З/В): без креста — закрытие тапом мимо или Esc -->
 <div id="labelLayer" class="label-layer hidden" role="dialog" aria-modal="true"></div>

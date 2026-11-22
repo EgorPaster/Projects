@@ -53,6 +53,9 @@ window.App = window.App || {};
   // Иконка «мусорка» для ВСЕХ кнопок «Удалить» (вместо крестика ✕): инлайн-SVG
   // в currentColor — красится как текст кнопки, как остальные глифы тулз
   const TRASH_SVG = '<svg class="trash-ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 6h18"/><path d="M8 6V4a1 1 0 0 1 1-1h6a1 1 0 0 1 1 1v2"/><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/><path d="M10 11v6"/><path d="M14 11v6"/></svg>';
+  // v158: ⧉ есть не в каждом шрифте на телефоне — дублирование рисуем SVG,
+  // иначе кнопка выглядит пустой.
+  const DUP_SVG = '<svg class="dup-ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="9" y="9" width="11" height="11" rx="2"/><path d="M5 15V5a2 2 0 0 1 2-2h10"/></svg>';
   const MIN_W = 220, MIN_H = 110;   // минимальный размер карточки: чтобы влезали кнопки/содержимое
 
   // ===== Helpers =====
@@ -984,7 +987,7 @@ window.App = window.App || {};
   // текущего — это тик, слой 2, а не модификатор, слой 1).
   // Порядок фиксирован: add → mul → set → cap. Иначе результат зависел бы от того,
   // в каком порядке игрок включал состояния.
-  const MOD_ORDER = { add: 1, mul: 2, set: 3, cap: 4 };
+  const MOD_ORDER = { add: 1, mul: 2, div: 3, set: 4, cap: 5 };
   // какие числа можно менять у каждого типа карточки (для формы «на что влияет»)
   const MOD_FIELDS = {
     counter: ['max'],
@@ -993,7 +996,7 @@ window.App = window.App || {};
   };
   // v107: все режимы эффекта в одном месте. MOD_ORDER — только «математика»,
   // остальные режимы читают другие потребители (block/tick/adv…).
-  const EFFECT_MODES = { add: 1, mul: 2, set: 3, cap: 4, dice: 1, block: 1, tick: 1, adv: 1, dis: 1 };
+  const EFFECT_MODES = { add: 1, mul: 2, div: 3, set: 4, cap: 5, dice: 1, block: 1, tick: 1, adv: 1, dis: 1 };
   const EFFECT_FIELDS = MOD_FIELDS;
 
   // v107: единая нормализация эффекта. Сохраняет timing/duration/target и любые
@@ -1143,7 +1146,7 @@ window.App = window.App || {};
         it.card.itemActive = (it.card.itemActive || []).filter(function (a) { return a !== it.active; });
       } else if (it.kind === 'buff' && it.card) {
         it.card.effects = (it.card.effects || []).filter(function (x) { return x !== ef; });
-        if (!it.card.effects.length) it.card.on = false;
+        if (!it.card.effects.length) { it.card.on = false; clearBuffShield(it.card); }
       } else if (it.kind === 'condition' && it.snap) {
         it.snap.effects = (it.snap.effects || []).filter(function (x) { return x !== ef; });
       }
@@ -1156,6 +1159,7 @@ window.App = window.App || {};
     let s = String(expr == null ? '' : expr).trim();
     if (!s) return null;
     if (mode === 'mul' && /^[*×]/.test(s)) s = s.slice(1);
+    if (mode === 'div' && /^[/÷]/.test(s)) s = s.slice(1);
     if (mode === 'add' && s[0] === '+') s = s.slice(1);
     const n = exprNumber(card, s);
     return (n == null || !Number.isFinite(n)) ? null : n;
@@ -1171,6 +1175,7 @@ window.App = window.App || {};
       if (n == null) return;
       if (ef.mode === 'add') { if (v == null) return; v = v + n; }
       else if (ef.mode === 'mul') { if (v == null) return; v = v * n; }
+      else if (ef.mode === 'div') { if (v == null || n === 0) return; v = v / n; }
       else if (ef.mode === 'set') v = n;
       else if (ef.mode === 'cap') { if (v == null) return; v = Math.min(v, n); }
     });
@@ -1194,10 +1199,62 @@ window.App = window.App || {};
     if (!(n > 0)) return 0;
     if (!Array.isArray(card.shieldParts)) card.shieldParts = [];
     const part = { id: uid(), amount: n, left: num(left) > 0 ? num(left) : null };
-    if (meta && meta.name) { part.name = String(meta.name); part.srcKey = meta.srcKey || ''; part.from = meta.from || ''; }
+    if (meta) {
+      if (meta.name) part.name = String(meta.name);
+      part.srcKey = meta.srcKey || '';
+      part.from = meta.from || '';
+    }
     card.shieldParts.push(part);
     syncShield(card);
     return n;
+  }
+  // v152: щит баффа. Живёт, пока бафф включён; часть помечена источником,
+  // чтобы снятие одного баффа не задело щит предмета или другого баффа.
+  function buffShieldKey(buffId) { return 'buff:' + buffId; }
+  function clearBuffShield(buff) {
+    const ch = activeChar();
+    if (!ch || !buff) return;
+    const key = buffShieldKey(buff.id);
+    (ch.cards || []).forEach(function (c) {
+      if (c.type !== 'counter' || !Array.isArray(c.shieldParts) || !c.shieldParts.length) return;
+      const keep = c.shieldParts.filter(function (p) { return p.srcKey !== key; });
+      if (keep.length !== c.shieldParts.length) {
+        c.shieldParts = keep;
+        syncShield(c);
+      }
+    });
+  }
+  function applyBuffShield(buff) {
+    const ch = activeChar();
+    if (!ch || !buff) return;
+    clearBuffShield(buff);
+    if (!buff.on) return;
+    const key = buffShieldKey(buff.id);
+    const byTarget = {};
+    (buff.effects || []).forEach(function (ef) {
+      if (effectField(ef) !== 'shield') return;
+      const t = ef.target && findCard(ef.target);
+      if (!t || t.type !== 'counter') return;
+      const r = rollItemExpr(ef.value);
+      if (!r) return;
+      byTarget[t.id] = (byTarget[t.id] || 0) + r.total;
+    });
+    Object.keys(byTarget).forEach(function (tid) {
+      const t = findCard(tid);
+      if (t) addShield(t, byTarget[tid], null, { name: buff.name || '', srcKey: key, from: buff.id });
+    });
+  }
+  function reconcileBuffShield(buff) {
+    if (!buff) return;
+    applyBuffShield(buff);   // сам снимает старые части и добавляет новые, если включён
+  }
+  // подпись щитовых эффектов: меняем щит только если поменялись цель/значение/подпись
+  function buffShieldSig(effects) {
+    return JSON.stringify((effects || []).filter(function (ef) {
+      return effectField(ef) === 'shield';
+    }).map(function (ef) {
+      return [ef.target || '', String(ef.value == null ? '' : ef.value), ef.label || ''];
+    }));
   }
   function spendShield(card, amount) {
     let left = Math.max(0, num(amount));
@@ -2119,7 +2176,11 @@ window.App = window.App || {};
     if (!ch) return;
     const card = ch.cards.find(function (c) { return c.id === cardId; });
     const nm = card ? card.name : '';
-    mutateWithMaxFill(function () { ch.cards = ch.cards.filter(function (c) { return c.id !== cardId; }); });
+    mutateWithMaxFill(function () {
+      // v152: щит баффа не должен остаться на счётчике после удаления баффа
+      if (card && card.type === 'buff') clearBuffShield(card);
+      ch.cards = ch.cards.filter(function (c) { return c.id !== cardId; });
+    });
     toast(App.tf('deletedGeneric', { name: nm }));
   }
 
@@ -2133,7 +2194,7 @@ window.App = window.App || {};
       // v114: сначала снимаем временные эффекты — иначе максимум счётчика
       // посчитается вместе с ними, и «отдых» оставит current выше максимума
       ch.cards.forEach(function (c) {
-        if (c.type === 'buff' && num(c.duration) > 0 && c.on) { c.on = false; c.left = 0; }
+        if (c.type === 'buff' && num(c.duration) > 0 && c.on) { c.on = false; c.left = 0; clearBuffShield(c); }
         // v115: отдых обнуляет щит (и постоянный, и временный)
         if (c.type === 'counter' && shieldPartsOf(c).length) { c.shieldParts = []; c.shield = 0; }
         // v124: временные эффекты предметов (с ходами) снимаются
@@ -3477,7 +3538,8 @@ window.App = window.App || {};
     // v112: у «Прочего» эффектов нет — в просмотре не показываем даже старые
     const fx = e.category === 'misc' ? '' : (e.effects || []).map(function (ef, i) {
       const field = effectField(ef);
-      const chip = '<span class="inv-view-fx">' + esc(ef.label || fxShort(ef)) + '</span>';
+      const chip = '<span class="inv-view-fx" title="' + esc(fxShort(ef)) + '">' +
+        esc((ef.label ? '✎ ' : '') + (ef.label || fxShort(ef))) + '</span>';
       const live = effectReady(ef);
       const missing = ef.target && !findCard(ef.target);
       const opts = '<option value="">' + esc(App.t('fxNoTargetPick')) + '</option>' +
@@ -3953,7 +4015,7 @@ window.App = window.App || {};
     const chips = shown.map(function (ef) {
       const full = fxShort(ef) + ' → ' + buffTargetName(ef);
       return '<span class="buff-chip" title="' + esc(full) + '">' +
-        '<span class="buff-chip-v">' + esc(ef.label || fxChipShort(ef)) + '</span>' +
+        '<span class="buff-chip-v">' + esc((ef.label ? '✎ ' : '') + (ef.label || fxChipShort(ef))) + '</span>' +
         '<span class="buff-chip-t">' + esc(buffTargetName(ef)) + '</span>' +
       '</span>';
     }).join('');
@@ -4111,6 +4173,8 @@ window.App = window.App || {};
           c.on = !c.on;
           // v114: включили временный бафф — таймер начинается заново
           if (c.on && num(c.duration) > 0) c.left = num(c.duration);
+          // v152: щит баффа живёт, пока бафф включён
+          reconcileBuffShield(c);
         });
       });
     }
@@ -5184,79 +5248,101 @@ window.App = window.App || {};
     mutateWithMaxFill(function () { card.conditions = []; });
   }
 
-  // v83: обновить активные снимки на карточке из текущего набора.
-  // Цели и личные переопределения сохраняются; шаблон меняет только «базу».
-  function refreshFromSet(cardId) {
-    const card = findCard(cardId);
-    if (!card || card.type !== 'condition') return;
-    const set = stateSetOf(activeChar());
-    const entries = set && Array.isArray(set.entries) ? set.entries : [];
-    const jobs = [];
-    (card.conditions || []).forEach(function (snap) {
-      const entry = entries.find(function (e) {
-        return (snap.entryId && e.entryId === snap.entryId) || e.key === snap.key;
-      });
-      if (entry) jobs.push({ snap: snap, entry: entry });
+  // v153: шаблон → активный снимок. Тем же кодом обновляем состояния сразу
+  // после сохранения шаблона (этап 3.6); отдельной кнопки «обновить» больше нет.
+  // Правила: meta берём из шаблона; личные эффекты с целью сохраняются,
+  // ручные переопределения (custom) не затираются, цели остаются по индексу.
+  function applyEntryToSnapshot(card, snap, entry, setId) {
+    const memKey = condMemoryKey(snap);
+    const own = condPersonalEffects(card, memKey, snap.key);
+    const oldEffects = (snap.effects || []).slice();
+    snap.name = entry.nameKey ? App.t(entry.nameKey) : (entry.name || '');
+    snap.effect = entry.descKey ? App.t(entry.descKey) : (entry.effect || '');
+    snap.icon = entry.icon || snap.icon;
+    snap.color = entry.color || snap.color;
+    snap.shade = entry.shade || snap.shade;
+    snap.hi = entry.hi || snap.hi;
+    snap.tint = entry.tint || null;
+    snap.tintOp = num(entry.tintOp) || 0;
+    snap.category = entry.category || snap.category;
+    snap.scope = entry.scope || snap.scope;
+    snap.face = entry.face || null;
+    snap.duration = entry.duration || null;
+    if (entry.entryId) snap.entryId = entry.entryId;
+    if (setId) snap.setId = setId;
+    const tpl = (entry.effects || []).map(function (ef) {
+      return { mode: ef.mode, field: effectField(ef), value: ef.value, label: ef.label || '',
+               timing: ef.mode === 'tick' ? (ef.timing || 'start') : null };
     });
-    if (!jobs.length) { toast(App.t('condNothingToRefresh')); return; }
-    mutateWithMaxFill(function () {
-      jobs.forEach(function (job) {
-        const snap = job.snap, entry = job.entry;
-        const own = condPersonalEffects(card, condMemoryKey(snap), snap.key);
-        const oldEffects = (snap.effects || []).slice();
-        snap.name = entry.nameKey ? App.t(entry.nameKey) : (entry.name || '');
-        snap.effect = entry.descKey ? App.t(entry.descKey) : (entry.effect || '');
-        snap.icon = entry.icon || snap.icon;
-        snap.color = entry.color || snap.color;
-        snap.shade = entry.shade || snap.shade;
-        snap.hi = entry.hi || snap.hi;
-        snap.tint = entry.tint || null;
-        snap.tintOp = num(entry.tintOp) || 0;
-        snap.category = entry.category || snap.category;
-        snap.scope = entry.scope || snap.scope;
-        snap.face = entry.face || null;
-        snap.duration = entry.duration || null;
-        if (entry.entryId) snap.entryId = entry.entryId;
-        if (set) snap.setId = set.id;
-        const tpl = (entry.effects || []).map(function (ef) {
-          return { mode: ef.mode, field: effectField(ef), value: ef.value, label: ef.label || '',
-                   timing: ef.mode === 'tick' ? (ef.timing || 'start') : null };
-        });
-        if (own && own.length) {
-          // личные эффекты остаются, но target-only правки (custom=false)
-          // обновляют значение/подпись/режим из шаблона; цель сохраняется.
-          const next = [];
-          const max = Math.max(own.length, tpl.length);
-          for (let i = 0; i < max; i++) {
-            const o = own[i], t = tpl[i];
-            if (o) {
-              if (o.custom == null) {
-                const old = oldEffects[i];
-                o.custom = !old || o.value !== old.value || (o.label || '') !== (old.label || '') ||
-                  o.mode !== old.mode || effectField(o) !== effectField(old) ||
-                  (o.timing || 'start') !== (old.timing || 'start');
-              }
-              if (o.custom) next.push(cloneEffect(o));
-              else if (t) next.push({ mode: t.mode, field: t.field, value: t.value, label: t.label, target: o.target || null, custom: false, timing: t.timing });
-            } else if (t) {
-              next.push({ mode: t.mode, field: t.field, value: t.value, label: t.label,
-                target: (oldEffects[i] && oldEffects[i].target) || null, custom: false, timing: t.timing });
-            }
+    if (own && own.length) {
+      // личные эффекты остаются, но target-only правки (custom=false)
+      // обновляют значение/подпись/режим из шаблона; цель сохраняется.
+      const next = [];
+      const max = Math.max(own.length, tpl.length);
+      for (let i = 0; i < max; i++) {
+        const o = own[i], t = tpl[i];
+        if (o) {
+          if (o.custom == null) {
+            const old = oldEffects[i];
+            o.custom = !old || o.value !== old.value || (o.label || '') !== (old.label || '') ||
+              o.mode !== old.mode || effectField(o) !== effectField(old) ||
+              (o.timing || 'start') !== (old.timing || 'start');
           }
-          const memKey = condMemoryKey(snap);
-          if (next.length) card.condEffects[memKey] = next;
-          else delete card.condEffects[memKey];
-          if (memKey !== snap.key) delete card.condEffects[snap.key];
-          snap.effects = next.map(cloneEffect);
-        } else {
-          snap.effects = tpl.map(function (t, i) {
-            return { mode: t.mode, field: t.field, value: t.value, label: t.label,
-              target: (oldEffects[i] && oldEffects[i].target) || null, timing: t.timing };
-          });
+          if (o.custom) next.push(cloneEffect(o));
+          else if (t) next.push({ mode: t.mode, field: t.field, value: t.value, label: t.label, target: o.target || null, custom: false, timing: t.timing });
+        } else if (t) {
+          next.push({ mode: t.mode, field: t.field, value: t.value, label: t.label,
+            target: (oldEffects[i] && oldEffects[i].target) || null, custom: false, timing: t.timing });
         }
+      }
+      if (!card.condEffects) card.condEffects = {};
+      if (next.length) card.condEffects[memKey] = next;
+      else delete card.condEffects[memKey];
+      if (memKey !== snap.key) delete card.condEffects[snap.key];
+      snap.effects = next.map(cloneEffect);
+    } else {
+      snap.effects = tpl.map(function (t, i) {
+        return { mode: t.mode, field: t.field, value: t.value, label: t.label,
+          target: (oldEffects[i] && oldEffects[i].target) || null, timing: t.timing };
+      });
+    }
+  }
+
+  function snapshotMatchesEntry(snap, entry) {
+    return !!((entry.entryId && snap.entryId === entry.entryId) ||
+      (entry.key && snap.key === entry.key));
+  }
+
+  // v153: активные снимки персонажа, который перешёл на копию набора, должны
+  // ссылаться на копию — иначе «обновить из набора» ищет запись в старом наборе.
+  function relinkSnapshotsToSet(fromId, toId) {
+    (state.characters || []).forEach(function (ch) {
+      if (!(ch.stateSets || [])[0] || ch.stateSets[0] !== toId) return;
+      (ch.cards || []).forEach(function (card) {
+        if (card.type !== 'condition') return;
+        (card.conditions || []).forEach(function (snap) {
+          if (snap.setId === fromId || snap.setId === toId) snap.setId = toId;
+        });
       });
     });
-    toast(App.tf('condRefreshed', { n: jobs.length }));
+  }
+
+  // v153: после сохранения шаблона обновляем активные состояния у ВСЕХ
+  // персонажей: набор общий на устройстве, иначе у второго листа остались бы
+  // старые числа. Цели сохраняются (см. applyEntryToSnapshot).
+  function syncEntryToCharacters(set, entry) {
+    let n = 0;
+    (state.characters || []).forEach(function (ch) {
+      (ch.cards || []).forEach(function (card) {
+        if (card.type !== 'condition') return;
+        (card.conditions || []).forEach(function (snap) {
+          if (!snapshotMatchesEntry(snap, entry)) return;
+          applyEntryToSnapshot(card, snap, entry, set.id);
+          n++;
+        });
+      });
+    });
+    return n;
   }
 
   // ===== Тики (слой 2) =====
@@ -5329,7 +5415,7 @@ window.App = window.App || {};
             const at = num(card.left) > 0 ? num(card.left) : dur;
             card.left = Math.max(0, at - 1);
             durationChanged = true;
-            if (card.left <= 0) { card.on = false; expired.push(card.name || ''); }
+            if (card.left <= 0) { card.on = false; clearBuffShield(card); expired.push(card.name || ''); }
           }
         } else if (card.type === 'inventory') {
           // v124: временные эффекты предметов тикают в карточке инвентаря
@@ -5424,6 +5510,8 @@ window.App = window.App || {};
   // Второй слой: живая мини-кукла сверху + список активных. «Добавить состояние»
   // Иконка «сбросить все» — круговая стрелка (кнопка в слое состояния)
   const COND_RESET_SVG = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3.5 12a8.5 8.5 0 1 0 2.6-6.1"/><path d="M3 4v5h5"/></svg>';
+  // v148: сохранить изменения состояния в набор и снять состояние (не удалить)
+  const COND_UNSET_SVG = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><circle cx="12" cy="12" r="8.5"/><path d="M6.5 17.5L17.5 6.5"/></svg>';
   // Иконка «экспорт набора» в шапке набора (в настройках)
   const SET_EXPORT_SVG = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3v11"/><path d="M8 10l4 4 4-4"/><path d="M4 17v3h16v-3"/></svg>';
 
@@ -5431,26 +5519,24 @@ window.App = window.App || {};
   // Эффект хранится на карточке (card.condEffects по ключу состояния), а не в наборе:
   // набор общий для всех персонажей устройства, а цель — id карточки конкретного листа.
   // Поэтому набор может отключаться/сменяться без потери привязок.
-  const FX_MODE_KEYS = { add: 'fxOpAdd', mul: 'fxOpMul', set: 'fxOpSet', cap: 'fxOpCap', dice: 'fxOpDice', block: 'fxOpBlock', tick: 'fxOpTick', adv: 'fxOpAdv', dis: 'fxOpDis' };
+  const FX_MODE_KEYS = { add: 'fxOpAdd', mul: 'fxOpMul', div: 'fxOpDiv', set: 'fxOpSet', cap: 'fxOpCap', dice: 'fxOpDice', block: 'fxOpBlock', tick: 'fxOpTick', adv: 'fxOpAdv', dis: 'fxOpDis' };
   const FX_MODE_SHORT_KEYS = { add: 'fxOpAddShort' };
   function fxModeShort(mode) { return App.t(FX_MODE_SHORT_KEYS[mode] || FX_MODE_KEYS[mode] || 'fxOpAdd'); }
-  // подсказка живёт прямо в поле «Значение» и зависит от режима —
-  // иначе при «умножить» висело «например -2 или 1d6»
-  const FX_MODE_PH = { add: 'fxPhAdd', mul: 'fxPhMul', set: 'fxPhSet', cap: 'fxPhCap', dice: 'fxPhDice', tick: 'fxPhTick', adv: 'fxPhUses', dis: 'fxPhUses' };
   const FX_FIELD_KEYS = { bonus: 'fxFieldBonus', max: 'fxFieldMax', value: 'fxFieldValue', charges: 'fxFieldCharges', current: 'fxFieldCurrent', shield: 'fxFieldShield' };
   // v91: короткие имена полей для чипов на карточке; полные остаются в редакторе
   // и в подсказке, чтобы «−2 макс» не превращалось в «−2 максимум → Здоровье».
-  const FX_SHORT_FIELD_KEYS = { bonus: 'fxShortBonus', max: 'fxShortMax', value: 'fxShortValue', charges: 'fxShortCharges', current: 'fxShortCurrent' };
-  function fxModeText(mode) { return App.t(FX_MODE_KEYS[mode] || 'fxOpAdd'); }
+  const FX_SHORT_FIELD_KEYS = { bonus: 'fxShortBonus', max: 'fxShortMax', value: 'fxShortValue', charges: 'fxShortCharges', current: 'fxShortCurrent', shield: 'fxShortShield' };
   function fxFieldText(field) { return App.t(FX_FIELD_KEYS[field] || 'fxFieldBonus'); }
   function fxChipShort(ef) {
     const f = App.t(FX_SHORT_FIELD_KEYS[effectField(ef)] || 'fxShortBonus');
     if (ef.mode === 'block') return App.t('fxOpBlockShort');
+    if (effectField(ef) === 'shield') return '🛡 ' + String(ef.value == null ? '' : ef.value).replace(/^\+/, '').trim();
     if (ef.mode === 'adv') return App.t('fxOpAdvShort') + (num(ef.value) > 1 ? ' ×' + num(ef.value) : '');
     if (ef.mode === 'dis') return App.t('fxOpDisShort') + (num(ef.value) > 1 ? ' ×' + num(ef.value) : '');
     let s = String(ef.value == null ? '' : ef.value).trim();
     if (ef.mode === 'dice') return '+' + s.replace(/^\+/, '');
     if (ef.mode === 'mul') return '×' + s.replace(/^[*×]/, '') + ' ' + f;
+    if (ef.mode === 'div') return '÷' + s.replace(/^[/÷]/, '') + ' ' + f;
     if (ef.mode === 'set') return '= ' + s + ' ' + f;
     if (ef.mode === 'cap') return '≤ ' + s + ' ' + f;
     if (ef.mode === 'tick') return '⏱ ' + s + ' ' + f;
@@ -5460,11 +5546,13 @@ window.App = window.App || {};
   function fxShort(ef) {
     const f = fxFieldText(effectField(ef));
     if (ef.mode === 'block') return App.t('fxOpBlock');
+    if (effectField(ef) === 'shield') return '🛡 ' + String(ef.value == null ? '' : ef.value).replace(/^\+/, '').trim();
     if (ef.mode === 'adv') return App.t('fxOpAdv') + ' → ' + f + (num(ef.value) > 1 ? ' ×' + num(ef.value) : '');
     if (ef.mode === 'dis') return App.t('fxOpDis') + ' → ' + f + (num(ef.value) > 1 ? ' ×' + num(ef.value) : '');
     if (ef.mode === 'tick') return '⏱ ' + (ef.value == null ? '' : ef.value) + ' ' + f;
     if (ef.mode === 'dice') return '+' + (ef.value || '') + ' ' + f;
     if (ef.mode === 'mul') return '×' + String(ef.value == null ? '' : ef.value).replace(/^[*×]/, '') + ' ' + f;
+    if (ef.mode === 'div') return '÷' + String(ef.value == null ? '' : ef.value).replace(/^[/÷]/, '') + ' ' + f;
     if (ef.mode === 'set') return '= ' + ef.value + ' ' + f;
     if (ef.mode === 'cap') return '≤ ' + ef.value + ' ' + f;
     return String(ef.value) + ' ' + f;
@@ -5475,6 +5563,529 @@ window.App = window.App || {};
   function cloneEffect(ef) {
     return { mode: ef.mode, field: effectField(ef), value: ef.value, label: ef.label || '', target: ef.target || null, custom: !!ef.custom,
              timing: ef.mode === 'tick' ? (ef.timing || 'start') : null };
+  }
+
+  // ===== v153: общий редактор эффекта (модалка) =====
+  // Хранимый эффект не меняется: {mode, field, value, label, target, timing}.
+  // Черновик переводит его в «суть» (Число / Бросок / Доп. кубик / Каждый ход /
+  // Запрет / Щит) и обратно, поэтому старые записи открываются без потерь.
+  // Контекст задаёт только доступное: цели, поля, режимы — форма одна.
+  const FX_KIND_ORDER = ['number', 'roll', 'die', 'tick', 'block', 'shield'];
+  const FX_KIND_GLYPHS = { roll: '▲▼', die: '🎲', tick: '⏱', block: '⊘', shield: '🛡' };
+  const FX_KIND_LABEL_KEYS = { number: 'fxKindNumber', roll: 'fxKindRoll', die: 'fxKindDie', tick: 'fxKindTick', block: 'fxKindBlock', shield: 'fxKindShield' };
+  const FX_KIND_HINT_KEYS = { number: 'fxHintNumber', roll: 'fxHintRoll', die: 'fxHintDie', tick: 'fxHintTick', block: 'fxHintBlock', shield: 'fxHintShield' };
+  const FX_KIND_FIELDS = { roll: 'bonus', die: 'bonus', tick: 'current', block: 'charges', shield: 'shield' };
+  const FX_MATH_MODES = ['add', 'mul', 'div', 'set', 'cap'];
+  const FX_DIE_SIDES = [4, 6, 8, 10, 12, 20];
+
+  let fxLayerState = null;   // {d, cfg, error, edit}
+  let fxLayerReturn = null;  // куда вернуть фокус после закрытия
+
+  function fxIsOpen() {
+    const m = document.getElementById('fxModal');
+    return !!m && !m.classList.contains('hidden');
+  }
+
+  // «Изменить» — это +, −, × или ÷: операцию задаёт первый символ значения.
+  // Без символа считаем прибавлением — одна кнопка покрывает всё.
+  function fxResolveValueMode(uiMode, raw) {
+    let value = String(raw == null ? '' : raw).trim();
+    let mode = uiMode;
+    if (uiMode === 'edit') {
+      if (/^[×*]/.test(value)) { mode = 'mul'; value = value.replace(/^[×*]\s*/, ''); }
+      else if (/^[/÷]/.test(value)) { mode = 'div'; value = value.replace(/^[/÷]\s*/, ''); }
+      else { mode = 'add'; value = value.replace(/^\+\s*/, ''); }
+    } else if (uiMode === 'set') {
+      value = value.replace(/^=\s*/, '');
+    } else if (uiMode === 'cap') {
+      value = value.replace(/^≤\s*/, '');
+    }
+    return { mode: mode, value: value };
+  }
+
+  // «2d6»; старые записи «6» читаем как 1d6, мусор — как 1d6
+  function fxDieParts(raw) {
+    const s = String(raw == null ? '' : raw).trim();
+    const m = /^(\d*)d(\d+)$/i.exec(s);
+    if (m) {
+      return { count: Math.max(1, Math.min(99, parseInt(m[1] || '1', 10) || 1)), sides: parseInt(m[2], 10) };
+    }
+    const n = parseInt(s, 10);
+    if (isFinite(n) && n > 1) return { count: 1, sides: n };
+    return { count: 1, sides: 6 };
+  }
+
+  function fxHasMode(cfg, field, mode, target) {
+    return (cfg.modesFor(field, target) || []).indexOf(mode) !== -1;
+  }
+  // поля для «Числа»: текущее и щит — отдельные виды эффекта, не поле числа
+  function fxNumberFields(cfg, target) {
+    return (cfg.fieldsFor(target) || []).filter(function (f) {
+      if (f === 'shield' || f === 'current') return false;
+      return FX_MATH_MODES.some(function (m) { return fxHasMode(cfg, f, m, target); });
+    });
+  }
+  function fxAvailableKinds(cfg, target) {
+    return (cfg.kinds || FX_KIND_ORDER).filter(function (k) {
+      if (k === 'number') return fxNumberFields(cfg, target).length > 0;
+      if (k === 'roll') return fxHasMode(cfg, 'bonus', 'adv', target) || fxHasMode(cfg, 'bonus', 'dis', target);
+      if (k === 'die') return fxHasMode(cfg, 'bonus', 'dice', target);
+      if (k === 'tick') return fxHasMode(cfg, 'current', 'tick', target);
+      if (k === 'block') return fxHasMode(cfg, 'charges', 'block', target);
+      if (k === 'shield') return (cfg.fieldsFor(target) || []).indexOf('shield') !== -1;
+      return false;
+    });
+  }
+  function fxTargetsFor(cfg, kind, field) {
+    if (!cfg.targetsFor) return null;
+    return cfg.targetsFor(kind, field) || [];
+  }
+
+  function fxNewDraft() {
+    return { kind: 'number', mode: 'edit', field: '', target: null,
+             value: '', label: '', timing: 'start', duration: '' };
+  }
+
+  function fxDraftFromEffect(ef) {
+    const d = fxNewDraft();
+    if (!ef) return d;
+    const mode = ef.mode || 'add';
+    const field = effectField(ef);
+    let value = String(ef.value == null ? '' : ef.value);
+    d.label = ef.label || '';
+    d.target = ef.target || null;
+    d.timing = ef.timing === 'end' ? 'end' : 'start';
+    d.duration = ef.duration == null ? '' : String(ef.duration);
+    if (mode === 'adv' || mode === 'dis') {
+      d.kind = 'roll'; d.mode = mode; d.field = 'bonus';
+      d.value = String(Math.max(1, num(ef.value) || 1));
+    } else if (mode === 'dice') {
+      const p = fxDieParts(value);
+      d.kind = 'die'; d.mode = 'dice'; d.field = 'bonus';
+      d.value = p.count + 'd' + p.sides;
+    } else if (mode === 'tick') {
+      d.kind = 'tick'; d.mode = 'tick'; d.field = 'current'; d.value = value;
+    } else if (mode === 'block') {
+      d.kind = 'block'; d.mode = 'block'; d.field = 'charges'; d.value = '';
+    } else if (field === 'shield') {
+      d.kind = 'shield'; d.mode = 'edit'; d.field = 'shield'; d.value = value.replace(/^\+/, '');
+    } else {
+      d.kind = 'number'; d.field = field;
+      if (mode === 'mul') { d.mode = 'edit'; d.value = '×' + value.replace(/^[*×]\s*/, ''); }
+      else if (mode === 'div') { d.mode = 'edit'; d.value = '÷' + value.replace(/^[/÷]\s*/, ''); }
+      else if (mode === 'set') { d.mode = 'set'; d.value = value.replace(/^=\s*/, ''); }
+      else if (mode === 'cap') { d.mode = 'cap'; d.value = value.replace(/^≤\s*/, ''); }
+      else { d.mode = 'edit'; d.value = value; }
+    }
+    return d;
+  }
+
+  // подгоняем черновик под контекст: цель, вид, поле.
+  // Вид из старой записи не выкидываем, иначе эффект молча потеряет смысл.
+  function fxClampDraft(d, cfg, keepKind) {
+    const targets = fxTargetsFor(cfg, d.kind, d.field);
+    if (targets) {
+      if (!targets.some(function (c) { return c.id === d.target; })) {
+        d.target = targets.length ? targets[0].id : null;
+      }
+    } else {
+      d.target = null;
+    }
+    const kinds = fxAvailableKinds(cfg, d.target);
+    if (kinds.indexOf(d.kind) === -1 && !keepKind) d.kind = kinds[0] || 'number';
+    if (d.kind === 'number') {
+      const fields = fxNumberFields(cfg, d.target);
+      if (fields.indexOf(d.field) === -1) d.field = fields[0] || '';
+      if (['edit', 'set', 'cap'].indexOf(d.mode) === -1) d.mode = 'edit';
+    } else {
+      d.field = FX_KIND_FIELDS[d.kind] || d.field;
+      if (d.kind === 'roll') {
+        if (d.mode !== 'adv' && d.mode !== 'dis') d.mode = 'adv';
+      } else if (d.kind === 'die') d.mode = 'dice';
+      else if (d.kind === 'tick') d.mode = 'tick';
+      else if (d.kind === 'block') d.mode = 'block';
+      else if (d.kind === 'shield') d.mode = 'edit';
+    }
+  }
+
+  function fxEffectFromDraft(d, cfg) {
+    const ef = { mode: 'add', field: 'bonus', value: '', label: (d.label || '').trim(), target: null };
+    if (cfg.targetsFor) {
+      if (!d.target && !cfg.targetOptional) {
+        const list = fxTargetsFor(cfg, d.kind, d.field) || [];
+        return { error: { where: 'target', key: list.length ? 'fxNeedTarget' : 'fxNoTargets' } };
+      }
+      ef.target = d.target || null;
+    }
+    const raw = String(d.value == null ? '' : d.value).trim();
+    if (d.kind === 'number') {
+      const r = fxResolveValueMode(d.mode, raw);
+      if (!r.value) return { error: { where: 'value', key: 'fxValueNeeded' } };
+      if (r.mode === 'div' && /^[-+]?0+(\.0+)?$/.test(r.value)) {
+        return { error: { where: 'value', key: 'fxDivByZero' } };
+      }
+      ef.mode = r.mode;
+      ef.field = d.field;
+      ef.value = r.value;
+    } else if (d.kind === 'roll') {
+      if (!/^\d+$/.test(raw) || parseInt(raw, 10) < 1) {
+        return { error: { where: 'value', key: 'fxBadRolls' } };
+      }
+      ef.mode = d.mode === 'dis' ? 'dis' : 'adv';
+      ef.field = 'bonus';
+      ef.value = String(Math.min(99, parseInt(raw, 10)));
+    } else if (d.kind === 'die') {
+      const p = fxDieParts(raw);
+      if (FX_DIE_SIDES.indexOf(p.sides) === -1) return { error: { where: 'value', key: 'fxBadDie' } };
+      ef.mode = 'dice';
+      ef.field = 'bonus';
+      ef.value = p.count + 'd' + p.sides;
+    } else if (d.kind === 'tick') {
+      if (!raw) return { error: { where: 'value', key: 'fxValueNeeded' } };
+      ef.mode = 'tick';
+      ef.field = 'current';
+      ef.value = raw;
+      ef.timing = d.timing === 'end' ? 'end' : 'start';
+    } else if (d.kind === 'block') {
+      ef.mode = 'block';
+      ef.field = 'charges';
+      ef.value = '';
+    } else if (d.kind === 'shield') {
+      if (!raw) return { error: { where: 'value', key: 'fxValueNeeded' } };
+      ef.mode = 'add';
+      ef.field = 'shield';
+      ef.value = raw;
+    }
+    if (cfg.allowDuration && d.kind !== 'block') {
+      ef.duration = num(d.duration) > 0 ? Math.round(num(d.duration)) : null;
+    }
+    // битую формулу ловим сразу, но только когда есть цель: в шаблоне
+    // ссылки на карточки ещё не к чему привязать
+    if (cfg.targetsFor && d.target && (d.kind === 'number' || d.kind === 'tick')) {
+      const t = findCard(d.target);
+      if (t && exprNumber(t, ef.value) == null) {
+        return { error: { where: 'value', key: 'fxBadFormula' } };
+      }
+    }
+    return { ef: ef };
+  }
+
+  function fxKindChip(kind, active) {
+    const g = FX_KIND_GLYPHS[kind];
+    return '<button type="button" class="fx-chip' + (active ? ' on' : '') + '" data-fx-kind="' + kind + '"' +
+      ' aria-pressed="' + (active ? 'true' : 'false') + '">' +
+      (g ? '<span class="fx-g">' + g + '</span>' : '') + esc(App.t(FX_KIND_LABEL_KEYS[kind])) + '</button>';
+  }
+
+  // тело модалки: собирается заново на каждое изменение вида/цели/поля
+  function fxEditorHTML(d, cfg, error) {
+    const kinds = fxAvailableKinds(cfg, d.target);
+    if (kinds.indexOf(d.kind) === -1) kinds.push(d.kind);
+    const targets = fxTargetsFor(cfg, d.kind, d.field);
+    const targetCard = d.target ? findCard(d.target) : null;
+    let h = '';
+
+    h += '<div class="fx-group"><div class="fx-group-label">' + esc(App.t('fxGroupDoes')) + '</div>' +
+      '<div class="fx-chips">' + kinds.map(function (k) { return fxKindChip(k, k === d.kind); }).join('') + '</div>' +
+      '<div class="fx-hint">' + esc(App.t(FX_KIND_HINT_KEYS[d.kind] || 'fxHintNumber')) + '</div></div>';
+
+    if (targets) {
+      h += '<div class="fx-group"><div class="fx-group-label">' + esc(App.t('fxGroupWhere')) + '</div>' +
+        '<button type="button" class="fx-target-btn' + (!targetCard && !cfg.targetOptional ? ' fx-invalid' : '') + '" data-fx-target-btn aria-haspopup="menu">' +
+          '<span>' + esc(targetCard ? targetCard.name : App.t('fxPickTarget')) + '</span>' +
+          '<span class="fx-arr">▾</span>' +
+        '</button>' +
+        (error && error.where === 'target' ? '<div class="fx-error">' + esc(App.t(error.key)) + '</div>' : '') +
+        '</div>';
+    }
+
+    if (d.kind === 'number') {
+      const modes = FX_MATH_MODES.filter(function (m) { return fxHasMode(cfg, d.field, m, d.target); });
+      const modeChips = [
+        { id: 'edit', on: d.mode === 'edit', key: 'fxModeEdit', need: ['add'] },
+        { id: 'set', on: d.mode === 'set', key: 'fxModeSet', need: ['set'] },
+        { id: 'cap', on: d.mode === 'cap', key: 'fxModeCap', need: ['cap'] }
+      ].filter(function (m) { return m.need.some(function (n) { return modes.indexOf(n) !== -1; }); });
+      const fields = fxNumberFields(cfg, d.target);
+      h += '<div class="fx-group"><div class="fx-group-label">' + esc(App.t('fxMode')) + '</div>' +
+        '<div class="fx-chips">' + modeChips.map(function (m) {
+          return '<button type="button" class="fx-chip' + (m.on ? ' on' : '') + '" data-fx-mode="' + m.id + '"' +
+            ' aria-pressed="' + (m.on ? 'true' : 'false') + '">' + esc(App.t(m.key)) + '</button>';
+        }).join('') + '</div></div>';
+      if (fields.length) {
+        h += '<div class="fx-group"><div class="fx-group-label">' + esc(App.t('fxField')) + '</div>' +
+          '<div class="fx-chips">' + fields.map(function (f) {
+            if (fields.length === 1) {
+              return '<span class="fx-chip fx-chip-static">' + esc(fxFieldText(f)) + '</span>';
+            }
+            return '<button type="button" class="fx-chip' + (f === d.field ? ' on' : '') + '" data-fx-field="' + f + '"' +
+              ' aria-pressed="' + (f === d.field ? 'true' : 'false') + '">' + esc(fxFieldText(f)) + '</button>';
+          }).join('') + '</div></div>';
+      }
+    }
+
+    if (d.kind !== 'block') {
+      let label = App.t('fxGroupValue');
+      let row = '';
+      if (d.kind === 'roll') {
+        label = App.t('fxRollsDir');
+        row = '<span class="fx-roll-dirs">' +
+            '<button type="button" class="fx-chip' + (d.mode !== 'dis' ? ' on' : '') + '" data-fx-roll="adv"' +
+              ' aria-pressed="' + (d.mode !== 'dis' ? 'true' : 'false') + '">▲ ' + esc(App.t('fxOpAdv')) + '</button>' +
+            '<button type="button" class="fx-chip' + (d.mode === 'dis' ? ' on' : '') + '" data-fx-roll="dis"' +
+              ' aria-pressed="' + (d.mode === 'dis' ? 'true' : 'false') + '">▼ ' + esc(App.t('fxOpDis')) + '</button>' +
+          '</span>' +
+          '<input type="number" min="1" max="99" step="1" inputmode="numeric" data-fx-input="rolls"' +
+            ' value="' + esc(Math.max(1, parseInt(d.value, 10) || 1)) + '" aria-label="' + esc(App.t('fxRollsDir')) + '">';
+      } else if (d.kind === 'die') {
+        label = App.t('fxDieLabel');
+        const p = fxDieParts(d.value);
+        row = '<input type="number" min="1" max="99" step="1" inputmode="numeric" data-fx-input="dieCount"' +
+            ' value="' + p.count + '" aria-label="' + esc(App.t('fxDieLabel')) + '">' +
+          FX_DIE_SIDES.map(function (n) {
+            return '<button type="button" class="fx-chip' + (p.sides === n ? ' on' : '') + '" data-fx-die="' + n + '"' +
+              ' aria-pressed="' + (p.sides === n ? 'true' : 'false') + '">d' + n + '</button>';
+          }).join('');
+      } else {
+        const ph = d.kind === 'shield' ? '10' : d.kind === 'tick' ? App.t('fxPhTick')
+          : d.mode === 'set' ? App.t('fxPhSet') : d.mode === 'cap' ? App.t('fxPhCap') : App.t('fxPhAdd');
+        if (d.kind === 'shield') label = App.t('fxShieldAmount');
+        row = '<input type="text" autocomplete="off" spellcheck="false" data-fx-input="value"' +
+            ' value="' + esc(d.value) + '" placeholder="' + esc(ph) + '" aria-label="' + esc(label) + '">' +
+          '<button type="button" class="fx-step" data-fx-step="-1" aria-label="−">−</button>' +
+          '<button type="button" class="fx-step" data-fx-step="1" aria-label="+">+</button>';
+      }
+      h += '<div class="fx-group"><div class="fx-group-label">' + esc(label) + '</div>' +
+        '<div class="fx-value-row' + (d.kind === 'die' ? ' fx-die' : d.kind === 'roll' ? ' fx-roll' : '') + '">' + row + '</div>' +
+        (error && error.where === 'value' ? '<div class="fx-error">' + esc(App.t(error.key)) + '</div>' : '') +
+        '</div>';
+    }
+
+    if (d.kind === 'tick') {
+      h += '<div class="fx-group"><div class="fx-group-label">' + esc(App.t('fxGroupWhen')) + '</div>' +
+        '<div class="fx-chips">' +
+          '<button type="button" class="fx-chip' + (d.timing !== 'end' ? ' on' : '') + '" data-fx-timing="start"' +
+            ' aria-pressed="' + (d.timing !== 'end' ? 'true' : 'false') + '">' + esc(App.t('fxTimingStart')) + '</button>' +
+          '<button type="button" class="fx-chip' + (d.timing === 'end' ? ' on' : '') + '" data-fx-timing="end"' +
+            ' aria-pressed="' + (d.timing === 'end' ? 'true' : 'false') + '">' + esc(App.t('fxTimingEnd')) + '</button>' +
+        '</div></div>';
+    }
+
+    h += '<details class="fx-details"' + ((d.label || (cfg.allowDuration && d.duration)) ? ' open' : '') + '>' +
+      '<summary>' + esc(App.t('fxLabelField')) + '</summary>' +
+      '<div class="fx-details-body">' +
+        '<div class="field"><input type="text" data-fx-input="label" autocomplete="off" spellcheck="false"' +
+          ' maxlength="60" value="' + esc(d.label) + '" placeholder="' + esc(App.t('fxLabelPh')) + '"' +
+          ' aria-label="' + esc(App.t('fxLabelField')) + '"></div>' +
+        (cfg.allowDuration
+          ? '<div class="field"><label>' + esc(App.t('fxDuration')) + '</label>' +
+              '<input type="number" min="0" max="999" step="1" inputmode="numeric" data-fx-input="duration"' +
+              ' value="' + esc(d.duration) + '" placeholder="—"></div>'
+          : '') +
+      '</div></details>';
+    return h;
+  }
+
+  function renderFxEditor() {
+    const st = fxLayerState;
+    const modal = document.getElementById('fxModal');
+    if (!st || !modal) return;
+    const edit = st.edit;
+    document.getElementById('fxTitle').textContent = edit ? App.t('fxEdit') : App.t('fxEffectNewTitle');
+    document.getElementById('fxBody').innerHTML = fxEditorHTML(st.d, st.cfg, st.error);
+    const act = document.getElementById('fxActions');
+    act.innerHTML = '';
+    const addBtn = function (label, cls, onClick) {
+      const b = document.createElement('button');
+      b.type = 'button';
+      b.textContent = label;
+      if (cls) b.className = cls;
+      b.addEventListener('click', onClick);
+      act.appendChild(b);
+    };
+    // v154: удаление и дублирование живут только на плашке — в окне не дублируем
+    addBtn(App.t('cancel'), '', function () { closeFxEditor(); });
+    addBtn(App.t('save'), 'primary', function () { fxTrySave('save'); });
+  }
+
+  function fxTrySave(mode) {
+    const st = fxLayerState;
+    if (!st) return;
+    const res = fxEffectFromDraft(st.d, st.cfg);
+    if (res.error) {
+      st.error = res.error;
+      renderFxEditor();
+      return;
+    }
+    st.error = null;
+    const cb = st.cfg.onSave;
+    closeFxEditor();
+    if (cb) cb(res.ef, mode || 'save');
+  }
+
+  function fxOpenTargetMenu(anchor) {
+    const st = fxLayerState;
+    if (!st) return;
+    const list = fxTargetsFor(st.cfg, st.d.kind, st.d.field) || [];
+    const menu = document.createElement('div');
+    menu.className = 'ctxmenu';
+    menu.id = 'fxTargetMenu';
+    menu.innerHTML = list.length
+      ? list.map(function (c) {
+          return '<button type="button" data-fx-target="' + esc(c.id) + '">' + esc(c.name) + '</button>';
+        }).join('')
+      : '<div class="fx-empty">' + esc(App.t('fxNoTargetsHere')) + '</div>';
+    menu.addEventListener('click', function (e) {
+      const b = e.target.closest('[data-fx-target]');
+      if (!b) return;
+      st.d.target = b.dataset.fxTarget;
+      st.error = null;
+      closeMountedMenu(false);
+      fxClampDraft(st.d, st.cfg);
+      renderFxEditor();
+    });
+    mountMenu(menu, anchor, { toggle: true });
+  }
+
+  function openFxEditor(cfg) {
+    if (fxIsOpen()) return;
+    const st = {
+      cfg: cfg,
+      d: fxDraftFromEffect(cfg.effect),
+      edit: !!cfg.effect,
+      error: null
+    };
+    fxClampDraft(st.d, cfg, true);
+    fxLayerState = st;
+    fxLayerReturn = cfg.anchor || document.activeElement;
+    const modal = document.getElementById('fxModal');
+    document.getElementById('fxBackdrop').classList.remove('hidden');
+    modal.classList.remove('hidden');
+    renderFxEditor();
+    try { modal.focus({ preventScroll: true }); } catch (e) { modal.focus(); }
+  }
+
+  function closeFxEditor() {
+    if (!fxIsOpen()) return;
+    const ret = fxLayerReturn;
+    fxLayerReturn = null;
+    fxLayerState = null;
+    closeMountedMenu(false);
+    document.getElementById('fxBackdrop').classList.add('hidden');
+    const modal = document.getElementById('fxModal');
+    modal.classList.add('hidden');
+    document.getElementById('fxTitle').textContent = '';
+    document.getElementById('fxBody').innerHTML = '';
+    document.getElementById('fxActions').innerHTML = '';
+    let target = ret;
+    if (!target || !target.isConnected) target = document.querySelector('.fx-add');
+    if (target && target.focus) {
+      try { target.focus({ preventScroll: true }); } catch (e) { target.focus(); }
+    }
+  }
+
+  // один обработчик на всё тело формы: разметка перерисовывается, слушатель остаётся
+  function fxOnBodyClick(e) {
+    const st = fxLayerState;
+    if (!st) return;
+    const d = st.d;
+    if (e.target.closest('[data-fx-target-btn]')) {
+      fxOpenTargetMenu(e.target.closest('[data-fx-target-btn]'));
+      return;
+    }
+    const kind = e.target.closest('[data-fx-kind]');
+    if (kind) {
+      d.kind = kind.dataset.fxKind;
+      d.value = '';
+      if (d.kind === 'roll') { d.mode = 'adv'; d.value = '1'; }
+      if (d.kind === 'die') d.value = '1d6';
+      st.error = null;
+      fxClampDraft(d, st.cfg);
+      renderFxEditor();
+      return;
+    }
+    const mode = e.target.closest('[data-fx-mode]');
+    if (mode) { d.mode = mode.dataset.fxMode; st.error = null; renderFxEditor(); return; }
+    const field = e.target.closest('[data-fx-field]');
+    if (field) { d.field = field.dataset.fxField; st.error = null; fxClampDraft(d, st.cfg); renderFxEditor(); return; }
+    const timing = e.target.closest('[data-fx-timing]');
+    if (timing) { d.timing = timing.dataset.fxTiming; renderFxEditor(); return; }
+    const roll = e.target.closest('[data-fx-roll]');
+    if (roll) { d.mode = roll.dataset.fxRoll; renderFxEditor(); return; }
+    const die = e.target.closest('[data-fx-die]');
+    if (die) {
+      const p = fxDieParts(d.value);
+      d.value = p.count + 'd' + die.dataset.fxDie;
+      renderFxEditor();
+      return;
+    }
+    const step = e.target.closest('[data-fx-step]');
+    if (step) {
+      const n = parseInt(d.value, 10);
+      if (!isFinite(n)) return;
+      d.value = String(n + (step.dataset.fxStep === '1' ? 1 : -1));
+      renderFxEditor();
+      return;
+    }
+  }
+
+  function fxOnBodyInput(e) {
+    const st = fxLayerState;
+    if (!st) return;
+    const input = e.target.closest('[data-fx-input]');
+    if (!input) return;
+    const what = input.dataset.fxInput;
+    const d = st.d;
+    if (what === 'value') d.value = input.value;
+    else if (what === 'label') d.label = input.value;
+    else if (what === 'duration') d.duration = input.value;
+    else if (what === 'rolls') d.value = String(Math.max(1, Math.min(99, parseInt(input.value, 10) || 1)));
+    else if (what === 'dieCount') {
+      const p = fxDieParts(d.value);
+      d.value = Math.max(1, Math.min(99, parseInt(input.value, 10) || 1)) + 'd' + p.sides;
+    }
+    if (st.error) {
+      st.error = null;
+      const errs = document.querySelectorAll('#fxBody .fx-error');
+      Array.prototype.forEach.call(errs, function (n) { n.remove(); });
+    }
+  }
+
+  // Плашки списка эффектов: одна разметка у состояний, предметов и баффов.
+  // opts: { emptyText, targets } — targets включает подпись цели (в шаблоне её нет).
+  function fxRowSub(ef, opts) {
+    const parts = [];
+    if (opts && opts.targets && ef.target) {
+      const c = findCard(ef.target);
+      parts.push(c ? c.name : App.t('fxNoTarget'));
+    }
+    if (ef.mode === 'tick') parts.push(App.t(ef.timing === 'end' ? 'fxTimingEnd' : 'fxTimingStart'));
+    if (num(ef.duration) > 0) parts.push(App.tf('condDurShort', { n: num(ef.duration) }));
+    return parts.join(' · ');
+  }
+
+  function fxRowsHTML(list, opts) {
+    opts = opts || {};
+    const items = list || [];
+    if (!items.length) {
+      return '<div class="fx-empty">' + esc(App.t(opts.emptyText || 'fxNoEffectsYet')) + '</div>';
+    }
+    return items.map(function (ef, i) {
+      const sub = fxRowSub(ef, opts);
+      return '<div class="fx-row" data-fx-row="' + i + '">' +
+        '<button type="button" class="fx-row-main" data-fx-edit="' + i + '"' +
+          ' title="' + esc(fxShort(ef)) + '">' +
+          '<b>' + esc(ef.label ? '✎ ' + ef.label : fxChipShort(ef)) + '</b>' +
+          (sub ? '<small>' + esc(sub) + '</small>' : '') +
+        '</button>' +
+        '<button type="button" class="fx-row-btn" data-fx-edit="' + i + '"' +
+          ' aria-label="' + esc(App.t('edit')) + '" title="' + esc(App.t('edit')) + '">✎</button>' +
+        '<button type="button" class="fx-row-btn" data-fx-dup="' + i + '"' +
+          ' aria-label="' + esc(App.t('duplicate')) + '" title="' + esc(App.t('duplicate')) + '">' + DUP_SVG + '</button>' +
+        '<button type="button" class="fx-row-btn fx-del" data-fx-del="' + i + '"' +
+          ' aria-label="' + esc(App.t('delete')) + '" title="' + esc(App.t('delete')) + '">' + TRASH_SVG + '</button>' +
+        '</div>';
+    }).join('');
   }
   // один источник правды: личные эффекты карточки; живой снимок состояния переписываем с них.
   // v86: память хранится по entryId, старый key удаляем после сохранения.
@@ -5497,149 +6108,21 @@ window.App = window.App || {};
     if (own) return own.map(cloneEffect);
     return ((live && live.effects) || []).map(cloneEffect);
   }
-  function editStateEffect(cardId, key, index, ef) {
-    mutate(function () {
-      const c = findCard(cardId);
-      if (!c) return;
-      const live = (c.conditions || []).find(function (s) { return s.key === key; });
-      const list = condEffectList(c, live);
-      if (ef) {
-        const old = index >= 0 ? list[index] : null;
-        // v83: custom — значение/подпись/режим меняли вручную. Если правили только
-        // цель, при «Обновить из набора» значение должно обновиться из шаблона.
-        if (index < 0) ef.custom = true;
-        else {
-          ef.custom = !!(old && old.custom);
-          if (!old || ef.value !== old.value || (ef.label || '') !== (old.label || '') ||
-              ef.mode !== old.mode || effectField(ef) !== effectField(old) ||
-              (ef.timing || 'start') !== (old.timing || 'start')) {
-            ef.custom = true;
-          }
-        }
-        if (index >= 0) list[index] = ef; else list.push(ef);
-      }
-      else if (index >= 0) list.splice(index, 1);
-      savePersonalEffects(cardId, condMemoryKey(live) || key, list, key);
-    });
-  }
-
-  function openEffectModal(cardId, stateId, index) {
+  // v155: в игре у эффекта меняется только цель — значение и подпись приходят
+  // из шаблона. Пишем в личную память, чтобы цель пережила снятие состояния.
+  function setEffectTarget(cardId, stateId, index, targetId) {
     const card = findCard(cardId);
-    const st = card && (card.conditions || []).find(function (s) { return s.id === stateId; });
-    if (!st) return;
-    const targets = (activeChar().cards || []).filter(function (c) { return MOD_FIELDS[c.type]; });
-    if (!targets.length) { toast(App.t('fxNoTargets')); return; }
-
-    const own = condEffectList(card, st);
-    const cur = index >= 0 ? own[index] : null;
-    // v81: цель по умолчанию должна поддерживать поле эффекта. Иначе block/charges
-    // открывался на первом счётчике, поле становилось max, а режим — «прибавить».
-    const desiredField = cur ? effectField(cur) : 'bonus';
-    const fits = function (c) { return (MOD_FIELDS[c.type] || []).indexOf(desiredField) !== -1; };
-    const tSel = (cur && cur.target && targets.some(function (c) { return c.id === cur.target && fits(c); }))
-      ? cur.target
-      : (targets.find(fits) || targets[0]).id;
-    const tOpts = targets.map(function (c) {
-      return '<option value="' + esc(c.id) + '"' + (c.id === tSel ? ' selected' : '') + '>' + esc(c.name) + '</option>';
-    }).join('');
-
-    const el = function (id) { return document.getElementById(id); };
-    const val = function (id) { const n = el(id); return n ? n.value : ''; };
-    function fieldsOf(tId) {
-      const t = findCard(tId);
-      if (!t) return [];
-      const f = (MOD_FIELDS[t.type] || []).slice();
-      // v121: у счётчика доступно «текущее» — для тика
-      if (t.type === 'counter') f.push('current');
-      return f;
-    }
-    // v78: block — только у заклинания и только для бонуса: гасим «Применить»,
-    // кубик при этом бросается как обычно (просьба юзера). К зарядам запрет не применяем.
-    function modesOf(tId, field) {
-      const t = findCard(tId);
-      if (field === 'current') return ['tick'];
-      const out = ['add', 'mul', 'set', 'cap'];
-      // кубик есть только у навыка и заклинания и только для бонуса: «кубик в значение»
-      // на деле прибавлялся к броску — убираем эту двусмысленность
-      if (t && t.die && (t.type === 'skill' || t.type === 'spell') && field === 'bonus') out.push('dice');
-      // v121: преимущество/помеха — к бонусу любой карточки с кубиком
-      if (t && t.die && field === 'bonus') out.push('adv', 'dis');
-      if (t && t.type === 'spell' && field === 'charges') out.push('block');
-      return out;
-    }
-    // блокировка значения и подсказка зависят от режима; держим в одном месте,
-    // чтобы переключение режима и первичная отрисовка не расходились
-    function syncModeUI() {
-      const mode = val('fx-mode');
-      const block = (mode === 'block');
-      const tick = (mode === 'tick');
-      const input = el('fx-value');
-      input.disabled = block;
-      input.placeholder = block ? '—' : App.t(FX_MODE_PH[mode] || 'fxPhAdd');
-      // при переходе в «запретить» старое число не должно оставаться в поле
-      if (block) input.value = '';
-      // v121: у преимущества/помехи значение — число бросков, по умолчанию 1
-      if (!block && (mode === 'adv' || mode === 'dis') && !String(input.value).trim()) input.value = '1';
-      const tw = el('fx-timing-wrap');
-      if (tw) tw.style.display = tick ? '' : 'none';
-    }
-    function fillModes() {
-      const ms = modesOf(val('fx-target'), val('fx-field'));
-      const prev = val('fx-mode') || (cur ? cur.mode : 'add');
-      el('fx-mode').innerHTML = ms.map(function (m) {
-        return '<option value="' + m + '">' + esc(fxModeText(m)) + '</option>';
-      }).join('');
-      el('fx-mode').value = ms.indexOf(prev) !== -1 ? prev : ms[0];
-      syncModeUI();
-    }
-    function fillFields() {
-      const fs = fieldsOf(val('fx-target'));
-      const prev = val('fx-field') || (cur ? cur.field : '');
-      const pick = fs.indexOf(prev) !== -1 ? prev : fs[0];
-      el('fx-field').innerHTML = fs.map(function (f) {
-        return '<option value="' + f + '"' + (f === pick ? ' selected' : '') + '>' + esc(fxFieldText(f)) + '</option>';
-      }).join('');
-      fillModes();
-    }
-
-    const actions = [
-      { label: App.t('cancel') },
-      cur ? { label: App.t('delete'), cls: 'danger', onClick: function () {
-        editStateEffect(cardId, st.key, index, null);
-      } } : null,
-      { label: App.t('save'), cls: 'primary', onClick: function () {
-        const mode = val('fx-mode');
-        const target = val('fx-target');
-        const value = val('fx-value').trim();
-        // v121: запрету и преимуществу/помехе значение не обязательно
-        if (mode !== 'block' && mode !== 'adv' && mode !== 'dis' && !value) { toast(App.t('fxValueNeeded')); return false; }
-        editStateEffect(cardId, st.key, index, {
-          mode: mode, field: val('fx-field'), value: mode === 'block' ? '' : value,
-          label: val('fx-label').trim(), target: target,
-          timing: mode === 'tick' ? val('fx-timing') : null
-        });
-      } }
-    ].filter(Boolean);
-
-    openModal(cur ? App.t('fxEdit') : App.t('fxAdd'),
-      '<div class="field"><label>' + esc(App.t('fxTarget')) + '</label><select id="fx-target">' + tOpts + '</select></div>' +
-      // v93: «Что меняем» и «Как» рядом, как в редакторе баффа — модалка не тянется вниз
-      '<div class="fx-pair">' +
-        '<div class="field"><label>' + esc(App.t('fxField')) + '</label><select id="fx-field"></select></div>' +
-        '<div class="field"><label>' + esc(App.t('fxMode')) + '</label><select id="fx-mode"></select></div>' +
-      '</div>' +
-      '<div class="field" id="fx-timing-wrap"><label>' + esc(App.t('fxTiming')) + '</label><select id="fx-timing">' +
-        '<option value="start"' + (cur && cur.timing === 'end' ? '' : ' selected') + '>' + esc(App.t('fxTimingStart')) + '</option>' +
-        '<option value="end"' + (cur && cur.timing === 'end' ? ' selected' : '') + '>' + esc(App.t('fxTimingEnd')) + '</option>' +
-      '</select></div>' +
-      '<div class="field"><label>' + esc(App.t('fxValue')) + '</label><input id="fx-value" type="text" autocomplete="off" spellcheck="false" placeholder="' + esc(App.t('fxPhAdd')) + '" value="' + esc((cur && cur.value) || '') + '"></div>' +
-      '<div class="field"><label>' + esc(App.t('fxLabelField')) + '</label><input id="fx-label" type="text" autocomplete="off" spellcheck="false" placeholder="' + esc(App.t('fxLabelPh')) + '" value="' + esc((cur && cur.label) || '') + '"></div>',
-      actions);
-
-    el('fx-target').addEventListener('change', fillFields);
-    el('fx-field').addEventListener('change', fillModes);
-    el('fx-mode').addEventListener('change', syncModeUI);
-    fillFields();
+    const live = card && (card.conditions || []).find(function (s) { return s.id === stateId; });
+    if (!live) return;
+    const list = condEffectList(card, live);
+    const ef = list[index];
+    if (!ef) return;
+    const next = targetId || null;
+    if ((ef.target || null) === next) return;
+    ef.target = next;
+    mutate(function () {
+      savePersonalEffects(cardId, condMemoryKey(live) || live.key, list, live.key);
+    });
   }
 
   // разворачивает каталог ПРЯМО В ПАНЕЛИ (третьего окна нет) — кукла остаётся на виду
@@ -5653,13 +6136,13 @@ window.App = window.App || {};
         // слева — каталог фиксированной ширины (всегда виден, своя прокрутка)
         '<div class="cond-col cond-col-cat">' +
           '<input class="cond-search" data-role="search" type="text" autocomplete="off" spellcheck="false" placeholder="' + esc(App.t('condSearch')) + '">' +
+          '<button type="button" class="cond-new-state" data-role="newstate">＋ ' + esc(App.t('stAddState')) + '</button>' +
           '<div class="cond-pick" data-role="pick"></div>' +
         '</div>' +
         // справа — живая кукла, кнопки тиков/обновления и список активных состояний
         '<div class="cond-col cond-col-live">' +
           '<div class="cond-preview" data-role="preview"></div>' +
           '<div class="cond-actions">' +
-            '<button type="button" class="cond-refresh" data-role="refresh" title="' + esc(App.t('condRefresh')) + '">↻ ' + esc(App.t('condRefresh')) + '</button>' +
             '<button type="button" class="cond-tick" data-role="applyticks" title="' + esc(App.t('condApplyTicks')) + '">⏱ ' + esc(App.t('condApplyTicks')) + '</button>' +
           '</div>' +
           '<div class="cond-list" data-role="list"></div>' +
@@ -5672,25 +6155,34 @@ window.App = window.App || {};
     function rowsHTML(items) {
       if (!items.length) return '<div class="cond-empty">' + esc(App.t('condEmpty')) + '</div>';
       return items.map(function (s) {
-        // эффекты — отдельной строкой под описанием: видно, на что состояние влияет
+        // v155: значение эффекта приходит из шаблона и в игре не правится.
+        // У каждого эффекта — только выбор цели, как у предметов.
         const fx = (s.effects || []).map(function (ef, i) {
-          const t = findCard(ef.target);
-          const tgt = t ? t.name : App.t('fxNoTarget');
+          const field = effectField(ef);
           const full = fxShort(ef);
-          // v92: на карточке и в списке — короткая формула («−2 макс»),
-          // полная («−2 максимум») остаётся в подсказке и в редакторе.
           const short = fxChipShort(ef);
-          // v79: кубик имеет смысл только для бонуса. Старые эффекты «кубик в значение»
-          // больше не применяются — помечаем их, чтобы не выглядели рабочими.
-          const inactive = ef.mode === 'dice' && effectField(ef) !== 'bonus';
-          // v78: своя подпись заменяет описание эффекта — помечаем карандашом,
-          // иначе непонятно, откуда взялся текст, и что эффект делает на самом деле
+          const inactive = ef.mode === 'dice' && field !== 'bonus';
           const lbl = (inactive ? '⚠ ' : (ef.label ? '✎ ' : '')) + (ef.label || short);
           const tip = inactive ? App.t('fxDiceOnlyBonus')
-            : (ef.label ? App.tf('fxCustomTip', { text: full }) : full + ' · ' + App.t('fxEdit'));
-          return '<button type="button" class="cond-fx' + (inactive ? ' off' : '') + '" data-fx="' + esc(s.id) + '" data-fi="' + i + '" title="' + esc(tip) + '">' +
-            esc(lbl) + ' → ' + esc(tgt) +
-          '</button>';
+            : (ef.label ? App.tf('fxCustomTip', { text: full }) : full);
+          const targets = effectTargetCards(field);
+          const chosen = ef.target ? targets.find(function (c) { return c.id === ef.target; }) : null;
+          const missing = !!(ef.target && !chosen);
+          const noTarget = !chosen;
+          const off = inactive || noTarget;
+          let opts = '<option value="">' + esc(App.t('fxPickTarget')) + '</option>';
+          opts += targets.map(function (c) {
+            return '<option value="' + esc(c.id) + '"' + (chosen && c.id === chosen.id ? ' selected' : '') + '>' + esc(c.name) + '</option>';
+          }).join('');
+          if (missing) {
+            opts += '<option value="' + esc(ef.target) + '" selected disabled>' + esc(App.t('fxNoTarget')) + '</option>';
+          }
+          const selTip = missing ? App.t('fxNoTarget') : App.t('itemTarget');
+          return '<span class="cond-fx-line">' +
+            '<span class="cond-fx' + (off ? ' off' : '') + '" title="' + esc(tip) + '">' + esc(lbl) + '</span>' +
+            '<select class="cond-fx-sel' + (noTarget ? ' invalid' : '') + '" data-fxt="' + esc(s.id) + '" data-fi="' + i + '"' +
+              ' title="' + esc(selTip) + '" aria-label="' + esc(selTip) + '">' + opts + '</select>' +
+          '</span>';
         }).join('');
         return '<div class="cond-row">' +
           '<span class="cond-row-ic" data-ic="' + s.icon + '">' + condIcon(s.icon, s.color, s.shade, s.hi) + '</span>' +
@@ -5701,8 +6193,7 @@ window.App = window.App || {};
               '<span class="cond-row-desc">' + esc(s.effect || '') + '</span></span>' +
             (fx ? '<span class="cond-row-fxwrap">' + fx + '</span>' : '') +
           '</span>' +
-          '<button type="button" class="cond-row-fxadd" data-fxadd="' + esc(s.id) + '" title="' + esc(App.t('fxAdd')) + '" aria-label="' + esc(App.t('fxAdd')) + '">+</button>' +
-          '<button type="button" class="cond-row-del" data-cond="' + esc(s.id) + '" title="' + esc(App.t('delete')) + '" aria-label="' + esc(App.t('delete')) + '">' + TRASH_SVG + '</button>' +
+          '<button type="button" class="cond-row-del cond-row-unset" data-cond="' + esc(s.id) + '" title="' + esc(App.t('condUnset')) + '" aria-label="' + esc(App.t('condUnset')) + '">' + COND_UNSET_SVG + '</button>' +
         '</div>';
       }).join('');
     }
@@ -5726,12 +6217,16 @@ window.App = window.App || {};
         if (fx.length) {
           ds = fx.map(function (ef) { return ef.label || fxChipShort(ef); }).join(' · ');
         }
-        return '<button type="button" class="cond-pick-row' + (on ? ' on' : '') + '" data-key="' + esc(p.key) + '">' +
-          '<span class="cond-pick-ic" data-ic="' + esc(p.icon) + '">' + condIcon(p.icon, p.color, p.shade, p.hi) + '</span>' +
-          '<span class="cond-pick-txt"><span class="cond-pick-name">' + esc(nm) + '</span>' +
-          '<span class="cond-pick-desc">' + esc(ds) + '</span></span>' +
-          (on ? '<span class="cond-pick-check">✓</span>' : '') +
-        '</button>';
+        return '<div class="cond-pick-line">' +
+          '<button type="button" class="cond-pick-row' + (on ? ' on' : '') + '" data-key="' + esc(p.key) + '">' +
+            '<span class="cond-pick-ic" data-ic="' + esc(p.icon) + '">' + condIcon(p.icon, p.color, p.shade, p.hi) + '</span>' +
+            '<span class="cond-pick-txt"><span class="cond-pick-name">' + esc(nm) + '</span>' +
+            '<span class="cond-pick-desc">' + esc(ds) + '</span></span>' +
+            (on ? '<span class="cond-pick-check">✓</span>' : '') +
+          '</button>' +
+          '<button type="button" class="cond-pick-edit" data-editkey="' + esc(p.entryId || p.key) + '"' +
+            ' title="' + esc(App.t('edit')) + '" aria-label="' + esc(App.t('edit')) + '">✎</button>' +
+        '</div>';
       }).join('');
     }
 
@@ -5748,8 +6243,6 @@ window.App = window.App || {};
       listEl.scrollTop = s1; pickEl.scrollTop = s2;
       const resetBtn = q('reset');
       if (resetBtn) resetBtn.disabled = !items.length;
-      const refreshBtn = q('refresh');
-      if (refreshBtn) refreshBtn.disabled = !items.length;
       const tickBtn = q('applyticks');
       if (tickBtn) tickBtn.disabled = !hasTicksOrDuration(activeChar());
     }
@@ -5759,6 +6252,11 @@ window.App = window.App || {};
     panel.addEventListener('click', function (e) {
       const b = e.target.closest('button');
       if (!b) return;
+      if (b.dataset.editkey) {
+        const set = stateSetOf(activeChar());
+        if (set) openStateEditor(set.id, b.dataset.editkey, { returnCardId: card.id });
+        return;
+      }
       if (b.dataset.cond) {
         mutateWithMaxFill(function () {
           const c = cur();
@@ -5766,13 +6264,15 @@ window.App = window.App || {};
         });
         return;
       }
-      // «+» у строки — добавить эффект «на что влияет»; сам чип — правка существующего
-      if (b.dataset.fxadd) { openEffectModal(card.id, b.dataset.fxadd, -1); return; }
-      if (b.dataset.fx) { openEffectModal(card.id, b.dataset.fx, parseInt(b.dataset.fi, 10)); return; }
       if (b.dataset.key) { toggleCondition(card.id, b.dataset.key); return; }
+      // v156: новое состояние создаётся тем же редактором, что в настройках
+      if (b.dataset.role === 'newstate') {
+        const set = stateSetOf(activeChar());
+        if (set) openStateEditor(set.id, null, { returnCardId: card.id });
+        return;
+      }
       // v70: сброс без подтверждения и без тоста — решение юзера
       if (b.dataset.role === 'reset') { clearConditions(card.id); return; }
-      if (b.dataset.role === 'refresh') { refreshFromSet(card.id); return; }
       if (b.dataset.role === 'applyticks') { applyTicksManual(); }
     });
     panel.addEventListener('input', function (e) {
@@ -5780,6 +6280,12 @@ window.App = window.App || {};
     });
     // v88: длительность ходов правится прямо в слое — как в редакторе набора
     panel.addEventListener('change', function (e) {
+      // v155: цель эффекта выбирается прямо в строке состояния
+      const sel = e.target && e.target.closest ? e.target.closest('[data-fxt]') : null;
+      if (sel) {
+        setEffectTarget(card.id, sel.dataset.fxt, parseInt(sel.dataset.fi, 10), sel.value || null);
+        return;
+      }
       const inp = e.target && e.target.closest ? e.target.closest('[data-dur]') : null;
       if (!inp) return;
       const snapId = inp.dataset.dur;
@@ -6675,9 +7181,8 @@ window.App = window.App || {};
   // доступно ещё и «текущее» — только для режима «тик».
   function buffTargetFields(type) {
     const f = (MOD_FIELDS[type] || []).slice();
-    // «текущее» доступно только у счётчика и только для режима «тик»;
-    // первым полем остаётся обычное (max), чтобы новая строка не начиналась с тика
-    if (type === 'counter') f.push('current');
+    // «текущее» — для тика; щит — только у счётчика
+    if (type === 'counter') f.push('current', 'shield');
     return f;
   }
   function buffTargets() {
@@ -6686,6 +7191,8 @@ window.App = window.App || {};
     });
   }
   function buffModesFor(t, field) {
+    // щит — только выдача запаса; «как» не предлагаем
+    if (field === 'shield') return ['add'];
     // «текущее» в баффе — только событие по ходам, иначе режим молча не работает
     if (field === 'current') return ['tick'];
     const out = ['add', 'mul', 'set', 'cap'];
@@ -6699,10 +7206,12 @@ window.App = window.App || {};
   function normalizeBuffEffect(ef) {
     if (ef.mode === 'tick') ef.field = 'current';
     const t = findCard(ef.target);
-    const fields = t ? buffTargetFields(t.type) : [];
-    if (fields.indexOf(ef.field) === -1) ef.field = fields[0] || 'bonus';
-    const modes = t ? buffModesFor(t, ef.field) : ['add', 'mul', 'set', 'cap'];
-    if (modes.indexOf(ef.mode) === -1) ef.mode = modes[0];
+    if (t) {
+      const fields = buffTargetFields(t.type);
+      if (fields.indexOf(ef.field) === -1) ef.field = fields[0] || 'bonus';
+      const modes = buffModesFor(t, ef.field);
+      if (modes.indexOf(ef.mode) === -1) ef.mode = modes[0];
+    }
     if (ef.mode === 'block') ef.value = '';
     return ef;
   }
@@ -6721,99 +7230,74 @@ window.App = window.App || {};
         '<input id="f-buff-duration" type="number" min="0" max="999" step="1" inputmode="numeric" value="' + (num(card.duration) > 0 ? num(card.duration) : '') + '" placeholder="—">' +
         '<div class="formula-help">' + esc(App.t('buffDurationHint')) + '</div></div>' +
       '<div class="field"><label>' + esc(App.t('buffEffects')) + '</label>' +
-        '<div id="f-bfx-list" class="st-fx-list"></div>' +
-        '<button type="button" id="f-bfx-add" class="st-add-fx small">+ ' + esc(App.t('fxAdd')) + '</button>' +
+        '<div id="f-bfx-list" class="fx-rows"></div>' +
+        '<button type="button" id="f-bfx-add" class="fx-add">＋ ' + esc(App.t('fxAdd')) + '</button>' +
         '<div class="formula-help">' + esc(App.t('buffTapHint')) + '</div></div>' +
       '<div class="field"><label>' + esc(App.t('buffColor')) + '</label>' +
         '<div class="st-color-row"><input id="f-buff-color" type="color" value="' + esc(col) + '">' +
         '<span class="st-meta" id="f-buff-color-hex">' + esc(col) + '</span></div></div>';
   }
-  function buffFxRowHTML(ef, i) {
-    normalizeBuffEffect(ef);
-    const targets = buffTargets();
-    const t = ef.target ? findCard(ef.target) : null;
-    const fields = t ? buffTargetFields(t.type) : [];
-    const modes = t ? buffModesFor(t, ef.field) : ['add', 'mul', 'set', 'cap'];
-    let tOpts = targets.map(function (c) {
-      return '<option value="' + esc(c.id) + '"' + (c.id === ef.target ? ' selected' : '') + '>' + esc(c.name) + '</option>';
-    }).join('');
-    if (!tOpts) tOpts = '<option value="">' + esc(App.t('fxNoTargets')) + '</option>';
-    // цель удалили: оставляем её в списке, чтобы эффект не потерялся молча
-    if (ef.target && !t) tOpts += '<option value="' + esc(ef.target) + '" selected>' + esc(App.t('fxNoTarget')) + '</option>';
-    const fOpts = fields.map(function (f) {
-      return '<option value="' + f + '"' + (f === ef.field ? ' selected' : '') + '>' + esc(fxFieldText(f)) + '</option>';
-    }).join('');
-    const mOpts = modes.map(function (m) {
-      return '<option value="' + m + '"' + (m === ef.mode ? ' selected' : '') + '>' + esc(fxModeText(m)) + '</option>';
-    }).join('');
-    const block = ef.mode === 'block';
-    const tick = ef.mode === 'tick';
-    const flag = block;   // значение не нужно только запрету
-    const ph = flag ? '—' : App.t(FX_MODE_PH[ef.mode] || 'fxPhAdd');
-    return '<div class="st-fx-form bfx-form" data-bfx-i="' + i + '">' +
-      '<div class="bfx-grid">' +
-        '<div class="field bfx-wide"><label>' + esc(App.t('fxTarget')) + '</label><select data-bfx="target">' + tOpts + '</select></div>' +
-        '<div class="field"><label>' + esc(App.t('fxField')) + '</label><select data-bfx="field">' + fOpts + '</select></div>' +
-        '<div class="field"><label>' + esc(App.t('fxMode')) + '</label><select data-bfx="mode">' + mOpts + '</select></div>' +
-        '<div class="field"' + (tick ? '' : ' style="display:none"') + '><label>' + esc(App.t('fxTiming')) + '</label><select data-bfx="timing">' +
-          '<option value="start"' + ((ef.timing || 'start') !== 'end' ? ' selected' : '') + '>' + esc(App.t('fxTimingStart')) + '</option>' +
-          '<option value="end"' + (ef.timing === 'end' ? ' selected' : '') + '>' + esc(App.t('fxTimingEnd')) + '</option>' +
-        '</select></div>' +
-        '<div class="field bfx-wide"><label>' + esc(App.t('fxValue')) + '</label><input data-bfx="value" type="text" autocomplete="off" spellcheck="false" value="' + esc(flag ? '' : ef.value) + '" placeholder="' + esc(ph) + '"' + (flag ? ' disabled' : '') + '></div>' +
-        '<div class="field bfx-wide"><label>' + esc(App.t('fxLabelField')) + '</label><input data-bfx="label" type="text" autocomplete="off" spellcheck="false" value="' + esc(ef.label) + '" placeholder="' + esc(App.t('fxLabelPh')) + '"></div>' +
-      '</div>' +
-      '<div class="st-fx-actions"><button type="button" class="small danger" data-bfx-del="' + i + '">' + TRASH_SVG + ' ' + esc(App.t('delete')) + '</button></div>' +
-    '</div>';
+  // v158: эффекты баффа — общие плашки и общее окно. Цель у каждого эффекта:
+  // от типа цели зависит и поле, и доступные режимы (кубик, тик, запрет, щит).
+  function buffTargetsForKind(kind) {
+    const all = buffTargets();
+    if (kind === 'tick' || kind === 'shield') return all.filter(function (c) { return c.type === 'counter'; });
+    if (kind === 'block') return all.filter(function (c) { return c.type === 'spell'; });
+    if (kind === 'roll' || kind === 'die') {
+      return all.filter(function (c) { return c.die && (c.type === 'skill' || c.type === 'spell'); });
+    }
+    return all;
+  }
+  function buffFieldsFor(targetId) {
+    const t = targetId ? findCard(targetId) : null;
+    return t ? buffTargetFields(t.type) : [];
+  }
+  function buffModesForTarget(field, targetId) {
+    const t = targetId ? findCard(targetId) : null;
+    return buffModesFor(t, field);
+  }
+  function openBuffFxEditor(index, anchor) {
+    openFxEditor({
+      effect: index == null ? null : editScratch.buffEffects[index],
+      kinds: ['number', 'roll', 'die', 'tick', 'block', 'shield'],
+      targetsFor: function (kind) { return buffTargetsForKind(kind); },
+      fieldsFor: buffFieldsFor,
+      modesFor: buffModesForTarget,
+      anchor: anchor,
+      onSave: function (ef) {
+        normalizeBuffEffect(ef);
+        if (index == null) editScratch.buffEffects.push(ef);
+        else editScratch.buffEffects[index] = ef;
+        renderBuffFx();
+      }
+    });
   }
   function renderBuffFx() {
     const host = document.getElementById('f-bfx-list');
     if (!host) return;
-    const list = editScratch.buffEffects || [];
-    host.innerHTML = list.length
-      ? list.map(function (ef, i) { return buffFxRowHTML(ef, i); }).join('')
-      : '<div class="st-fx-empty">' + esc(App.t('buffNoEffects')) + '</div>';
+    host.innerHTML = fxRowsHTML(editScratch.buffEffects || [], { targets: true, emptyText: 'buffNoEffects' });
   }
   function bindBuffEditor() {
     renderBuffFx();
     const add = document.getElementById('f-bfx-add');
-    if (add) add.addEventListener('click', function () {
-      const targets = buffTargets();
-      if (!targets.length) { toast(App.t('fxNoTargets')); return; }
-      const t = targets[0];
-      editScratch.buffEffects.push({
-        target: t.id,
-        field: buffTargetFields(t.type)[0] || 'bonus',
-        mode: 'add', value: '', label: ''
-      });
-      renderBuffFx();
+    if (add) add.addEventListener('click', function (e) {
+      if (!buffTargets().length) { toast(App.t('fxNoTargets')); return; }
+      openBuffFxEditor(null, e.currentTarget);
     });
     const host = document.getElementById('f-bfx-list');
     if (!host) return;
-    host.addEventListener('change', function (e) {
-      const sel = e.target.closest('[data-bfx]');
-      if (!sel) return;
-      const form = sel.closest('[data-bfx-i]');
-      const ef = form && editScratch.buffEffects[+form.dataset.bfxI];
-      if (!ef) return;
-      const key = sel.dataset.bfx;
-      ef[key] = sel.value;
-      // v121: преимущество/помеха — число бросков, по умолчанию 1
-      if (key === 'mode' && (ef.mode === 'adv' || ef.mode === 'dis') && !String(ef.value == null ? '' : ef.value).trim()) ef.value = '1';
-      if (key === 'target' || key === 'field' || key === 'mode') renderBuffFx();
-    });
-    host.addEventListener('input', function (e) {
-      const inp = e.target.closest('[data-bfx]');
-      if (!inp) return;
-      const form = inp.closest('[data-bfx-i]');
-      const ef = form && editScratch.buffEffects[+form.dataset.bfxI];
-      if (!ef) return;
-      if (inp.dataset.bfx === 'value' || inp.dataset.bfx === 'label') ef[inp.dataset.bfx] = inp.value;
-    });
     host.addEventListener('click', function (e) {
-      const del = e.target.closest('[data-bfx-del]');
-      if (!del) return;
-      editScratch.buffEffects.splice(+del.dataset.bfxDel, 1);
-      renderBuffFx();
+      const edit = e.target.closest('[data-fx-edit]');
+      if (edit) { openBuffFxEditor(+edit.dataset.fxEdit, edit); return; }
+      const dup = e.target.closest('[data-fx-dup]');
+      if (dup) {
+        const i = +dup.dataset.fxDup;
+        const src = editScratch.buffEffects[i];
+        if (src) { editScratch.buffEffects.splice(i + 1, 0, JSON.parse(JSON.stringify(src))); renderBuffFx(); }
+        return;
+      }
+      const del = e.target.closest('[data-fx-del]');
+      if (del) { editScratch.buffEffects.splice(+del.dataset.fxDel, 1); renderBuffFx(); }
     });
     const col = document.getElementById('f-buff-color');
     const hex = document.getElementById('f-buff-color-hex');
@@ -7405,6 +7889,7 @@ window.App = window.App || {};
         // текст и страницы правятся во втором слое, в окне — только имя
         break;
       case 'buff': {
+        const shieldBefore = buffShieldSig(card.effects);
         // v91: эффекты храним только с существующей целью; пустую строку,
         // добавленную и не заполненную, молча не сохраняем.
         card.description = readText('f-desc');
@@ -7435,6 +7920,10 @@ window.App = window.App || {};
           return ef.target && findCard(ef.target) &&
             (ef.mode === 'block' || ef.mode === 'adv' || ef.mode === 'dis' || String(ef.value).trim() !== '');
         });
+        // v152: правка эффектов включённого баффа пересобирает щит,
+        // но только если изменились сами щитовые эффекты (не длительность/цвет)
+        if (card.on && shieldBefore !== buffShieldSig(card.effects)) reconcileBuffShield(card);
+        else if (!card.on) clearBuffShield(card);
         break;
       }
     }
@@ -7574,6 +8063,9 @@ window.App = window.App || {};
           '<span class="set-txt"><span class="set-name">' + esc(nm) + '</span>' +
           '<span class="set-desc">' + esc(ds) + '</span></span>' +
           (editable ? '<button type="button" class="set-row-edit" aria-label="' + esc(App.t('edit')) + '">✎</button>' : '') +
+          (editable
+            ? '<button type="button" class="set-row-dup" data-dup-state="' + esc(eid) + '" data-set-id="' + esc(set.id) + '" aria-label="' + esc(App.t('duplicate')) + '" title="' + esc(App.t('duplicate')) + '">' + DUP_SVG + '</button>'
+            : '') +
           (editable && !set.builtin
             ? '<button type="button" class="set-row-del" data-del-state="' + esc(eid) + '" data-set-id="' + esc(set.id) + '" aria-label="' + esc(App.t('stDelete')) + '">' + TRASH_SVG + '</button>'
             : (editable ? '<span class="set-row-slot"></span>' : '')) +
@@ -7587,7 +8079,7 @@ window.App = window.App || {};
             '<span class="set-meta">' + esc(App.tf(isStates ? 'statesCount' : 'itemsCount', { n: entries.length })) +
             ' · ' + esc(App.tf('setUsedBy', { n: used })) + '</span></span>' +
           (isStates ? '<button type="button" class="set-plus" data-add-state="' + esc(set.id) + '" aria-label="' + esc(App.t('stAddState')) + '">+</button>' : '') +
-          (set.id === activeId ? '<span class="set-flag">' + esc(App.t('setHere')) + '</span>' : '') +
+          (isStates ? '<button type="button" class="set-chars" data-state-chars="' + esc(set.id) + '" aria-label="' + esc(App.t('setStatesLabel')) + '">👥 ' + used + '</button>' : '') +
           (!set.builtin ? '<button type="button" class="set-ren" data-rename-set="' + esc(set.id) + '" aria-label="' + esc(App.t('setRename')) + '">✎</button>' : '') +
           (entries.length
             ? '<button type="button" class="set-exp" data-export="' + esc(set.id) + '" aria-label="' + esc(App.t('setExportShort')) + '">' + SET_EXPORT_SVG + '</button>'
@@ -7601,12 +8093,6 @@ window.App = window.App || {};
         '</div></div>';
     }).join('');
     return '<div class="s-panel hidden" data-panel="' + kind + '">' +
-      (isStates
-        ? '<div class="field"><label>' + esc(App.t('setStatesLabel')) + '</label><select id="s-stateset">' +
-          libSets('states').map(function (s) {
-            return '<option value="' + esc(s.id) + '"' + (s.id === activeId ? ' selected' : '') + '>' + esc(setDisplayName(s)) + '</option>';
-          }).join('') + '</select></div>'
-        : '') +
       '<div class="set-cards">' + cards + '</div>' +
       '<div class="set-foot">' +
         (isStates ? '<button type="button" id="s-set-import">' + esc(App.t('setImport')) + '</button>' : '') +
@@ -7628,6 +8114,7 @@ window.App = window.App || {};
           '<span class="set-txt"><span class="set-name">' + esc(it.name || '—') + '</span>' +
           '<span class="set-desc">' + esc(App.t(cat.labelKey)) + ' · ' + esc(wt) + (it.damage ? ' · ' + esc(it.damage) : '') + '</span></span>' +
           '<button type="button" class="set-row-edit" aria-label="' + esc(App.t('edit')) + '">✎</button>' +
+          '<button type="button" class="set-row-dup" data-dup-pack-item="' + esc(it.id) + '" data-pack-id="' + esc(pack.id) + '" aria-label="' + esc(App.t('duplicate')) + '" title="' + esc(App.t('duplicate')) + '">' + DUP_SVG + '</button>' +
           '<button type="button" class="set-row-del" data-del-pack-item="' + esc(it.id) + '" data-pack-id="' + esc(pack.id) + '" aria-label="' + esc(App.t('delete')) + '">' + TRASH_SVG + '</button>' +
         '</div>';
       }).join('');
@@ -7799,7 +8286,55 @@ window.App = window.App || {};
       return { mode: ef.mode, field: effectField(ef), value: ef.value, label: ef.label || '',
                timing: ef.mode === 'tick' ? (ef.timing || 'start') : null };
     });
-    return set;
+    return entry;
+  }
+
+  // v159: копия шаблона состояния — в списке настроек. Глубокая копия
+  // (иконка, цвета, длительность, эффекты), новые entryId/key, имя «… (2)».
+  // Базовый набор править нельзя: копия состояния создаёт копию набора.
+  function duplicateStateEntry(setId, entryId) {
+    rememberSettingsScroll();
+    const sourceSet = libSetById('states', setId);
+    if (!sourceSet) return;
+    const src = (sourceSet.entries || []).find(function (e) {
+      return (e.entryId && e.entryId === entryId) || e.key === entryId;
+    });
+    if (!src) return;
+    const srcName = src.nameKey ? App.t(src.nameKey) : (src.name || '');
+    let made = null;
+    mutate(function () {
+      let set = sourceSet;
+      if (set.builtin) {
+        const ch = activeChar();
+        const active = !!(ch && stateSetOf(ch) && stateSetOf(ch).id === set.id);
+        set = copyStateSetForEdit(set, active);
+        if (active) relinkSnapshotsToSet(sourceSet.id, set.id);
+      }
+      const baseEntry = (set.entries || []).find(function (e) {
+        return (src.entryId && e.entryId === src.entryId) || e.key === src.key;
+      });
+      if (!baseEntry) return;
+      const copy = JSON.parse(JSON.stringify(baseEntry));
+      copy.entryId = 'st-' + uid();
+      copy.key = 'custom_' + uid();
+      const baseName = String(srcName).replace(/\s*\(\d+\)\s*$/, '');
+      const used = (set.entries || []).map(function (e) {
+        return e.nameKey ? App.t(e.nameKey) : (e.name || '');
+      });
+      let n = 2;
+      let name = baseName + ' (' + n + ')';
+      while (used.indexOf(name) !== -1) { n++; name = baseName + ' (' + n + ')'; }
+      copy.name = name;
+      delete copy.nameKey;
+      if (src.descKey) { copy.effect = App.t(src.descKey); delete copy.descKey; }
+      copy.effects = (copy.effects || []).map(function (ef) { return Object.assign({}, ef); });
+      set.entries.splice(set.entries.indexOf(baseEntry) + 1, 0, copy);
+      made = { name: name };
+    });
+    if (made) {
+      toast(App.tf('duplicatedGeneric', { name: made.name }));
+      openSettings('states');
+    }
   }
 
   function removeStateEntry(set, entryId) {
@@ -7810,6 +8345,7 @@ window.App = window.App || {};
   }
 
   function deleteStateFromSet(setId, entryId, anchor) {
+    rememberSettingsScroll();
     const set = libSetById('states', setId);
     if (!set || set.builtin) return;   // базовые 15 состояний не удаляем
     const entry = (set.entries || []).find(function (e) { return e.entryId === entryId || e.key === entryId; });
@@ -7855,6 +8391,36 @@ window.App = window.App || {};
   }
 
   function closePackCharsMenu() { closeMenuById('packCharsMenu'); }
+
+  // v150: активный набор состояний выбирается иконкой 👥 на карточке набора,
+  // как подключение паков предметов. В меню — листы устройства.
+  function openStateCharsMenu(setId, anchor) {
+    closeStateCharsMenu();
+    const set = libSetById('states', setId);
+    if (!set) return;
+    const menu = document.createElement('div');
+    menu.className = 'ctxmenu pack-chars-menu';
+    menu.id = 'stateCharsMenu';
+    menu.innerHTML = '<div class="ask-text">' + esc(App.t('setStatesLabel')) + '</div>' +
+      (state.characters.length ? state.characters.map(function (c) {
+        const on = charSetId(c, 'states') === setId;
+        return '<button type="button" data-char="' + esc(c.id) + '"><span class="pcm-check">' + (on ? '✓' : '') + '</span> ' + esc(c.name) + '</button>';
+      }).join('') : '<div class="ask-text">—</div>') +
+      '<div class="ask-actions"><button type="button" data-close="1">' + esc(App.t('close')) + '</button></div>';
+    menu.addEventListener('click', function (e) {
+      const btn = e.target.closest('[data-char]');
+      if (btn) {
+        setCharSet(btn.dataset.char, 'states', setId);
+        closeStateCharsMenu();
+        openSettings('states');
+        return;
+      }
+      if (e.target.closest('[data-close]')) closeStateCharsMenu();
+    });
+    mountMenu(menu, anchor, { align: 'right' });
+  }
+
+  function closeStateCharsMenu() { closeMenuById('stateCharsMenu'); }
 
   function renamePackInline(packId, anchor) {
     const pack = packById(packId);
@@ -7929,6 +8495,7 @@ window.App = window.App || {};
   }
 
   function deletePack(packId, anchor) {
+    rememberSettingsScroll();
     const pack = packById(packId);
     if (!pack) return;
     askDelete({ text: App.tf('packDeleteConfirm', { name: pack.name }), anchor: anchor, onYes: function () {
@@ -7942,6 +8509,7 @@ window.App = window.App || {};
   }
 
   function deletePackItem(packId, itemId, anchor) {
+    rememberSettingsScroll();
     const pack = packById(packId);
     const item = pack && (pack.items || []).find(function (it) { return it.id === itemId; });
     if (!item) return;
@@ -8076,64 +8644,11 @@ window.App = window.App || {};
       return out;
     }
 
-    function fxRowHTML(ef, i) {
-      const modes = effectModesFor(ef.field);
-      const mode = modes.indexOf(ef.mode) !== -1 ? ef.mode : modes[0];
-      const block = mode === 'block';
-      const timed = mode === 'tick';
-      // v121: у adv/dis значение — число бросков; у снаряжения оно не нужно —
-      // пока надето, действует всегда. Длительность adv/dis тоже не нужна.
-      const usesFlag = mode === 'adv' || mode === 'dis';
-      const flag = block || (usesFlag && draft.category !== 'consumable');
-      const fieldOpts = fieldIdsFor();
-      // эффект со «старым» полем не теряем: показываем его отдельным пунктом
-      if (fieldOpts.indexOf(ef.field) === -1) fieldOpts.push(ef.field);
-      // v114: длительность нужна только расходникам (временный эффект);
-      // у снаряжения тик работает, пока надето, и ему важно только «когда».
-      // Ячейка есть всегда, чтобы колонки не съезжали.
-      const showDur = draft.category === 'consumable' && !usesFlag;
-      const durCell = '<label class="pkfx-cell"><span>' + esc(App.t(showDur || usesFlag ? 'fxDuration' : 'fxTiming')) + '</span><span class="fx-dur">' +
-          (showDur ? '<input data-ifx="duration" type="number" min="0" max="999" step="1" inputmode="numeric" value="' + esc(ef.duration == null ? '' : ef.duration) + '" placeholder="—">' : '') +
-          (timed ? '<select data-ifx="timing" aria-label="' + esc(App.t('fxTiming')) + '">' +
-            '<option value="start"' + ((ef.timing || 'start') !== 'end' ? ' selected' : '') + '>' + esc(App.t('fxTimingStart')) + '</option>' +
-            '<option value="end"' + (ef.timing === 'end' ? ' selected' : '') + '>' + esc(App.t('fxTimingEnd')) + '</option>' +
-          '</select>' : '') +
-          ((usesFlag || (!showDur && !timed)) ? '<span class="fx-dash">—</span>' : '') +
-        '</span></label>';
-      // v111: цель есть у любого эффекта своей вещи, включая разовый «текущий»
-      const targetCell = own
-        ? '<label class="pkfx-cell"><span>' + esc(App.t('itemTarget')) + '</span><select data-ifx="target">' +
-            '<option value="">' + esc(App.t('fxNoTargetPick')) + '</option>' +
-            targetsFor(ef.field).map(function (c) {
-              return '<option value="' + esc(c.id) + '"' + (ef.target === c.id ? ' selected' : '') + '>' + esc(c.name) + '</option>';
-            }).join('') + '</select></label>'
-        : '';
-      return '<div class="pk-fx-row' + (own ? ' own' : '') + '" data-i="' + i + '">' +
-        '<label class="pkfx-cell"><span>' + esc(App.t('fxWhat')) + '</span><select data-ifx="field">' +
-          fieldOpts.map(function (f) {
-            return '<option value="' + f + '"' + (f === ef.field ? ' selected' : '') + '>' + esc(fxFieldText(f)) + '</option>';
-          }).join('') + '</select></label>' +
-        '<label class="pkfx-cell"><span>' + esc(App.t('fxHow')) + '</span><select data-ifx="mode">' +
-          modes.map(function (m) {
-            return '<option value="' + m + '"' + (m === mode ? ' selected' : '') + '>' + esc(fxModeShort(m)) + '</option>';
-          }).join('') + '</select></label>' +
-        '<label class="pkfx-cell"><span>' + esc(App.t('fxValue')) + '</span><input data-ifx="value" type="text" autocomplete="off" spellcheck="false" value="' + esc(flag ? '' : ef.value) + '" placeholder="' + esc(flag ? '—' : App.t(FX_MODE_PH[mode] || 'fxPhAdd')) + '"' + (flag ? ' disabled' : '') + '></label>' +
-        durCell +
-        '<label class="pkfx-cell"><span>' + esc(App.t('fxLabelField')) + '</span><input data-ifx="label" type="text" autocomplete="off" spellcheck="false" value="' + esc(ef.label || '') + '" placeholder="' + esc(App.t('fxLabelPh')) + '"></label>' +
-        targetCell +
-        '<button type="button" data-ifx-del="' + i + '">' + TRASH_SVG + '</button>' +
-        '</div>';
-    }
-
-    function fxListHTML(arr) {
-      return arr.length ? arr.map(fxRowHTML).join('') : '<div class="set-empty">' + esc(App.t('itemNoEffects')) + '</div>';
-    }
-
     function renderFx() {
       const host = el('if-fx-list');
-      if (host) host.innerHTML = fxListHTML(fx);
+      if (host) host.innerHTML = fxRowsHTML(fx, { targets: own, emptyText: 'itemNoEffects' });
       const secHost = el('if-sec-fx-list');
-      if (secHost) secHost.innerHTML = fxListHTML(secFx);
+      if (secHost) secHost.innerHTML = fxRowsHTML(secFx, { targets: own, emptyText: 'itemNoEffects' });
       const hint = el('if-fx-hint');
       if (hint) {
         hint.textContent = own
@@ -8249,9 +8764,9 @@ window.App = window.App || {};
       (own ? '<div id="if-own-extra"></div>' : '') +
       '<div class="sect" id="if-fx-sect"><label class="check"><input type="checkbox" id="if-fx-on"' + (fx.length ? ' checked' : '') + '> ' + esc(App.t('itemHasEffects')) + '</label>' +
         '<div id="if-fx-wrap" style="margin-top:8px' + (fx.length ? '' : ';display:none') + '">' +
-          '<div id="if-fx-list" class="pk-fx-list"></div>' +
-          '<div class="fx-add-row"><button type="button" id="if-fx-add" class="add-btn">+ ' + esc(App.t('fxAdd')) + '</button>' +
-          '<span class="formula-help" id="if-fx-hint"></span></div>' +
+          '<div id="if-fx-list" class="fx-rows"></div>' +
+          '<button type="button" id="if-fx-add" class="fx-add">＋ ' + esc(App.t('fxAdd')) + '</button>' +
+          '<div class="formula-help" id="if-fx-hint"></div>' +
         '</div></div>' +
       '<div class="sect"><label class="check"><input type="checkbox" id="if-sec-on"' + (draft.secret ? ' checked' : '') + '> ' + esc(App.t('itemTrueItem')) + '</label>' +
         '<div id="if-sec-wrap" style="margin-top:8px' + (draft.secret ? '' : ';display:none') + '">' +
@@ -8268,9 +8783,9 @@ window.App = window.App || {};
           '<div class="field"><label>' + esc(App.t('itemSecretDesc')) + '</label><textarea id="if-sec-desc">' + esc(sec.description || '') + '</textarea></div>' +
           '<div class="sect" id="if-secfx-sect" style="margin-top:8px"><label class="check"><input type="checkbox" id="if-secfx-on"' + (secFx.length ? ' checked' : '') + '> ' + esc(App.t('itemHasTrueEffects')) + '</label>' +
             '<div id="if-secfx-wrap" style="margin-top:8px' + (secFx.length ? '' : ';display:none') + '">' +
-              '<div id="if-sec-fx-list" class="pk-fx-list"></div>' +
-              '<div class="fx-add-row"><button type="button" id="if-sec-fx-add" class="add-btn">+ ' + esc(App.t('fxAdd')) + '</button>' +
-              '<span class="formula-help">' + esc(App.t('itemTargetInGame')) + '</span></div>' +
+              '<div id="if-sec-fx-list" class="fx-rows"></div>' +
+              '<button type="button" id="if-sec-fx-add" class="fx-add">＋ ' + esc(App.t('fxAdd')) + '</button>' +
+              '<div class="formula-help">' + esc(App.t('itemTargetInGame')) + '</div>' +
             '</div></div>' +
         '</div></div>' +
       (own && packs.length ? '<div class="field" style="margin-top:10px"><label>' + esc(App.t('itemSaveToPack')) + '</label>' +
@@ -8317,58 +8832,51 @@ window.App = window.App || {};
     });
     el('if-sec-cat').addEventListener('change', updateFxAvailability);
 
-    function bindFxList(listId, arr) {
-      const host = el(listId);
-      if (!host) return;
-      host.addEventListener('change', function (e) {
-        const sel = e.target.closest('[data-ifx]');
-        if (!sel) return;
-        const rowEl = sel.closest('[data-i]');
-        const i = +rowEl.dataset.i;
-        const item = arr[i];
-        if (!item) return;
-        // пустой пункт цели — это «без цели», а не пустая строка в данных
-        item[sel.dataset.ifx] = (sel.dataset.ifx === 'target' && sel.value === '') ? null : sel.value;
-        if (sel.dataset.ifx === 'field') {
-          const modes = effectModesFor(item.field);
-          if (modes.indexOf(item.mode) === -1) item.mode = modes[0];
-          // цель, несовместимая с новым полем, сбрасывается — иначе эффект молча не сработает
-          if (own && item.target && !targetsFor(item.field).some(function (c) { return c.id === item.target; })) item.target = null;
-          renderFx();
-        } else if (sel.dataset.ifx === 'mode') {
-          if (sel.value === 'block') item.field = 'charges';
-          if (sel.value === 'tick') { item.field = 'current'; item.timing = item.timing || 'start'; }
-          // v121: преимущество/помеха — число бросков, по умолчанию 1
-          if ((sel.value === 'adv' || sel.value === 'dis') && !String(item.value == null ? '' : item.value).trim()) item.value = '1';
+    // v157: эффекты предмета — те же плашки и то же окно, что у состояний.
+    // Цель есть только у своей вещи; у предмета набора её выбирают в игре.
+    function openItemFxEditor(arr, index, anchor) {
+      openFxEditor({
+        effect: index == null ? null : arr[index],
+        kinds: ['number', 'roll', 'die', 'tick', 'block', 'shield'],
+        fieldsFor: function () { return fieldIdsFor(); },
+        modesFor: function (field) { return effectModesFor(field); },
+        targetsFor: own ? function (kind, field) { return effectTargetCards(field || 'bonus'); } : null,
+        targetOptional: true,
+        allowDuration: draft.category === 'consumable',
+        anchor: anchor,
+        onSave: function (ef) {
+          if (index == null) arr.push(ef);
+          else arr[index] = ef;
           renderFx();
         }
       });
-      host.addEventListener('input', function (e) {
-        const inp = e.target.closest('[data-ifx]');
-        if (!inp) return;
-        const rowEl = inp.closest('[data-i]');
-        const i = +rowEl.dataset.i;
-        const item = arr[i];
-        if (!item) return;
-        if (inp.dataset.ifx === 'value' || inp.dataset.ifx === 'label' || inp.dataset.ifx === 'duration') item[inp.dataset.ifx] = inp.value;
-      });
+    }
+
+    function bindFxRows(listId, arr) {
+      const host = el(listId);
+      if (!host) return;
       host.addEventListener('click', function (e) {
-        const del = e.target.closest('[data-ifx-del]');
-        if (!del) return;
-        arr.splice(+del.dataset.ifxDel, 1);
-        renderFx();
+        const edit = e.target.closest('[data-fx-edit]');
+        if (edit) { openItemFxEditor(arr, +edit.dataset.fxEdit, edit); return; }
+        const dup = e.target.closest('[data-fx-dup]');
+        if (dup) {
+          const i = +dup.dataset.fxDup;
+          const src = arr[i];
+          if (src) { arr.splice(i + 1, 0, JSON.parse(JSON.stringify(src))); renderFx(); }
+          return;
+        }
+        const del = e.target.closest('[data-fx-del]');
+        if (del) { arr.splice(+del.dataset.fxDel, 1); renderFx(); }
       });
     }
-    bindFxList('if-fx-list', fx);
-    bindFxList('if-sec-fx-list', secFx);
+    bindFxRows('if-fx-list', fx);
+    bindFxRows('if-sec-fx-list', secFx);
 
-    el('if-fx-add').addEventListener('click', function () {
-      fx.push({ mode: 'add', field: draft.category === 'consumable' ? 'current' : 'bonus', value: '', label: '', target: null, duration: '', timing: 'start' });
-      renderFx();
+    el('if-fx-add').addEventListener('click', function (e) {
+      openItemFxEditor(fx, null, e.currentTarget);
     });
-    el('if-sec-fx-add').addEventListener('click', function () {
-      secFx.push({ mode: 'add', field: draft.category === 'consumable' ? 'current' : 'bonus', value: '', label: '', target: null, duration: '', timing: 'start' });
-      renderFx();
+    el('if-sec-fx-add').addEventListener('click', function (e) {
+      openItemFxEditor(secFx, null, e.currentTarget);
     });
 
     const ownHost = el('if-own-extra');
@@ -8396,9 +8904,34 @@ window.App = window.App || {};
     });
   }
 
+  // v157: копия предмета набора — только в настройках, в инвентаре её нет.
+  // Редактор после копии не открываем: видно новую строку в списке.
+  function duplicatePackItem(packId, itemId) {
+    rememberSettingsScroll();
+    const pack = packById(packId);
+    if (!pack) return;
+    const src = (pack.items || []).find(function (it) { return it.id === itemId; });
+    if (!src) return;
+    const copy = JSON.parse(JSON.stringify(src));
+    copy.id = uid();
+    const base = String(src.name || App.t('packItemNew')).replace(/\s*\(\d+\)\s*$/, '');
+    let n = 2;
+    let name = base + ' (' + n + ')';
+    while ((pack.items || []).some(function (it) { return it.name === name; })) {
+      n++;
+      name = base + ' (' + n + ')';
+    }
+    copy.name = name;
+    pack.items.push(copy);
+    savePacks();
+    toast(App.tf('duplicatedGeneric', { name: name }));
+    openSettings('items');
+  }
+
   // v108: предмет набора — та же форма, но без количества/«надето»/цели
   // и с записью в отдельный ключ наборов, а не в состояние листа.
   function openPackItemEditor(packId, itemId) {
+    rememberSettingsScroll();
     const pack = packById(packId);
     if (!pack) return;
     const existing = itemId ? (pack.items || []).find(function (it) { return it.id === itemId; }) : null;
@@ -8461,7 +8994,9 @@ window.App = window.App || {};
     return out;
   }
 
-  function openStateEditor(setId, entryId) {
+  function openStateEditor(setId, entryId, opts) {
+    opts = opts || {};
+    if (!opts.returnCardId) rememberSettingsScroll();
     ensureStateEntryIds();
     const sourceSet = libSetById('states', setId) || stateSetOf(activeChar());
     if (!sourceSet) return;
@@ -8474,8 +9009,6 @@ window.App = window.App || {};
     const draft = sourceEntry ? stateCloneEntry(sourceEntry) : stateDefaultEntry();
     let colorDirty = false;
     let tintDirty = false;
-    let fxEdit = -2;                 // -2 — формы нет, -1 — новый, >=0 — индекс
-    let fxDraft = null;
 
     const el = function (id) { return document.getElementById(id); };
     const val = function (id) { const n = el(id); return n ? n.value : ''; };
@@ -8499,118 +9032,46 @@ window.App = window.App || {};
       }).join('');
     }
 
-    function fxPlaceholder(mode) {
-      return mode === 'block' ? '—' : App.t(FX_MODE_PH[mode] || 'fxPhAdd');
-    }
+    // v153: эффекты шаблона — плашки и общий редактор эффекта. Цели в шаблоне
+    // нет: она выбирается при применении, поэтому targetsFor не задаём.
+    const STATE_FX_KINDS = ['number', 'roll', 'die', 'tick', 'block'];
 
-    function fxFormHTML(ef) {
-      const data = ef || { mode: 'add', field: 'bonus', value: '', label: '', timing: 'start' };
-      const field = data.field || 'bonus';
-      const modes = stateModesFor(field);
-      const mode = modes.indexOf(data.mode) !== -1 ? data.mode : modes[0];
-      const block = mode === 'block';
-      const flag = block;   // значение не нужно только запрету
-      const tick = mode === 'tick';
-      const fieldOpts = STATE_FIELDS.map(function (f) {
-        return '<option value="' + f + '"' + (f === field ? ' selected' : '') + '>' + esc(fxFieldText(f)) + '</option>';
-      }).join('');
-      const modeOpts = modes.map(function (m) {
-        return '<option value="' + m + '"' + (m === mode ? ' selected' : '') + '>' + esc(fxModeText(m)) + '</option>';
-      }).join('');
-      return '<div class="st-fx-form">' +
-        // v93: поле и режим в одну строку, как в редакторе баффа
-        '<div class="fx-pair">' +
-          '<div class="field"><label>' + esc(App.t('fxField')) + '</label><select data-f-field>' + fieldOpts + '</select></div>' +
-          '<div class="field"><label>' + esc(App.t('fxMode')) + '</label><select data-f-mode>' + modeOpts + '</select></div>' +
-        '</div>' +
-        '<div class="field" data-f-timing-wrap' + (tick ? '' : ' hidden') + '><label>' + esc(App.t('fxTiming')) + '</label><select data-f-timing>' +
-          '<option value="start"' + ((data.timing || 'start') === 'start' ? ' selected' : '') + '>' + esc(App.t('fxTimingStart')) + '</option>' +
-          '<option value="end"' + (data.timing === 'end' ? ' selected' : '') + '>' + esc(App.t('fxTimingEnd')) + '</option>' +
-        '</select></div>' +
-        '<div class="field"><label>' + esc(App.t('fxValue')) + '</label><input data-f-value type="text" autocomplete="off" spellcheck="false" value="' + esc(flag ? '' : (data.value || '')) + '" placeholder="' + esc(fxPlaceholder(mode)) + '"' + (flag ? ' disabled' : '') + '></div>' +
-        '<div class="field"><label>' + esc(App.t('fxLabelField')) + '</label><input data-f-label type="text" autocomplete="off" spellcheck="false" value="' + esc(data.label || '') + '" placeholder="' + esc(App.t('fxLabelPh')) + '"></div>' +
-        '<div class="st-fx-actions">' +
-          '<button type="button" data-f-cancel>' + esc(App.t('cancel')) + '</button>' +
-          '<button type="button" class="primary" data-f-done>' + esc(App.t('stFxDone')) + '</button>' +
-        '</div>' +
-      '</div>';
+    function stateFxCfg(index) {
+      return {
+        effect: index == null ? null : draft.effects[index],
+        kinds: STATE_FX_KINDS,
+        fieldsFor: function () { return STATE_FIELDS; },
+        modesFor: function (field) { return stateModesFor(field); },
+        allowDuration: false,
+        anchor: el('st-fx-add'),
+        onSave: function (ef, mode) {
+          if (index == null) draft.effects.push(ef);
+          else if (mode === 'duplicate') draft.effects.splice(index + 1, 0, ef);
+          else draft.effects[index] = ef;
+          renderFxList();
+          renderPreview();
+        }
+      };
     }
 
     function renderFxList() {
       const host = el('st-fx-list');
       if (!host) return;
-      if (!draft.effects.length && fxEdit === -2) {
-        host.innerHTML = '<div class="st-fx-empty">' + esc(App.t('stNoEffects')) + '</div>';
-        return;
-      }
-      let html = '';
-      draft.effects.forEach(function (ef, i) {
-        if (fxEdit === i) { html += fxFormHTML(fxDraft || ef); return; }
-        html += '<div class="st-fx-row">' +
-          '<span class="st-fx-sum" title="' + esc(fxShort(ef)) + '">' + esc(ef.label || fxChipShort(ef)) + '</span>' +
-          '<button type="button" data-fx-edit="' + i + '" title="' + esc(App.t('edit')) + '" aria-label="' + esc(App.t('edit')) + '">✎</button>' +
-          '<button type="button" class="st-fx-del" data-fx-del="' + i + '" title="' + esc(App.t('delete')) + '" aria-label="' + esc(App.t('delete')) + '">' + TRASH_SVG + '</button>' +
-        '</div>';
-      });
-      if (fxEdit === -1) html += fxFormHTML(fxDraft);
-      host.innerHTML = html;
+      host.innerHTML = fxRowsHTML(draft.effects, { emptyText: 'stNoEffects' });
     }
 
-    function syncFxValue(form) {
-      if (!form) return;
-      const mode = form.querySelector('[data-f-mode]').value;
-      const v = form.querySelector('[data-f-value]');
-      const block = mode === 'block';
-      const tick = mode === 'tick';
-      v.disabled = block;
-      v.placeholder = fxPlaceholder(mode);
-      if (block) v.value = '';
-      // v121: преимущество/помеха — число бросков, по умолчанию 1
-      if (!block && (mode === 'adv' || mode === 'dis') && !String(v.value).trim()) v.value = '1';
-      const tw = form.querySelector('[data-f-timing-wrap]');
-      if (tw) tw.hidden = !tick;
-    }
-
-    function commitFx() {
-      if (fxEdit === -2) return true;
-      const form = document.querySelector('#st-fx-list .st-fx-form');
-      if (!form) { fxEdit = -2; fxDraft = null; return true; }
-      const field = form.querySelector('[data-f-field]').value;
-      const mode = form.querySelector('[data-f-mode]').value;
-      const value = form.querySelector('[data-f-value]').value.trim();
-      const label = form.querySelector('[data-f-label]').value.trim();
-      const timing = form.querySelector('[data-f-timing]') ? form.querySelector('[data-f-timing]').value : 'start';
-      // пустую новую строку не заставляем заполнять — просто закрываем
-      if (fxEdit === -1 && mode !== 'block' && !value && !label) {
-        fxEdit = -2; fxDraft = null; renderFxList(); return true;
-      }
-      if (mode !== 'block' && !value) { toast(App.t('fxValueNeeded')); return false; }
-      const ef = { mode: mode, field: field, value: mode === 'block' ? '' : value, label: label,
-                   timing: mode === 'tick' ? timing : null };
-      if (fxEdit === -1) draft.effects.push(ef); else draft.effects[fxEdit] = ef;
-      fxEdit = -2; fxDraft = null;
+    function duplicateFx(i) {
+      const src = draft.effects[i];
+      if (!src) return;
+      draft.effects.splice(i + 1, 0, JSON.parse(JSON.stringify(src)));
       renderFxList();
-      return true;
+      renderPreview();
     }
 
-    function cancelFx() {
-      fxEdit = -2; fxDraft = null; renderFxList();
-    }
-
-    function startFxAdd() {
-      if (fxEdit !== -2 && !commitFx()) return;
-      fxEdit = -1;
-      fxDraft = { mode: 'add', field: 'bonus', value: '', label: '', timing: 'start' };
+    function deleteFx(i) {
+      draft.effects.splice(i, 1);
       renderFxList();
-    }
-
-    function startFxEdit(i) {
-      if (fxEdit !== -2 && !commitFx()) return;
-      const ef = draft.effects[i];
-      if (!ef) return;
-      fxEdit = i;
-      fxDraft = { mode: ef.mode, field: ef.field, value: ef.value, label: ef.label, timing: ef.timing || 'start' };
-      renderFxList();
+      renderPreview();
     }
 
     function saveDraft() {
@@ -8646,13 +9107,30 @@ window.App = window.App || {};
         let target = sourceSet;
         if (saveMode === 'copy') {
           const ch = activeChar();
-          const active = !!(ch && (ch.stateSets || [])[0] === sourceSet.id);
+          // v153: базовый набор активен и без записи в stateSets, поэтому
+          // «активный» определяем по фактическому набору, иначе копия терялась
+          const active = !!(ch && stateSetOf(ch) && stateSetOf(ch).id === sourceSet.id);
           target = copyStateSetForEdit(sourceSet, active);
+          if (active) relinkSnapshotsToSet(sourceSet.id, target.id);
         }
-        saveStateEntry(target, sourceEntry, draft, isNew);
+        const saved = saveStateEntry(target, sourceEntry, draft, isNew);
+        // v153: обновляем активные состояния сразу, не дожидаясь кнопки
+        if (saved) syncEntryToCharacters(target, saved);
       });
       return true;
     }
+
+    // куда вернуться после сохранения/отмены: из настроек — в список,
+    // из игры (карандаш в каталоге) — обратно в слой состояния
+    const leave = function () {
+      if (opts.returnCardId) {
+        closeModal();
+        openConditionLayer(opts.returnCardId);
+        return false;
+      }
+      openSettings('states');
+      return false;
+    };
 
     const body =
       '<div class="st-edit">' +
@@ -8677,8 +9155,8 @@ window.App = window.App || {};
             '</div></div>' +
           '</div>' +
           '<div class="field"><label>' + esc(App.t('stEffects')) + '</label>' +
-            '<div id="st-fx-list" class="st-fx-list"></div>' +
-            '<button type="button" id="st-fx-add" class="st-add-fx">+ ' + esc(App.t('fxAdd')) + '</button>' +
+            '<div id="st-fx-list" class="fx-rows"></div>' +
+            '<button type="button" id="st-fx-add" class="fx-add">＋ ' + esc(App.t('fxAdd')) + '</button>' +
           '</div>' +
           '<div class="field"><label>' + esc(App.t('stDuration')) + '</label>' +
             '<input id="st-duration" type="number" min="0" step="1" autocomplete="off" placeholder="' + esc(App.t('stDurationPh')) + '" value="' + esc(draft.duration || '') + '">' +
@@ -8695,12 +9173,10 @@ window.App = window.App || {};
       '</div>';
 
     openModal(isNew ? App.t('stNewTitle') : App.t('stEditTitle'), body, [
-      { label: App.t('cancel'), onClick: function () { openSettings('states'); return false; } },
+      { label: App.t('cancel'), onClick: leave },
       { label: App.t('save'), cls: 'primary', onClick: function () {
-        if (!commitFx()) return false;
         if (!saveDraft()) return false;
-        openSettings('states');
-        return false;
+        return leave();
       } }
     ]);
     document.getElementById('modal').classList.add('settings-modal');
@@ -8732,56 +9208,44 @@ window.App = window.App || {};
       renderIcons();
       renderPreview();
     });
-    el('st-back').addEventListener('click', function () { openSettings('states'); });
+    el('st-back').addEventListener('click', leave);
 
-    // эффекты: одна форма, без цели
-    el('st-fx-add').addEventListener('click', startFxAdd);
+    // эффекты: плашки, правка и добавление — в общем редакторе (без цели)
+    el('st-fx-add').addEventListener('click', function () {
+      openFxEditor(stateFxCfg(null));
+    });
     el('st-fx-list').addEventListener('click', function (e) {
-      const b = e.target.closest('button');
-      if (!b) return;
-      if (b.dataset.fxEdit !== undefined) { startFxEdit(parseInt(b.dataset.fxEdit, 10)); return; }
-      if (b.dataset.fxDel !== undefined) {
-        const i = parseInt(b.dataset.fxDel, 10);
-        draft.effects.splice(i, 1);
-        if (fxEdit === i) { fxEdit = -2; fxDraft = null; }
-        else if (fxEdit > i) fxEdit--;
-        renderFxList();
+      const edit = e.target.closest('[data-fx-edit]');
+      if (edit) {
+        openFxEditor(stateFxCfg(parseInt(edit.dataset.fxEdit, 10)));
         return;
       }
-      if (b.dataset.fDone !== undefined) { commitFx(); return; }
-      if (b.dataset.fCancel !== undefined) { cancelFx(); }
-    });
-    el('st-fx-list').addEventListener('change', function (e) {
-      const t = e.target;
-      if (t.matches('[data-f-field]')) {
-        const form = t.closest('.st-fx-form');
-        const modeSel = form.querySelector('[data-f-mode]');
-        const modes = stateModesFor(t.value);
-        const prev = modeSel.value;
-        modeSel.innerHTML = modes.map(function (m) {
-          return '<option value="' + m + '"' + (m === prev ? ' selected' : '') + '>' + esc(fxModeText(m)) + '</option>';
-        }).join('');
-        if (modes.indexOf(prev) === -1) modeSel.value = modes[0];
-        syncFxValue(form);
-        return;
-      }
-      if (t.matches('[data-f-mode]')) syncFxValue(t.closest('.st-fx-form'));
-    });
-    el('st-fx-list').addEventListener('input', function (e) {
-      const t = e.target;
-      if (!t.matches('[data-f-value]') && !t.matches('[data-f-label]')) return;
-      const form = t.closest('.st-fx-form');
-      fxDraft = {
-        mode: form.querySelector('[data-f-mode]').value,
-        field: form.querySelector('[data-f-field]').value,
-        value: form.querySelector('[data-f-value]').value,
-        label: form.querySelector('[data-f-label]').value
-      };
+      const del = e.target.closest('[data-fx-del]');
+      if (del) { deleteFx(parseInt(del.dataset.fxDel, 10)); return; }
+      const dup = e.target.closest('[data-fx-dup]');
+      if (dup) duplicateFx(parseInt(dup.dataset.fxDup, 10));
     });
 
     renderIcons();
     renderPreview();
     renderFxList();
+  }
+
+  // v160: настройки пересоздаются после редактора, поэтому запоминаем,
+  // где листали список, и возвращаем туда же при открытии вкладки.
+  let settingsScroll = null;
+  function rememberSettingsScroll() {
+    const modal = document.getElementById('modal');
+    if (!modal || modal.classList.contains('hidden')) return;
+    const panel = modal.querySelector('.s-panel:not(.hidden)');
+    if (!panel) return;
+    const seen = { tab: panel.dataset.panel, panel: panel.scrollTop, rows: {} };
+    panel.querySelectorAll('.set-card').forEach(function (card) {
+      const key = card.dataset.set || card.dataset.pack;
+      const rows = card.querySelector('.set-rows');
+      if (key && rows) seen.rows[key] = rows.scrollTop;
+    });
+    settingsScroll = seen;
   }
 
   function openSettings(startTab) {
@@ -8872,12 +9336,6 @@ window.App = window.App || {};
       // остаются от предыдущего персонажа до повторного открытия меню.
       openSettings('general');
     });
-    const stSel = document.getElementById('s-stateset');
-    if (stSel) stSel.addEventListener('change', function (e) {
-      setCharSet(state.activeCharacterId, 'states', e.target.value);
-      // остаёмся во вкладке состояний — выбор набора теперь живёт здесь
-      openSettings('states');
-    });
     document.getElementById('s-newchar').addEventListener('click', function () {
       closeModal();
       openNewCharModal();
@@ -8948,6 +9406,12 @@ window.App = window.App || {};
         deleteStateFromSet(b.dataset.setId, b.dataset.delState, b);
       });
     });
+    m.querySelectorAll('[data-dup-state]').forEach(function (b) {
+      b.addEventListener('click', function (e) {
+        e.stopPropagation();
+        duplicateStateEntry(b.dataset.setId, b.dataset.dupState);
+      });
+    });
 
     // v94: паки предметов
     const packAdd = document.getElementById('s-pack-add');
@@ -8959,6 +9423,12 @@ window.App = window.App || {};
     });
     m.querySelectorAll('[data-edit-pack-item]').forEach(function (row) {
       row.addEventListener('click', function () { openPackItemEditor(row.dataset.packId, row.dataset.editPackItem); });
+    });
+    m.querySelectorAll('[data-dup-pack-item]').forEach(function (b) {
+      b.addEventListener('click', function (e) {
+        e.stopPropagation();
+        duplicatePackItem(b.dataset.packId, b.dataset.dupPackItem);
+      });
     });
     m.querySelectorAll('[data-del-pack-item]').forEach(function (b) {
       b.addEventListener('click', function (e) {
@@ -8978,6 +9448,21 @@ window.App = window.App || {};
     m.querySelectorAll('[data-pack-chars]').forEach(function (b) {
       b.addEventListener('click', function (e) { e.stopPropagation(); openPackCharsMenu(b.dataset.packChars, b); });
     });
+    m.querySelectorAll('[data-state-chars]').forEach(function (b) {
+      b.addEventListener('click', function (e) { e.stopPropagation(); openStateCharsMenu(b.dataset.stateChars, b); });
+    });
+
+    // v160: вернуть прокрутку списка после сохранения/отмены редактора
+    if (settingsScroll && settingsScroll.tab === startTab) {
+      const panel = m.querySelector('.s-panel[data-panel="' + startTab + '"]');
+      if (panel) panel.scrollTop = settingsScroll.panel;
+      Object.keys(settingsScroll.rows || {}).forEach(function (key) {
+        const rows = m.querySelector('.set-card[data-set="' + key + '"] .set-rows') ||
+          m.querySelector('.set-card[data-pack="' + key + '"] .set-rows');
+        if (rows) rows.scrollTop = settingsScroll.rows[key];
+      });
+      settingsScroll = null;
+    }
   }
 
   // Привязать персонажа к набору (массив ссылок — задел на уровень 3)
@@ -9045,6 +9530,7 @@ window.App = window.App || {};
   // Удалить набор (только свой, не базовый). Ничего никуда не переносим:
   // у карточек состояния — снимки, они остаются как есть; листы падают на базовый.
   function deleteLibrarySet(kind, id, anchor) {
+    rememberSettingsScroll();
     const set = libSetById(kind, id);
     if (!set || set.builtin) return;
     const used = state.characters.filter(function (c) { return charSetId(c, kind) === id; }).length;
@@ -9683,11 +10169,38 @@ window.App = window.App || {};
   // Версия приложения для окна обновлений. При выпуске новой версии подними
   // APP_VERSION, добавь запись в NEWS (только новые пункты) и не забудь
   // style.css?v= в index.html и CACHE_NAME в sw.js.
-  const APP_VERSION = 147;
+  const APP_VERSION = 161;
   const NEWS_SEEN_KEY = 'custplay-news-seen';   // отдельно от state: не попадает в undo и экспорт
   const NEWS = {
     // 140–141 — хотфиксы, 142–145 — заметки со страницами, 146 — режим максимума,
-    // 147 — полоса закладок заметки: тексты окна не задавались
+    // 147 — полоса закладок заметки, 148–151 — состояния, 152 — щит баффов.
+    161: {
+      ru: [
+        'Более удобный редактор эффектов: состояния, предметы и баффы в одном окне.',
+        'Свои названия в баффах.',
+        'Щит в баффах.',
+        'Копии состояний и предметов.'
+      ],
+      en: [
+        'A cleaner effect editor: conditions, items and buffs in one window.',
+        'Custom labels for buffs.',
+        'Shield in buffs.',
+        'Copy conditions and items.'
+      ]
+    },
+    160: { ru: [], en: [] },
+    159: { ru: [], en: [] },
+    158: { ru: [], en: [] },
+    157: { ru: [], en: [] },
+    156: { ru: [], en: [] },
+    155: { ru: [], en: [] },
+    154: { ru: [], en: [] },
+    153: { ru: [], en: [] },
+    152: { ru: [], en: [] },
+    151: { ru: [], en: [] },
+    150: { ru: [], en: [] },
+    149: { ru: [], en: [] },
+    148: { ru: [], en: [] },
     147: { ru: [], en: [] },
     146: { ru: [], en: [] },
     145: { ru: [], en: [] },
@@ -9775,6 +10288,41 @@ window.App = window.App || {};
     render();
     document.getElementById('fab').addEventListener('click', openAddMenu);
     document.getElementById('backdrop').addEventListener('click', closeModal);
+    // v153: слой редактора эффекта — своя Esc-ловушка и Tab, поверх окна.
+    // Слушаем window в capture: иначе Esc сначала закроет окно под слоем,
+    // а меню цели (тоже window capture) должно получать клавишу первым.
+    document.getElementById('fxBackdrop').addEventListener('click', closeFxEditor);
+    document.getElementById('fxBody').addEventListener('click', fxOnBodyClick);
+    document.getElementById('fxBody').addEventListener('input', fxOnBodyInput);
+    window.addEventListener('keydown', function (e) {
+      if (!fxIsOpen()) return;
+      if (e.key === 'Escape') {
+        if (mountedMenu) return;   // открытое меню закроется само
+        e.preventDefault();
+        e.stopImmediatePropagation();
+        closeFxEditor();
+        return;
+      }
+      if (e.key === 'Tab') {
+        const modal = document.getElementById('fxModal');
+        const all = modal.querySelectorAll('button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])');
+        const list = Array.prototype.filter.call(all, function (el) { return el.offsetParent !== null; });
+        if (!list.length) return;
+        const first = list[0], last = list[list.length - 1];
+        if (e.shiftKey && document.activeElement === first) { e.preventDefault(); last.focus(); }
+        else if (!e.shiftKey && document.activeElement === last) { e.preventDefault(); first.focus(); }
+        return;
+      }
+      if (e.key === 'Enter' && !e.shiftKey) {
+        const t = e.target;
+        if (!t) return;
+        const tag = (t.tagName || '').toLowerCase();
+        if (tag === 'button' || tag === 'textarea' || t.isContentEditable) return;
+        e.preventDefault();
+        e.stopImmediatePropagation();
+        fxTrySave('save');
+      }
+    }, true);
     // слой ярлыка: клик/тап мимо панели закрывает (креста нет — решение юзера)
     const labelLayer = document.getElementById('labelLayer');
     labelLayer.addEventListener('click', function (e) { if (e.target === labelLayer) closeLabelLayer(); });

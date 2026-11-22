@@ -78,6 +78,9 @@
   --z-layer-bd: 96;
   --z-modal: 100;
   --z-modal-top: 101;
+  /* слой редактора эффекта — поверх обычного окна */
+  --z-fx-bd: 102;
+  --z-fx: 103;
   --z-toast: 120;
   --z-roll-toast: 130;
   --z-undo: 140;
@@ -1039,6 +1042,112 @@ body.col-dragging .card { cursor: grabbing; }
 }
 .modal h2 { margin: 0 0 12px; font-size: 18px; }
 .modal .m-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 16px; flex-wrap: wrap; }
+
+/* ---------- v153: редактор эффекта (второй слой окна) ---------- */
+.fx-backdrop { z-index: var(--z-fx-bd); }
+.fx-modal { z-index: var(--z-fx); }
+.fx-modal:focus { outline: none; }
+.fx-group { margin-bottom: 12px; }
+.fx-group-label {
+  font-size: var(--fs-11); letter-spacing: .06em; text-transform: uppercase;
+  color: var(--muted); margin-bottom: 6px;
+}
+.fx-chips { display: flex; flex-wrap: wrap; gap: 6px; }
+.fx-chip {
+  border: 1px solid var(--border); background: var(--panel2); color: var(--text-soft);
+  border-radius: var(--radius-pill); padding: 5px 10px; font: inherit; font-size: 12.5px;
+  cursor: pointer; transition: border-color .15s, color .15s, background .15s;
+}
+.fx-chip:hover { border-color: var(--accent2); color: var(--text); }
+.fx-chip.on { border-color: var(--accent); background: var(--gold-bg); color: var(--text); }
+.fx-chip:disabled { opacity: .45; cursor: default; }
+.fx-chip .fx-g { opacity: .8; margin-right: 4px; }
+.fx-chip-static {
+  border-style: dashed; cursor: default; color: var(--muted); background: transparent;
+}
+.fx-hint { font-size: 11.5px; color: var(--muted); margin-top: 6px; min-height: 15px; }
+.fx-target-btn {
+  width: 100%; display: flex; align-items: center; justify-content: space-between; gap: 8px;
+  border: 1px solid var(--border); background: var(--panel2); color: var(--text);
+  border-radius: var(--radius-xs); padding: 8px 10px; font: inherit; font-size: 13px;
+  cursor: pointer; text-align: left;
+}
+.fx-target-btn:hover { border-color: var(--accent2); }
+.fx-target-btn .fx-arr { color: var(--muted); }
+.fx-target-btn.fx-invalid { border-color: var(--danger); }
+.fx-value-row { display: flex; gap: 6px; align-items: stretch; }
+.fx-value-row input[type="text"],
+.fx-value-row input[type="number"] {
+  flex: 1 1 auto; min-width: 0;
+  background: var(--panel); border: 1px solid var(--border); border-radius: var(--radius-sm);
+  color: var(--text); padding: 7px 9px; font: inherit;
+}
+.fx-value-row input:focus { border-color: var(--accent2); }
+.fx-value-row.fx-die input[type="number"] { flex: 0 0 64px; }
+.fx-value-row.fx-die { flex-wrap: wrap; }
+/* преимущество/помеха — две кнопки одинаковой ширины, число бросков ниже */
+.fx-value-row.fx-roll { flex-wrap: wrap; }
+.fx-roll-dirs { display: flex; gap: 6px; flex: 1 1 100%; }
+.fx-roll-dirs .fx-chip {
+  flex: 1 1 0; min-width: 0; display: inline-flex; align-items: center;
+  justify-content: center; gap: 4px; white-space: nowrap;
+}
+.fx-value-row.fx-roll input[type="number"] { flex: 0 0 120px; }
+.fx-step {
+  flex: 0 0 38px; border: 1px solid var(--border); background: var(--panel2);
+  color: var(--text-soft); border-radius: var(--radius-xs); font: inherit; font-size: 15px;
+  cursor: pointer;
+}
+.fx-step:hover { border-color: var(--accent2); color: var(--text); }
+.fx-error { color: var(--danger); font-size: 12px; margin-top: 5px; }
+.fx-details { border-top: 1px solid var(--border); padding-top: 10px; }
+.fx-details > summary {
+  cursor: pointer; color: var(--text-soft); font-size: 13px; list-style: none;
+}
+.fx-details > summary::-webkit-details-marker { display: none; }
+.fx-details > summary::before { content: '▸ '; color: var(--muted); }
+.fx-details[open] > summary::before { content: '▾ '; }
+.fx-details-body { padding-top: 8px; }
+.fx-rows { display: flex; flex-direction: column; gap: 6px; }
+.fx-row {
+  display: flex; align-items: center; gap: 4px;
+  border: 1px solid var(--border); border-radius: var(--radius-sm);
+  background: var(--panel2); padding: 2px 4px;
+}
+.fx-row-main {
+  flex: 1 1 auto; min-width: 0; display: flex; flex-direction: column; gap: 2px;
+  background: none; border: 0; color: inherit; font: inherit; text-align: left;
+  padding: 6px 4px; cursor: pointer;
+}
+.fx-row-main b {
+  font-weight: 600; font-size: 12.5px; overflow: hidden;
+  text-overflow: ellipsis; white-space: nowrap;
+}
+.fx-row-main small { color: var(--muted); font-size: 11px; }
+.fx-row-btn {
+  flex: 0 0 auto; background: none; border: 0; color: var(--muted); cursor: pointer;
+  padding: 6px; border-radius: var(--radius-xs); display: grid; place-items: center;
+}
+.fx-row-btn:hover { color: var(--accent2); }
+.fx-row-btn.fx-del:hover { color: var(--danger); }
+.fx-row-btn svg { width: 15px; height: 15px; display: block; }
+.fx-empty { color: var(--muted); font-size: 12px; padding: 4px 0; }
+.fx-add {
+  width: 100%; margin-top: 6px; border: 1px dashed var(--border); background: transparent;
+  color: var(--text-soft); border-radius: var(--radius-xs); padding: 8px 10px;
+  font: inherit; font-size: 12.5px; cursor: pointer;
+}
+.fx-add:hover { border-color: var(--accent2); color: var(--text); }
+/* кнопки окна эффекта не уезжают за скролл: липнут к низу окна */
+.fx-modal .m-actions {
+  position: sticky; bottom: -16px; margin-top: 12px;
+  background: var(--bg2); border-top: 1px solid var(--border);
+  padding: 10px 0 4px;
+}
+@media (max-width: 520px) {
+  .fx-modal { width: calc(100vw - 16px); padding: 12px; }
+  .fx-modal .m-actions { bottom: -12px; }
+}
 .field { margin-bottom: 10px; }
 .field label { display: block; color: var(--muted); font-size: 13px; margin-bottom: 3px; }
 .field input, .field select, .field textarea {
@@ -2183,13 +2292,20 @@ body.col-dragging .card { cursor: grabbing; }
 .cond-reset-btn:disabled { opacity: .35; cursor: default; color: var(--muted); border-color: var(--border); }
 .cond-reset-btn svg { width: 15px; height: 15px; display: block; }
 .cond-actions { display: flex; flex-direction: column; gap: 4px; flex: 0 0 auto; }
-.cond-refresh, .cond-tick {
+.cond-tick {
   flex: 0 0 auto; align-self: stretch; padding: 5px 8px;
   background: var(--panel2); border: 1px solid var(--border); border-radius: var(--radius-sm);
   color: var(--muted); font: inherit; font-size: 12px; cursor: pointer;
 }
-.cond-refresh:hover, .cond-tick:hover { color: var(--accent2); border-color: var(--accent2); }
-.cond-refresh:disabled, .cond-tick:disabled { opacity: .35; cursor: default; color: var(--muted); border-color: var(--border); }
+.cond-tick:hover { color: var(--accent2); border-color: var(--accent2); }
+.cond-tick:disabled { opacity: .35; cursor: default; color: var(--muted); border-color: var(--border); }
+/* v156: создание своего состояния прямо из каталога в игре */
+.cond-new-state {
+  width: 100%; margin: 0 0 6px; padding: 6px 8px; min-height: 30px;
+  background: transparent; border: 1px dashed var(--border); border-radius: var(--radius-sm);
+  color: var(--text-soft); font: inherit; font-size: 12px; cursor: pointer; text-align: center;
+}
+.cond-new-state:hover { border-color: var(--accent2); color: var(--text); }
 /* длительность в слое: маленькое поле прямо в строке состояния */
 .cond-dur-wrap {
   display: inline-flex; align-items: center; gap: 3px;
@@ -2207,7 +2323,7 @@ body.col-dragging .card { cursor: grabbing; }
 .cond-dur-input:focus { border-color: var(--accent2); }
 .cond-dur-input::placeholder { color: #5a5a72; }
 .cond-row {
-  display: grid; grid-template-columns: 28px minmax(0, 1fr) auto auto; gap: 9px;
+  display: grid; grid-template-columns: 28px minmax(0, 1fr) 28px; gap: 9px;
   align-items: center; padding: 7px 6px; border-radius: var(--radius-sm);
 }
 .cond-row:hover { background: var(--panel2); }
@@ -2219,29 +2335,48 @@ body.col-dragging .card { cursor: grabbing; }
 .cond-row-desc { font-size: 12px; color: var(--muted); overflow-wrap: anywhere; }
 /* v77: эффекты состояния — чипы «что меняет → на какой карточке» */
 .cond-row-fxwrap { display: flex; flex-wrap: wrap; gap: 4px; }
+.cond-fx-line { display: flex; align-items: center; gap: 4px; max-width: 100%; min-width: 0; }
 .cond-fx {
   font: inherit; font-size: 11px; line-height: 1.25; max-width: 100%;
-  padding: 2px 8px; border-radius: var(--radius-pill); cursor: pointer;
+  padding: 2px 8px; border-radius: var(--radius-pill); cursor: default;
   border: 1px solid var(--border); background: var(--panel2); color: var(--text);
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
-.cond-fx:hover { border-color: var(--accent2); }
 /* v79: старый «кубик в значение» больше не применяется — помечаем пунктиром */
 .cond-fx.off { opacity: .55; border-style: dashed; }
-.cond-row-fxadd {
-  background: none; border: 0; padding: 6px 8px; border-radius: var(--radius-sm);
-  color: var(--muted); cursor: pointer; font-size: 16px; line-height: 1;
+/* v155: цель эффекта выбирается прямо в строке состояния */
+.cond-fx-sel {
+  max-width: 150px; min-width: 84px; font: inherit; font-size: 11px; min-height: 28px;
+  background: var(--panel); border: 1px solid var(--border); border-radius: var(--radius-xs);
+  color: var(--text-soft); padding: 3px 6px;
 }
-.cond-row-fxadd:hover { color: var(--accent2); }
+.cond-fx-sel:focus { border-color: var(--accent2); }
+.cond-fx-sel.invalid { border-color: var(--danger); color: var(--danger-pale); }
 .cond-row-del {
   background: none; border: 0; padding: 6px; border-radius: var(--radius-sm);
   color: var(--muted); cursor: pointer; line-height: 1;
 }
 .cond-row-del:hover { color: var(--danger); background: none; border: 0; }
 .cond-row-del .trash-ic { width: 15px; height: 15px; }
+/* v148: снятие состояния (не удаление — иконка ⊘). */
+.cond-row-unset {
+  width: 28px; height: 28px; padding: 0; display: grid; place-items: center;
+  background: none; border: 0; border-radius: var(--radius-sm);
+  color: var(--muted); cursor: pointer; line-height: 1;
+}
+.cond-row-unset:hover { color: var(--accent); }
+.cond-row-unset svg { width: 15px; height: 15px; display: block; }
 .cond-empty { color: var(--muted); font-size: 13px; text-align: center; padding: 16px 0; }
 
-/* строки каталога */
+/* строки каталога: строка + карандаш редактора шаблона */
+.cond-pick-line { display: flex; align-items: center; gap: 2px; }
+.cond-pick-line .cond-pick-row { flex: 1 1 auto; min-width: 0; }
+.cond-pick-edit {
+  flex: 0 0 auto; width: 26px; height: 26px; padding: 0; display: grid; place-items: center;
+  background: none; border: 0; border-radius: var(--radius-sm);
+  color: var(--muted); cursor: pointer; font-size: 13px; line-height: 1;
+}
+.cond-pick-edit:hover { color: var(--accent2); background: var(--panel2); }
 .cond-pick-row {
   display: grid; grid-template-columns: 26px minmax(0, 1fr) auto; gap: 9px; align-items: center;
   width: 100%; text-align: left; padding: 6px 8px; border-radius: var(--radius-sm);
@@ -2274,9 +2409,11 @@ body.col-dragging .card { cursor: grabbing; }
   }
   .cond-preview { grid-column: 1; grid-row: 1; max-width: 92px; margin: 0 auto; }
   .cond-actions { grid-column: 2; grid-row: 1; flex-direction: row; align-self: center; gap: 6px; }
-  .cond-refresh, .cond-tick { flex: 1 1 0; min-height: 32px; padding: 4px 6px; font-size: 11px; }
+  .cond-tick { flex: 1 1 0; min-height: 32px; padding: 4px 6px; font-size: 11px; }
+  .cond-new-state { min-height: 34px; font-size: 12.5px; }
   .cond-list { grid-column: 1 / -1; grid-row: 2; }
   .cond-row { padding: 4px 2px; }
+  .cond-fx-sel { min-height: 32px; font-size: 12px; }
   .cond-row-desc { display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 1; overflow: hidden; }
   .cond-col-cat { border-right: 0; border-top: 1px solid var(--border); padding: 8px 0 0; }
 }
@@ -2385,10 +2522,6 @@ body.no-scroll { overflow: hidden; overscroll-behavior: none; }
 .set-title { display: flex; flex-direction: column; min-width: 0; flex: 1 1 auto; }
 .set-title b { font-size: 14px; }
 .set-meta { color: var(--muted); font-size: 12px; }
-.set-flag {
-  flex: 0 0 auto; font-size: 11px; color: var(--purple-pale);
-  border: 1px solid rgba(var(--purple-rgb), .45); border-radius: var(--radius-xs); padding: 2px 6px;
-}
 /* тело набора: открытые наборы делят высоту, список внутри прокручивается */
 .set-body { display: none; flex: 1 1 auto; min-height: 0; padding: 0 10px 8px; border-top: 1px solid var(--border); }
 .set-card.open .set-body { display: flex; flex-direction: column; }
@@ -2396,16 +2529,18 @@ body.no-scroll { overflow: hidden; overscroll-behavior: none; }
   flex: 1 1 auto; min-height: 0; overflow-y: auto; padding: 6px 4px 0 0;
 }
 .set-row {
-  display: grid; grid-template-columns: 24px minmax(0, 1fr) auto auto; gap: 8px;
+  display: grid; grid-template-columns: 24px minmax(0, 1fr) auto auto auto; gap: 8px;
   align-items: center; padding: 4px 4px; border-radius: var(--radius-xs);
 }
 .set-row:hover { background: var(--panel2); }
 .set-row.editable { cursor: pointer; }
-.set-row-edit, .set-row-del {
+.set-row-edit, .set-row-dup, .set-row-del {
   background: none; border: 0; color: var(--muted); cursor: pointer;
   font-size: 14px; padding: 2px 4px; border-radius: var(--radius-xs);
 }
 .set-row.editable:hover .set-row-edit { color: var(--accent2); }
+.set-row .set-row-dup:hover { color: var(--accent2); }
+.set-row-dup .dup-ic { width: 14px; height: 14px; display: block; }
 .set-row .set-row-del:hover { color: var(--danger); }
 .set-row-del .trash-ic { width: 14px; height: 14px; display: block; }
 .set-row-slot { width: 22px; height: 14px; display: block; }
@@ -2460,26 +2595,6 @@ body.no-scroll { overflow: hidden; overscroll-behavior: none; }
   border-radius: var(--radius-xs); background: var(--panel2); cursor: pointer;
 }
 .st-meta { font-size: 11px; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.st-fx-list { display: flex; flex-direction: column; gap: 5px; }
-.st-fx-row {
-  display: flex; align-items: center; gap: 6px; padding: 6px 8px;
-  border: 1px solid var(--border); border-radius: var(--radius-sm); background: var(--panel2);
-}
-.st-fx-sum {
-  flex: 1 1 auto; font-size: 13px; min-width: 0;
-  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
-}
-.st-fx-row button { background: none; border: 0; color: var(--muted); cursor: pointer; padding: 2px; }
-.st-fx-row button:hover { color: var(--accent2); }
-.st-fx-row .st-fx-del:hover { color: var(--danger); }
-.st-fx-row .trash-ic { width: 14px; height: 14px; }
-.st-fx-empty { color: var(--muted); font-size: 12px; padding: 4px 0; }
-.st-fx-form {
-  display: flex; flex-direction: column; gap: 6px; padding: 8px;
-  border: 1px solid var(--accent2); border-radius: var(--radius); background: var(--panel);
-}
-.st-fx-actions { display: flex; justify-content: flex-end; gap: 8px; }
-.st-add-fx { align-self: flex-start; margin-top: 6px; }
 .st-save-mode {
   display: flex; flex-wrap: wrap; align-items: center; gap: 8px 14px;
   padding-top: 8px; border-top: 1px solid var(--border);
@@ -2500,7 +2615,6 @@ body.no-scroll { overflow: hidden; overscroll-behavior: none; }
   .st-icon-grid { grid-template-columns: repeat(6, 1fr); }
   .set-head { gap: 5px; padding: 8px; }
   .set-plus, .set-ren, .set-exp, .set-del { width: 24px; height: 24px; }
-  .set-flag { padding: 2px 4px; }
 }
 /* ---------- v89: бейдж и дельта модификаторов, «своя» строка инициативы ---------- */
 .mod-badge {
@@ -2596,16 +2710,9 @@ body.no-scroll { overflow: hidden; overscroll-behavior: none; }
 .buff-details-main { font-size: 13px; font-weight: 600; }
 .buff-details-sub { font-size: 12px; color: var(--muted); }
 .buff-details-text { margin-top: 2px; }
-/* форма эффекта баффа в редакторе карточки */
-.bfx-form { margin-bottom: 8px; }
-.bfx-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 0 8px; }
-.bfx-grid .field { margin-bottom: 6px; }
-.bfx-wide { grid-column: 1 / -1; }
 /* v93: «Что меняем» и «Как» рядом в модалке эффекта состояния */
 .fx-pair { display: grid; grid-template-columns: 1fr 1fr; gap: 0 8px; }
 @media (max-width: 520px) {
-  .bfx-grid { grid-template-columns: 1fr; }
-  .bfx-wide { grid-column: auto; }
   .fx-pair { grid-template-columns: 1fr; }
 }
 
@@ -2819,30 +2926,6 @@ body.no-scroll { overflow: hidden; overscroll-behavior: none; }
 }
 .pack-char { display: inline-flex; align-items: center; gap: 5px; font-size: 12px; color: var(--muted); cursor: pointer; }
 .pack-char input { width: auto; }
-.pk-fx-list { display: flex; flex-direction: column; gap: 5px; }
-.pk-fx-row {
-  display: grid; grid-template-columns: 1fr 1fr .8fr .9fr 1.3fr 26px;
-  gap: 5px; align-items: center;
-  padding: 5px 6px; border: 1px solid var(--border); border-radius: var(--radius-sm); background: var(--panel2);
-}
-/* v108: у своей вещи в эффекте есть ещё цель — добавляем колонку.
-   У предмета набора цели нет: она выбирается в игре. */
-.pk-fx-row.own { grid-template-columns: 1fr 1fr .75fr .95fr 1fr 1fr 26px; }
-/* v114: «Ходы» — число и, для тика, когда срабатывает */
-.fx-dur { display: flex; gap: 3px; align-items: center; min-width: 0; }
-.fx-dur input { width: 100%; min-width: 0; }
-.fx-dur select { width: 100%; min-width: 0; }
-.fx-dash { color: var(--muted); font-size: 12px; }
-.pk-fx-row select, .pk-fx-row input {
-  width: 100%; min-width: 0; background: var(--panel); border: 1px solid var(--border);
-  border-radius: var(--radius-xs); color: var(--text); font: inherit; font-size: 12px; padding: 5px 6px;
-}
-.pk-fx-row button { background: none; border: 0; color: var(--muted); cursor: pointer; padding: 2px; }
-.pk-fx-row button:hover { color: var(--danger); }
-.pk-fx-row .trash-ic { width: 14px; height: 14px; }
-.pkfx-cell { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
-.pkfx-cell > span { font-size: 10px; line-height: 1; color: var(--muted); text-transform: uppercase; letter-spacing: .06em; }
-.pk-fx-row > button { align-self: end; margin-bottom: 3px; }
 .fx-add-row { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-top: 6px; }
 .fx-add-row .add-btn { margin-top: 0; }
 .fx-add-row .formula-help { margin: 0; }
@@ -2857,11 +2940,6 @@ body.no-scroll { overflow: hidden; overscroll-behavior: none; }
 }
 .item-icon:hover { border-color: var(--accent2); }
 .item-icon.on { border-color: var(--accent); background: rgba(var(--gold-rgb), .14); box-shadow: 0 0 0 1px rgba(var(--gold-rgb), .25); }
-@media (max-width: 560px) {
-  .pk-fx-row, .pk-fx-row.own { grid-template-columns: 1fr 1fr; }
-  .pk-fx-row input, .pk-fx-row select { grid-column: span 1; }
-  .pk-fx-row button { justify-self: end; }
-}
 
 /* ==========================================================
    v126: доступность — область нажатия у мелких кнопок.
@@ -2875,14 +2953,14 @@ body.no-scroll { overflow: hidden; overscroll-behavior: none; }
   .inv-menu-btn,
   .inv-fx-x,
   .set-plus, .set-ren, .set-exp, .set-del,
-  .set-row-edit, .set-row-del,
+  .set-row-edit, .set-row-dup, .set-row-del,
   .modal .modal-icon-btn { position: relative; }
   .card-head .kebab::after,
   .fold-tab::after,
   .inv-menu-btn::after,
   .inv-fx-x::after,
   .set-plus::after, .set-ren::after, .set-exp::after, .set-del::after,
-  .set-row-edit::after, .set-row-del::after,
+  .set-row-edit::after, .set-row-dup::after, .set-row-del::after,
   .modal .modal-icon-btn::after {
     content: '';
     position: absolute;
