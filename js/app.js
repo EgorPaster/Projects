@@ -56,6 +56,12 @@ window.App = window.App || {};
   // v158: ⧉ есть не в каждом шрифте на телефоне — дублирование рисуем SVG,
   // иначе кнопка выглядит пустой.
   const DUP_SVG = '<svg class="dup-ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="9" y="9" width="11" height="11" rx="2"/><path d="M5 15V5a2 2 0 0 1 2-2h10"/></svg>';
+  // v169: заметка пишется прямо в карточке; кнопка разворота открывает второй
+  // слой. Спойлер мастера — перечёркнутый глаз.
+  const NOTE_EXPAND_SVG = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M9 4H4v5"/><path d="M15 20h5v-5"/><path d="M4 4l6 6"/><path d="M20 20l-6-6"/></svg>';
+  const NOTE_EYE_OFF_SVG = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 3l18 18"/><path d="M10.6 10.7a2 2 0 0 0 2.7 2.7"/><path d="M9.9 5.2A10.5 10.5 0 0 1 12 5c5.5 0 9 5.5 9 7a12 12 0 0 1-2.1 3.2"/><path d="M6.2 6.3A12.6 12.6 0 0 0 3 12c0 1.5 3.5 7 9 7a9.7 9.7 0 0 0 4.1-.9"/></svg>';
+  const NOTE_LINK_SVG = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M10 13a5 5 0 0 0 7.5.5l2-2a5 5 0 0 0-7-7l-1.2 1.2"/><path d="M14 11a5 5 0 0 0-7.5-.5l-2 2a5 5 0 0 0 7 7l1.2-1.2"/></svg>';
+  const NOTE_LIST_SVG = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M9 6h11M9 12h11M9 18h11"/><circle cx="4.2" cy="6" r="1.2" fill="currentColor" stroke="none"/><circle cx="4.2" cy="12" r="1.2" fill="currentColor" stroke="none"/><circle cx="4.2" cy="18" r="1.2" fill="currentColor" stroke="none"/></svg>';
   const MIN_W = 220, MIN_H = 110;   // минимальный размер карточки: чтобы влезали кнопки/содержимое
 
   // ===== Helpers =====
@@ -98,6 +104,9 @@ window.App = window.App || {};
       // старых файлов мог отличить их и мигрировать.
       schemaVersion: 4,
       activeCharacterId: null,
+      // v165: куда вернуться из мастерского листа (только UI, не экспортируется)
+      lastPlayerId: null,
+      lastMasterId: null,
       characters: [],
       settings: { language: 'ru', critSuccess: '20', critFail: '1', fillMaxCurrent: false },
       // v71: библиотеки наборов на устройстве (состояния и вещи).
@@ -123,6 +132,9 @@ window.App = window.App || {};
           st.characters = s.characters.filter(function (c) { return c && typeof c === 'object'; }).map(function (c) {
             // карточки без id/имени не отдаём конечному коду дальше как есть — подставляем честные значения
             const ch = c;
+            // v164: роль хранится явно у всех листов; старые данные — игрок.
+            // Будущие роли (assistant/viewer) не перетираем в player.
+            if (ch.role !== 'master' && ch.role !== 'player') ch.role = 'player';
             if (Array.isArray(ch.cards)) {
               ch.cards = ch.cards.filter(function (k) { return k && typeof k === 'object'; }).map(function (k) {
                 if (!k.id) k.id = uid();
@@ -135,6 +147,8 @@ window.App = window.App || {};
           });
         }
         if (s.activeCharacterId && st.characters.some(function (c) { return c.id === s.activeCharacterId; })) st.activeCharacterId = s.activeCharacterId;
+        if (typeof s.lastPlayerId === 'string') st.lastPlayerId = s.lastPlayerId;
+        if (typeof s.lastMasterId === 'string') st.lastMasterId = s.lastMasterId;
         if (typeof s.schemaVersion === 'number') st.schemaVersion = s.schemaVersion;
         if (s.settings && typeof s.settings === 'object') st.settings = Object.assign(st.settings, s.settings);
         // v71: наборы состояний/вещей (библиотеки на устройстве)
@@ -154,6 +168,9 @@ window.App = window.App || {};
         migrateShields(st);
         st.schemaVersion = 4;
       }
+      // v165: ссылки «куда вернуться» не должны вести на удалённый лист
+      if (st.lastPlayerId && !st.characters.some(function (c) { return c.id === st.lastPlayerId && c.role !== 'master'; })) st.lastPlayerId = null;
+      if (st.lastMasterId && !st.characters.some(function (c) { return c.id === st.lastMasterId && c.role === 'master'; })) st.lastMasterId = null;
       return st;
     } catch (e) {
       return defaultState();
@@ -243,6 +260,48 @@ window.App = window.App || {};
   // ===== Character / card helpers =====
   function activeChar() {
     return state.characters.find(function (c) { return c.id === state.activeCharacterId; }) || null;
+  }
+
+  // ===== Роль и возможности (v164) =====
+  // Роль — свойство ЛИСТА, не приложения: мастерский лист остаётся обычным
+  // персонажем, поэтому undo/экспорт/снимки не требуют второго движка.
+  // Старые листы без поля считаются игроком — миграция не нужна.
+  // Проверки роли живут только в точках входа (меню, настройки, поиск),
+  // а не внутри рендера карточки.
+  const ROLE_CAPS = {
+    player: [
+      'cards:counter', 'cards:skill', 'cards:spell', 'cards:currency',
+      'cards:inventory', 'cards:note', 'cards:initiative',
+      'cards:condition', 'cards:buff',
+      'search:sheets'
+    ],
+    master: [
+      'cards:note', 'cards:initiative',
+      'cards:sheet', 'cards:journal',
+      'encounter:rows', 'encounter:attacks', 'encounter:boss', 'encounter:reset',
+      'journal:capture', 'journal:timers', 'journal:export',
+      'search:sheets', 'search:master'
+    ]
+  };
+  function roleOf(ch) { return (ch && ch.role === 'master') ? 'master' : 'player'; }
+  function can(cap, ch) {
+    const caps = ROLE_CAPS[roleOf(ch || activeChar())];
+    return !!caps && caps.indexOf(cap) !== -1;
+  }
+  function isMaster(ch) { return roleOf(ch || activeChar()) === 'master'; }
+  function masterSheets() {
+    return state.characters.filter(function (c) { return roleOf(c) === 'master'; });
+  }
+
+  // v164: снимок чужого листа считает выражения по своему персонажу, а не по
+  // активному. Переключаем только на время синхронного рендера (try/finally),
+  // записи в это время запрещены — снимок только читают.
+  let hostOverride = null;
+  function hostChar() { return hostOverride || activeChar(); }
+  function withHostChar(ch, fn) {
+    const prev = hostOverride;
+    hostOverride = ch;
+    try { return fn(); } finally { hostOverride = prev; }
   }
 
   // ===== Pages (полотна внутри персонажа) =====
@@ -612,6 +671,16 @@ window.App = window.App || {};
     html += (card.type === 'inventory' ? '' : '<button type="button" data-m="edit">✎ ' + esc(App.t('edit')) + '</button>') +
             '<button type="button" data-m="dup">⧉ ' + esc(App.t('duplicate')) + '</button>' +
             '<button type="button" data-m="del">' + TRASH_SVG + ' ' + esc(App.t('delete')) + '</button>';
+    // v164: дополнительные пункты типа из реестра («В инициативу», «Свойства врага»)
+    const sp = specFor(card.type);
+    if (sp && Array.isArray(sp.menu)) {
+      sp.menu.forEach(function (m) {
+        if (!m || !m.act || !m.labelKey) return;
+        if (m.when && !m.when(card)) return;
+        html += '<button type="button" data-m="spec:' + esc(m.act) + '">' +
+          (m.icon ? m.icon + ' ' : '') + esc(App.t(m.labelKey)) + '</button>';
+      });
+    }
     menu.innerHTML = html;
     menu.addEventListener('click', function (e) {
       const b = e.target.closest('button');
@@ -619,6 +688,7 @@ window.App = window.App || {};
       const m = b.dataset.m;
       if (m === 'span') { setCardSpan(cardId, Number(b.dataset.n)); closeCardMenu(); return; }
       closeCardMenu();
+      if (m.indexOf('spec:') === 0) { handleAction(cardId, { act: m.slice(5) }, e); return; }
       if (m === 'edit') openCardEditor(cardId);
       else if (m === 'dup') duplicateCard(cardId);
       else if (m === 'del') deleteCard(cardId);
@@ -627,7 +697,7 @@ window.App = window.App || {};
     mountMenu(menu, anchor, { align: 'right' });
   }
   function findCard(cardId) {
-    const ch = activeChar();
+    const ch = hostChar();
     return ch ? ch.cards.find(function (c) { return c.id === cardId; }) : null;
   }
   // ===== Свертывание в ярлык (И, З, В) =====
@@ -641,7 +711,7 @@ window.App = window.App || {};
   function effW(c) { return isCollapsed(c) ? LABEL_W : (c.w || 300); }
   function effH(c) { return isCollapsed(c) ? LABEL_H : (c.h || 150); }
   function findCardByName(name) {
-    const ch = activeChar();
+    const ch = hostChar();
     if (!ch) return null;
     return ch.cards.find(function (c) { return c.name === name; }) || null;
   }
@@ -654,7 +724,36 @@ window.App = window.App || {};
   function typeLabelKey(type) { return 'type' + type.charAt(0).toUpperCase() + type.slice(1); }
   function typeLabel(type) { return App.t(typeLabelKey(type)); }
 
+  // ===== Реестр типов (v164) =====
+  // Новые типы (снимок, журнал) объявляют себя здесь: поля, размеры, лицо,
+  // редактор, слой и действия. Старые типы пока живут на своих switch-ветках
+  // и переезжают по одному, когда их коснётся задача (см. архитектуру).
+  // Пустой реестр — нормальное стартовое состояние: specFor() вернёт null.
+  const CARD_SPECS = {};
+  function specFor(type) { return CARD_SPECS[type] || null; }
+  function typesForRole(role, menuOnly) {
+    return Object.keys(CARD_SPECS).filter(function (id) {
+      const sp = CARD_SPECS[id];
+      if (!sp || !sp.id) return false;
+      if (menuOnly && sp.menu === false) return false;
+      return !sp.roles || sp.roles.indexOf(role) !== -1;
+    }).sort(function (a, b) {
+      return (CARD_SPECS[a].menuOrder || 0) - (CARD_SPECS[b].menuOrder || 0);
+    });
+  }
+  // меню «＋»: старые типы по возможностям роли + новые из реестра,
+  // без дублей (новый тип может быть и в CARD_TYPES для импорта)
+  function menuTypes(role) {
+    const specTypes = typesForRole(role, true);
+    const legacy = CARD_TYPES.filter(function (t) {
+      return specTypes.indexOf(t) === -1 && can('cards:' + t, { role: role });
+    });
+    return legacy.concat(specTypes);
+  }
+
   function defaultsFor(type) {
+    const sp = specFor(type);
+    if (sp && sp.defaults) return sp.defaults();
     switch (type) {
       case 'counter': return { current: 0, max: 0, bonus: '', die: null, restores: false };
       case 'skill': return { value: null, die: 20, bonus: '', description: '', nDice: 1 };
@@ -696,7 +795,9 @@ window.App = window.App || {};
     return name;
   }
 
-  function defaultSize(type) {
+  function defaultSize(type, ch) {
+    const sp = specFor(type);
+    if (sp && sp.size) return { w: sp.size.w, h: sp.size.h };
     switch (type) {
       // v58: единая сетка — высоты по шагу 40 (80/120/160/200), ширины 143/300.
       // 143 + 14 (зазор) + 143 = 300: два счётчика ровно равны одной широкой карточке.
@@ -706,7 +807,8 @@ window.App = window.App || {};
       case 'spell': return { w: 300, h: 160 };        // 2 ряда треугольников + описание
       case 'skill': return { w: 300, h: 80 };         // шапка + значение (описание — сбоку, высоту не растит)
       case 'counter': return { w: 143, h: 120 };      // ровно половина широкой карточки
-      case 'initiative': return { w: 300, h: 352 };  // 4 строки + добавление + кнопка хода
+      // v166: мастерской инициативе нужны вкладки, строки и панель — она шире
+      case 'initiative': return isMaster(ch || activeChar()) ? { w: 340, h: 420 } : { w: 300, h: 352 };
       // v65: состояние — фигура 236×305 + шапка и воздух; ресайз отключён.
       // v68: высота 360 — фигура 305 + шапка 18 + отступы 18 + запас 19
       case 'condition': return { w: 300, h: 360 };
@@ -717,7 +819,9 @@ window.App = window.App || {};
   }
   // жёсткий минимум: чтобы содержимое карточки не обрезалось при сжатии.
   // Зависит от содержимого: валюты растут от числа единиц, инвентарь — от числа предметов.
-  function minSize(card) {
+  function minSize(card, ch) {
+    const sp = specFor(card.type);
+    if (sp && sp.minSize) return sp.minSize(card);
     const type = card.type;
     let w = MIN_W, h = MIN_H;
     if (type === 'counter') { w = 143; h = 120; }   // половина широкой карточки
@@ -749,8 +853,8 @@ window.App = window.App || {};
     }
     if (type === 'initiative') {
       // карточка-окно: 4 строки минимум, выше — по высоте. Свёрнутая строка — 42.
-      w = 300;
-      h = card.mini ? 42 : 352;
+      if (isMaster(ch || activeChar())) { w = 340; h = card.mini ? 42 : 420; }
+      else { w = 300; h = card.mini ? 42 : 352; }
     }
     // v65: состояние — фиксированный размер, фигура не должна сжиматься/обрезаться
     if (type === 'condition') { w = 300; h = 360; }
@@ -761,7 +865,7 @@ window.App = window.App || {};
 
   function autoPlace(ch, card) {
     const margin = 16, gap = 14;
-    const size = (card.w && card.h) ? { w: card.w, h: card.h } : defaultSize(card.type);
+    const size = (card.w && card.h) ? { w: card.w, h: card.h } : defaultSize(card.type, ch);
     const vw = window.innerWidth || 1200;
     const cols = Math.max(1, Math.floor((vw - margin * 2 + gap) / (size.w + gap)));
     const colBottom = [], colX = [];
@@ -806,11 +910,11 @@ window.App = window.App || {};
         delete card.charges.blockEmpty;
       }
       if (card.x == null || card.y == null) autoPlace(ch, card);
-      const mn = minSize(card);
-      card.w = card.w == null ? defaultSize(card.type).w : Math.max(mn.w, card.w);
-      card.h = card.h == null ? defaultSize(card.type).h : Math.max(mn.h, card.h);
+      const mn = minSize(card, ch);
+      card.w = card.w == null ? defaultSize(card.type, ch).w : Math.max(mn.w, card.w);
+      card.h = card.h == null ? defaultSize(card.type, ch).h : Math.max(mn.h, card.h);
       // v50: ширина карточки в мобильной сетке (1–4 клетки)
-      if (card.span == null) card.span = defaultSpan(card.type);
+      if (card.span == null) card.span = defaultSpan(card.type, card, ch);
       // v50: у навыка появились описание и количество кубиков
       if (card.type === 'skill') {
         if (card.nDice == null) card.nDice = 1;
@@ -881,11 +985,52 @@ window.App = window.App || {};
   }
 
   function newCharacter(name) {   // единственный путь создания: и из меню, и стартовый персонаж при пустом хранилище
-    const ch = { id: uid(), name: name || App.t('newCharName'), cards: defaultCards() };
+    const ch = { id: uid(), name: name || App.t('newCharName'), role: 'player', cards: defaultCards() };
     layoutCharacter(ch);
     state.characters.push(ch);
     state.activeCharacterId = ch.id;
     return ch;
+  }
+
+  // v165: мастерский лист — обычный персонаж с role:'master' и пустым холстом.
+  // Одна страница создаётся существующим ensurePages, остальные мастер добавит сам.
+  function newMasterCharacter(name) {
+    const cur = activeChar();
+    if (cur && !isMaster(cur)) state.lastPlayerId = cur.id;
+    let nm = String(name || '').trim() || App.t('masterDefaultName');
+    let i = 2, base = nm;
+    while (state.characters.some(function (c) { return c.name === nm; })) { nm = base + ' ' + i; i++; }
+    const ch = { id: uid(), name: nm, role: 'master', cards: [] };
+    layoutCharacter(ch);
+    state.characters.push(ch);
+    state.activeCharacterId = ch.id;
+    state.lastMasterId = ch.id;
+    return ch;
+  }
+
+  function switchToMaster(id) {
+    const target = (id && state.characters.find(function (c) { return c.id === id && isMaster(c); })) ||
+      state.characters.find(function (c) { return c.id === state.lastMasterId && isMaster(c); }) ||
+      masterSheets()[0];
+    if (!target) return false;
+    const cur = activeChar();
+    if (cur && !isMaster(cur)) state.lastPlayerId = cur.id;
+    state.activeCharacterId = target.id;
+    state.lastMasterId = target.id;
+    commit();
+    return true;
+  }
+
+  function leaveMasterMode() {
+    const cur = activeChar();
+    if (cur && isMaster(cur)) state.lastMasterId = cur.id;
+    let target = state.characters.find(function (c) { return c.id === state.lastPlayerId && !isMaster(c); });
+    if (!target) target = state.characters.find(function (c) { return !isMaster(c); });
+    if (target) state.activeCharacterId = target.id;
+    else newCharacter();   // игрока нет — создаём обычный лист
+    const now = activeChar();
+    if (now) state.lastPlayerId = now.id;
+    commit();
   }
 
   // ===== Values / expressions =====
@@ -1628,6 +1773,9 @@ window.App = window.App || {};
     const card = findCard(cardId);
     if (!card) return;
     const act = ds.act;
+    // v164: новые типы объявляют действия в реестре; старые идут прежней цепочкой
+    const sp = specFor(card.type);
+    if (sp && sp.actions && sp.actions[act]) { sp.actions[act](card, ds, e); return; }
     if (act === 'inc') mutate(function () {
       // v115: выше максимума не поднимаем; излишек — это щит, а не «переполнение»
       const step = counterStep(card.id);
@@ -1700,6 +1848,9 @@ window.App = window.App || {};
         if (tgt) toast(App.tf('refillRes', { name: tgt.name }));
       }
     }
+    else if (act === 'note-expand') openLabelLayer(card.id);
+    else if (act === 'note-spoiler') toggleNoteSpoiler(card);
+    else if (act === 'note-reveal') revealNoteSpoiler(card);
     else if (act === 'note-page') {
       // v142: закладка заметки на карточке — переключить страницу.
       // v147: после выбора страницы полоса остаётся раскрытой (как в слое) и
@@ -1718,7 +1869,10 @@ window.App = window.App || {};
       const cardEl = cardElOf(card.id);
       if (cardEl) {
         const txt = cardEl.querySelector('.note-text');
-        if (txt) txt.textContent = page ? (page.text || '') : '';
+        if (txt) {
+          if (txt.tagName === 'TEXTAREA') txt.value = page ? (page.text || '') : '';
+          else txt.innerHTML = notePageHtml(page);
+        }
         cardEl.querySelectorAll('.note-tab').forEach(function (b) {
           b.classList.toggle('on', b.dataset.page === ds.page);
         });
@@ -1743,6 +1897,36 @@ window.App = window.App || {};
   let iniPreviewTimer = null;
   function handleInitiative(card, act, ds, e) {
     const el = e && e.currentTarget ? e.currentTarget.closest('.card') : null;
+
+    // v166: встречи мастера
+    if (act === 'ini-tab') {
+      if (iniTabSuppressed(card)) return;
+      iniLoadEnc(card, ds.enc);
+      return;
+    }
+    if (act === 'ini-tab-add') { iniOpenTabAddMenu(card, e && e.currentTarget); return; }
+    if (act === 'ini-tab-more') { iniOpenTabsMore(card, e && e.currentTarget); return; }
+    if (act === 'ini-reveal') {
+      iniRevealed[iniRevealKey(card, card.activeId)] = true;
+      render();
+      return;
+    }
+    if (act === 'ini-reset') { iniResetFight(card); return; }
+    if (act === 'ini-row-dmg' || act === 'ini-row-heal') {
+      iniDamageRow(card, iniRowByName(card, ds.row), act === 'ini-row-heal');
+      return;
+    }
+    if (act === 'ini-row-out') { iniToggleRowOut(card, iniRowByName(card, ds.row)); return; }
+    if (act === 'ini-row-del') { iniDeleteRow(card, iniRowByName(card, ds.row)); return; }
+    if (act === 'ini-row-props') { iniOpenRowEditor(card, iniRowByName(card, ds.row)); return; }
+    if (act === 'ini-row-copy') { iniCopyRow(card, iniRowByName(card, ds.row)); return; }
+    if (act === 'ini-row-attack') {
+      const row = iniRowByName(card, ds.row);
+      const atk = row && (row.attacks || []).find(function (a) { return a.id === ds.atk; });
+      if (row && atk) iniRollAttack(card, row, atk);
+      return;
+    }
+    if (act === 'ini-add-row') { iniOpenAddMenu(card, e && e.currentTarget); return; }
 
     if (act === 'ini-roll-all') {
       const s = iniDie(card);
@@ -2237,6 +2421,7 @@ window.App = window.App || {};
   // ===== Undo / redo =====
   function undo() {
     if (!undoStack.length) return;
+    noteEditCancelAll();
     redoStack.push(snapshot());
     const s = undoStack.pop();
     state.characters = s.characters;
@@ -2245,6 +2430,7 @@ window.App = window.App || {};
   }
   function redo() {
     if (!redoStack.length) return;
+    noteEditCancelAll();
     undoStack.push(snapshot());
     const s = redoStack.pop();
     state.characters = s.characters;
@@ -2256,6 +2442,18 @@ window.App = window.App || {};
   // v106: render() пересобирает DOM, поэтому запоминаем фокус и прокрутку списков
   // до перерисовки и возвращаем после. Иначе ввод шага счётчика сбрасывался,
   // а список инвентаря прыгал в начало после каждого «надеть».
+  // ===== Контекст вида (v164) =====
+  // Единственный способ узнать «мы в правке / только читаем / чужой лист».
+  // По умолчанию поведение прежнее; снимок (v169) передаст readonly и host.
+  function viewCtx(over) {
+    return Object.assign({
+      mode: editMode ? 'edit' : 'play',
+      desktop: isDesktop(),
+      readonly: false,
+      host: null
+    }, over || {});
+  }
+
   function captureViewState() {
     const canvas = document.getElementById('canvas');
     const topbar = document.getElementById('topbar');
@@ -2273,7 +2471,7 @@ window.App = window.App || {};
       }
     }
     const scrolls = [];
-    canvas.querySelectorAll('.inv-list, .note-text, .desc-text').forEach(function (el) {
+    canvas.querySelectorAll('.inv-list, .note-text, .desc-text, .mx-list').forEach(function (el) {
       if (!el.scrollTop) return;
       const card = el.closest('.card');
       scrolls.push({ card: card ? card.dataset.id : '', cls: el.classList[0], top: el.scrollTop });
@@ -2355,8 +2553,13 @@ window.App = window.App || {};
       '<button class="icon" id="topMenuBtn" title="' + esc(App.t('menu')) + '">⋮</button>';
     // v18.2: настройки за логотипом (кнопка #brandBtn вместо div.brand), имя персонажа
     // в центре топбара (.char-name); кнопка ⚙ #settingsBtn из игрового ряда убрана
+    // v165: если лист так и называется «Мастер», бейдж не дублируем
+    const masterName = ch ? ch.name.trim().toLowerCase() : '';
+    const masterDup = masterName === App.t('masterBadge').toLowerCase() || masterName === App.t('masterDefaultName').toLowerCase();
     const charNameHtml = ch ?
-      '<div class="char-name"><span class="orn">◆</span><span class="char-title">' + esc(ch.name) + '</span><span class="orn">◆</span></div>' :
+      '<div class="char-name' + (isMaster(ch) ? ' master' : '') + '">' +
+        (isMaster(ch) && !masterDup ? '<span class="role-badge">' + esc(App.t('masterBadge')) + '</span>' : '') +
+        '<span class="orn">◆</span><span class="char-title">' + esc(ch.name) + '</span><span class="orn">◆</span></div>' :
       '';
     bar.innerHTML =
       '<button class="brand brand-btn" id="brandBtn" title="' + esc(App.t('settings')) + '">🎲 <span class="accent">' + esc(App.t('appName')) + '</span></button>' +
@@ -2384,6 +2587,7 @@ window.App = window.App || {};
     const canvas = document.getElementById('canvas');
     const ch = activeChar();
     const desktop = isDesktop();
+    const ctx = viewCtx({ desktop: desktop });
     canvas.classList.toggle('free', desktop);
     // сетка видна, пока правишь раскладку: на неё магнитятся карточки
     canvas.classList.toggle('grid-on', desktop && editMode);
@@ -2394,13 +2598,24 @@ window.App = window.App || {};
     }
     const pageId = curPageId(ch);
     const visible = ch.cards.filter(function (c) { return c.page === pageId; });
+    // v166: старые мастерские инициативы подтягиваем до размера с вкладками
+    if (isMaster(ch)) {
+      visible.forEach(function (c) {
+        if (c.type !== 'initiative') return;
+        if (c.mini) { c.mini = false; if ((num(c.hFull) || 0) >= 420) c.h = c.hFull; }
+        if ((num(c.w) || 0) < 340) c.w = 340;
+        if ((num(c.h) || 0) < 420) c.h = 420;
+        if (num(c.span) !== 4) c.span = 4;
+      });
+    }
     if (!visible.length) {
-      canvas.innerHTML = '<div class="empty-hint">' + esc(App.t('emptyCanvas')) + '</div>';
+      const hintKey = (!ch.cards.length && isMaster(ch)) ? 'masterEmpty' : 'emptyCanvas';
+      canvas.innerHTML = '<div class="empty-hint">' + esc(App.t(hintKey)) + '</div>';
       canvas.style.width = ''; canvas.style.height = '';
       return;
     }
-    canvas.innerHTML = visible.map(function (c) { return cardView(c, desktop); }).join('');
-    visible.forEach(bindCard);
+    canvas.innerHTML = visible.map(function (c) { return cardView(c, desktop, ctx); }).join('');
+    visible.forEach(function (c) { bindCard(c, ctx); });
     syncChargeFx(visible);
     // v65: pop-анимация иконки состояния нужна только на один рендер
     condFresh = null;
@@ -2411,7 +2626,13 @@ window.App = window.App || {};
   // ===== Мобильная сетка (v46): сколько клеток занимает карточка (1–4) =====
   // Ширину на телефоне задаёт grid; на ПК поле ни на что не влияет (там свободное
   // размещение и ручной ресайз).
-  function defaultSpan(type) {
+  function defaultSpan(type, card, ch) {
+    const sp = specFor(type);
+    if (sp && sp.span) {
+      const n = Math.round(num(sp.span(card || { type: type })) || 0);
+      if (n >= 1 && n <= 4) return n;
+    }
+    if (type === 'initiative' && isMaster(ch || activeChar())) return 4;
     if (type === 'counter') return 1;      // четыре счётчика в ряд
     if (type === 'currency') return 1;     // валюта/ярлык — компактная клетка
     if (type === 'skill') return 1;        // v127: навык — квадрат в одну клетку, как «квадрат 76» со стенда
@@ -2419,7 +2640,13 @@ window.App = window.App || {};
   }
   function cardSpan(card) {
     const n = Math.round(num(card.span) || 0);
-    return (n >= 1 && n <= 4) ? n : defaultSpan(card.type);
+    if (n >= 1 && n <= 4) return n;
+    const sp = specFor(card.type);
+    if (sp && sp.span) {
+      const sn = Math.round(num(sp.span(card)) || 0);
+      if (sn >= 1 && sn <= 4) return sn;
+    }
+    return defaultSpan(card.type, card);
   }
   // v47: выбор ширины карточки из кебаба (1–4 клетки мобильной сетки)
   function setCardSpan(cardId, n) {
@@ -2436,9 +2663,12 @@ window.App = window.App || {};
     return 'rgba(' + c.r + ',' + c.g + ',' + c.b + ',' + a + ')';
   }
 
-  function cardView(card, desktop) {
+  function cardView(card, desktop, ctx) {
+    ctx = ctx || viewCtx({ desktop: desktop });
+    const sp = specFor(card.type);
+    const ro = !!ctx.readonly;
     const sel = (desktop && editMode && selIds.has(card.id)) ? ' selected' : '';
-    const folded = foldable(card) && isCollapsed(card);
+    const folded = !ro && foldable(card) && isCollapsed(card);
     let style = '--span:' + cardSpan(card) + ';';
     if (card.type === 'buff') {
       const col = card.color || '#d4a93c';
@@ -2457,46 +2687,51 @@ window.App = window.App || {};
     // .card.collapsed .resize-handle). Иначе после «свернул → подвинул → развернул»
     // кнопка не появлялась: toggleFold меняет класс на живом узле без render(),
     // а уголок раньше создавался только для развёрнутой карточки (баг v38).
-    const resize = (editMode && desktop && card.type !== 'condition') ? '<span class="resize-handle" title="↘"></span>' : '';
+    const resize = (editMode && desktop && !ro && card.type !== 'condition') ? '<span class="resize-handle" title="↘"></span>' : '';
     // язычок и иконка/подпись живут в DOM у ВСЕХ сворачиваемых карточек: видимость
     // переключает класс .collapsed — сворот без перерисовки сохранит CSS-переход
-    const label = foldable(card) ?
+    const labelTitle = (card.type === 'note' && noteSpoilerHidden(card)) ? '•••' : esc(card.name);
+    const label = (!ro && foldable(card)) ?
       '<div class="artifact" aria-hidden="true"><img src="icons/labels/' + esc(FOLDABLE_ICONS[card.type]) + '.png" alt=""></div>' +
-      '<div class="card-title-small">' + esc(card.name) + '</div>' +
+      '<div class="card-title-small">' + labelTitle + '</div>' +
       (function () {
         const n = card.type === 'inventory' ? inventoryActiveEntries(card).length : 0;
         return n ? '<span class="label-fx-count" title="' + esc(App.t('itemActiveEffects')) + '">' + n + '</span>' : '';
       })() +
       '<button class="fold-tab" title="' + esc(App.t(folded ? 'unfoldCard' : 'foldCard')) + '" aria-label="' + esc(App.t(folded ? 'unfoldCard' : 'foldCard')) + '"></button>' : '';
-    const cls = 'card type-' + card.type + (card.type === 'buff' && card.on ? ' on' : '') + (card.mini ? ' mini' : '') + (folded ? ' collapsed' : '') + sel + (card.restores ? ' restores' : '');
+    const cls = 'card type-' + card.type + (card.type === 'buff' && card.on ? ' on' : '') + (card.mini ? ' mini' : '') + (folded ? ' collapsed' : '') + sel + (card.restores ? ' restores' : '') + (sp && sp.className ? ' ' + sp.className(card) : '') + (card.type === 'initiative' && isMaster(activeChar()) ? ' master-initiative' : '');
     // v58: у навыка шапка и кнопка броска — соседи в сетке .skill-grid, чтобы на
     // узкой карточке кнопка уходила вниз, к значению (иначе из шапки её не вынуть).
+    // v164: новые типы рисуют тело сами (spec.face), старые — прежним cardBody.
+    const bodyHtml = (sp && sp.face) ? sp.face(card, ctx) : cardBody(card, ctx);
     if (card.type === 'skill') {
-      const roll = cardRoller(card);
+      const roll = cardRoller(card, ctx);
       return '<div class="' + cls + '" data-id="' + card.id + '" style="' + style + '">' +
         '<div class="skill-grid">' +
-          cardHead(card, desktop, undefined, true) +
+          cardHead(card, desktop, undefined, true, ctx) +
           (roll ? '<span class="skill-act">' + roll + '</span>' : '') +
-          cardBody(card) +
+          bodyHtml +
         '</div>' + resize + label + '</div>';
     }
-    return '<div class="' + cls + '" data-id="' + card.id + '" style="' + style + '">' + cardHead(card, desktop) + cardBody(card) + resize + label + '</div>';
+    return '<div class="' + cls + '" data-id="' + card.id + '" style="' + style + '">' + cardHead(card, desktop, undefined, undefined, ctx) + bodyHtml + resize + label + '</div>';
   }
 
-  function cardHead(card, desktop, toolsMode, noRoller) {
+  function cardHead(card, desktop, toolsMode, noRoller, ctx) {
+    ctx = ctx || viewCtx({ desktop: desktop });
     // toolsMode: не задан — как раньше (тулзы только в правке); true — тулзы всегда
     // (слой ярлыка); false — тулзы скрыты (в слое они уже есть в шапке ПАНЕЛИ,
     // дублирующие мёртвые кнопки в копии карточки не нужны)
     // v47/v48: кебаб в правке — у счётчика всегда (узкая карточка), у остальных
     // только на телефоне: три кнопки ✎⧉🗑 там заменяются меню, а долгий тап
     // освобождается под перетаскивание карточки
-    const kebabMode = editMode && (card.type === 'counter' || card.type === 'condition' || !desktop) && !toolsMode;
+    const ro = !!ctx.readonly;
+    const kebabMode = !ro && editMode && (card.type === 'counter' || card.type === 'condition' || !desktop) && !toolsMode;
     let tools = '';
     if (kebabMode) {
       tools = '<button type="button" class="kebab" data-act="card-menu"' +
         ' title="' + esc(App.t('menu')) + '" aria-label="' + esc(App.t('menu')) + '">' +
         '<span></span><span></span><span></span></button>';
-    } else if (toolsMode !== false && (editMode || toolsMode)) {
+    } else if (!ro && toolsMode !== false && (editMode || toolsMode)) {
       tools = '<div class="tools">' +
         (desktop ? '' : '<button class="card-up" title="↑" aria-label="' + esc(App.t('moveUp')) + '">▲</button><button class="card-down" title="↓" aria-label="' + esc(App.t('moveDown')) + '">▼</button>') +
         // v102: у инвентаря нет редактора карточки — правка строк идёт в самих предметах
@@ -2505,18 +2740,18 @@ window.App = window.App || {};
         '<button class="card-del" title="' + esc(App.t('delete')) + '" aria-label="' + esc(App.t('delete')) + '">' + TRASH_SVG + '</button>' +
       '</div>';
     }
-    const handle = (editMode && desktop) ? '<span class="handle" title="⋮⋮">⋮⋮</span>' : '';
+    const handle = (!ro && editMode && desktop) ? '<span class="handle" title="⋮⋮">⋮⋮</span>' : '';
     // вариант F: кубик в шапке + тег бонуса. В режиме правки НЕ показываем (в правке не бросают) —
     // иначе тулзы (✎⧉✕) не влезают на минимальной ширине.
     // v36: у СЧЁТЧИКА кубика больше нет (просьба юзера) — даже если в старых данных
     // остался card.die, чип не рисуем; данные чистятся при сохранении карточки
     // v58: кнопка вынесена в cardRoller — у навыка она живёт отдельно от шапки,
     // чтобы на узкой карточке переехать вниз (сетка .skill-grid)
-    let roller = noRoller ? '' : cardRoller(card);
+    let roller = (noRoller || ro) ? '' : cardRoller(card, ctx);
     // v59: у инициативы свои кнопки: «бросить всем» (только в подготовке) и флаг
     // («бой окончен» / сворачивание). Флаг всегда последний — в бою он у правого края.
     if (card.type === 'initiative') {
-      roller = editMode ? '' :
+      roller = (editMode || ro || isMaster(activeChar())) ? '' :
         (card.phase === 'battle' ? '' :
           '<button type="button" class="headroll" data-act="ini-roll-all" title="' + esc(App.t('iniRollAll')) + '"></button>') +
         '<button type="button" class="headroll flag-btn" data-act="ini-flag" title="' + esc(App.t('iniEndFight')) + '">' + FLAG_SVG + '</button>';
@@ -2524,26 +2759,39 @@ window.App = window.App || {};
     // восклицательный знак в кружке: у карточек, чьё значение — выражение (бывшие формулы,
     // теперь навыки с параметрами): навёл курсор — подсказка с выражением и результатом.
     // Скрываем в режиме правки — дальше тулзы не влезают (как и кубик в шапке)
-    const finfo = (!editMode && typeof card.value === 'string' && card.value.trim() !== '')
+    const finfo = (!ro && !editMode && typeof card.value === 'string' && card.value.trim() !== '')
       ? '<span class="finf" data-id="' + esc(card.id) + '" title="' + esc(App.t('expression')) + '">!</span>' : '';
     // 🔗 у заклинаний с привязанными зарядами: клик — плашка «от какого счётчика зависят заряды»
-    const linktag = (!editMode && card.type === 'spell' && card.charges && card.charges.mode === 'link')
+    const linktag = (!ro && !editMode && card.type === 'spell' && card.charges && card.charges.mode === 'link')
       ? '<span class="linktag" title="' + esc(App.t('charges')) + '">🔗</span>' : '';
     // v40: у счётчика ☾ в шапке больше нет — «восстанавливается при отдыхе»
     // показывает большая фоновая луна (.card.restores::after)
     // v91: развернуть бафф — единственный способ открыть полный текст;
     // клик по тексту карточки остаётся тумблером (см. bindCard).
-    const buffExpand = (!editMode && card.type === 'buff')
+    const buffExpand = (!ro && !editMode && card.type === 'buff')
       ? '<button type="button" class="buff-expand" data-act="buff-expand" title="' + esc(App.t('buffExpand')) + '" aria-label="' + esc(App.t('buffExpand')) + '">⤢</button>' : '';
+    // v169: заметка пишется прямо в карточке; кнопка разворота открывает второй
+    // слой. Спойлер мастера доступен в обоих режимах, разворот в правке скрыт —
+    // там заметка правится через слой.
+    const noteHidden = card.type === 'note' && noteSpoilerHidden(card);
+    const noteSpoiler = (!ro && card.type === 'note' && isMaster(activeChar()))
+      ? '<button type="button" class="note-spoiler' + (card.spoiler ? ' on' : '') + '" data-act="note-spoiler"' +
+        ' title="' + esc(App.t(card.spoiler ? 'noteUnspoiler' : 'noteSpoiler')) + '"' +
+        ' aria-label="' + esc(App.t(card.spoiler ? 'noteUnspoiler' : 'noteSpoiler')) + '">' + NOTE_EYE_OFF_SVG + '</button>' : '';
+    const noteExpand = (!ro && !editMode && card.type === 'note' && !noteHidden)
+      ? '<button type="button" class="note-expand" data-act="note-expand"' +
+        ' title="' + esc(App.t('noteExpand')) + '"' +
+        ' aria-label="' + esc(App.t('noteExpand')) + '">' + NOTE_EXPAND_SVG + '</button>' : '';
     // v124: щит — в шапке рядом с бейджем модификаторов, а не поверх значения:
     // иначе плашка закрывала «−2» у максимума на узком счётчике
     const shield = card.type === 'counter' ? shieldTotal(card) : 0;
     const shieldChip = shield > 0
       ? '<span class="counter-shield" title="' + esc(App.t('shieldHint')) + '">🛡 ' + shield + '</span>'
       : '';
-    return '<div class="card-head">' + handle + '<span class="card-name">' +
-      (card.restores && card.type !== 'counter' ? '<span class="restore-ic">☾</span>' : '') + esc(card.name) +
-      '</span>' + modBadgeHTML(card) + shieldChip + finfo + linktag + buffExpand + roller + tools + '</div>';
+    const headName = noteHidden ? '•••' : esc(card.name);
+    return '<div class="card-head">' + handle + '<span class="card-name"' + (noteHidden ? ' title="' + esc(App.t('noteSpoilerShow')) + '"' : '') + '>' +
+      (card.restores && card.type !== 'counter' ? '<span class="restore-ic">☾</span>' : '') + headName +
+      '</span>' + modBadgeHTML(card) + shieldChip + finfo + linktag + buffExpand + roller + noteSpoiler + noteExpand + tools + '</div>';
   }
 
   // v89: бейдж «на меня влияют»: число активных модификаторов, тап — список источников
@@ -2557,7 +2805,9 @@ window.App = window.App || {};
   // Кнопка броска (v58): отдельная сущность, а не часть шапки — у навыка она
   // стоит в своей клетке сетки и на узком виде переезжает вниз, к значению.
   // У навыка бонус уже показан в скобках у значения, поэтому чип +N не дублируем.
-  function cardRoller(card) {
+  function cardRoller(card, ctx) {
+    ctx = ctx || viewCtx();
+    if (ctx.readonly) return '';
     if (!card.die || editMode || card.type === 'counter' || card.type === 'initiative') return '';
     const b = cardBonus(card);
     const dl = cardDiceLabel(card);
@@ -2567,14 +2817,14 @@ window.App = window.App || {};
       (b && card.type !== 'skill' ? '<span class="inc">' + (b > 0 ? '+' : '−') + Math.abs(b) + '</span>' : '');
   }
 
-  function cardBody(card) {
+  function cardBody(card, ctx) {
     switch (card.type) {
       case 'counter': return counterBody(card);
       case 'skill': return skillBody(card);
       case 'spell': return spellBody(card);
       case 'currency': return currencyBody(card);
       case 'inventory': return inventoryBody(card);
-      case 'note': return noteBody(card);
+      case 'note': return noteBody(card, ctx);
       case 'initiative': return initiativeBody(card);
       case 'condition': return conditionBody(card);
       case 'buff': return buffBody(card);
@@ -2806,6 +3056,386 @@ window.App = window.App || {};
      и плюсы. Окно строк — от высоты карточки, минимум 4. Флаг — «бой окончен»
      и сворачивание в строку 42 px. */
   const FLAG_SVG = '<svg class="ini-flag-ic" viewBox="0 0 100 100" aria-hidden="true"><path d="M14 96 L14 6"/><path d="M14 14 C22 8 35 4 48 6 C52 7 55 10 55 14 L55 22 C60 22 70 20 80 18 C84 17 88 15 88 15 L88 55 C80 58 70 62 60 63 C55 64 50 62 50 56 L50 46 C42 48 32 52 22 54 C18 55 14 56 14 56"/></svg>';
+  const CROWN_SVG = '<svg class="mx-crown" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M3 18h18l-1.6-9.2-4.8 3.4L12 5l-2.6 7.2L4.6 8.8z"/></svg>';
+  const SEARCH_SVG = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><circle cx="11" cy="11" r="7"/><path d="m20 20-4.3-4.3"/></svg>';
+  const OUT_SVG = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="10" r="3"/><path d="M6.5 21v-1.7c0-2.2 2.5-3.8 5.5-3.8s5.5 1.6 5.5 3.8V21"/><path d="M7 2.4l.5 1.3 1.3.5-1.3.5L7 6l-.5-1.3L5.2 4.2l1.3-.5z" fill="currentColor" stroke="none"/><path d="M12 1l.7 1.6 1.6.7-1.6.7-.7 1.6-.7-1.6L9.7 3.3l1.6-.7z" fill="currentColor" stroke="none"/><path d="M17 2.4l.5 1.3 1.3.5-1.3.5L17 6l-.5-1.3-1.3-.5 1.3-.5z" fill="currentColor" stroke="none"/></svg>';
+  const LOCK_SVG = '<svg class="mx-lock" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="4" y="10" width="16" height="11" rx="2"/><path d="M8 10V7a4 4 0 0 1 8 0v3"/></svg>';
+
+  // v166: встречи мастера. Активная встреча — в полях карточки, неактивные —
+  // снимки. Сессионные вещи (раскрытие спойлера, шаги HP) в данные не пишем.
+  const iniRevealed = {};
+  const iniTabSuppress = {};
+  const iniRowSteps = {};
+
+  function iniMasterCard(card) { return card.type === 'initiative' && isMaster(activeChar()); }
+  function iniRevealKey(card, id) { return card.id + '/' + id; }
+  function iniClearReveal(card) {
+    Object.keys(iniRevealed).forEach(function (k) { if (k.indexOf(card.id + '/') === 0) delete iniRevealed[k]; });
+  }
+  function iniNormRow(r) {
+    if (!r || typeof r !== 'object') return;
+    if (!r.hp || typeof r.hp !== 'object') r.hp = { current: 0, max: 0, shield: 0 };
+    r.hp.current = num(r.hp.current);
+    r.hp.max = num(r.hp.max);
+    r.hp.shield = num(r.hp.shield);
+    if (r.ac == null) r.ac = 0;
+    if (r.bonus == null) r.bonus = 0;
+    if (!Array.isArray(r.attacks)) r.attacks = [];
+    r.attacks.forEach(function (a) { if (!a.id) a.id = uid(); });
+    if (typeof r.notes !== 'string') r.notes = '';
+    if (r.boss == null) r.boss = false;
+    if (r.open == null) r.open = false;
+  }
+  function iniNormRows(holder) {
+    if (!Array.isArray(holder.rows)) holder.rows = [];
+    holder.rows.forEach(iniNormRow);
+  }
+  function iniEnsureEnc(card) {
+    if (!Array.isArray(card.encounters)) card.encounters = [];
+    if (!card.activeId) card.activeId = uid();
+    if (!card.activeName) card.activeName = App.t('iniEncounterDefault');
+    if (!Array.isArray(card.encounterOrder) || !card.encounterOrder.length) {
+      card.encounterOrder = [card.activeId].concat(card.encounters.map(function (e) { return e.id; }));
+    }
+    card.encounters = card.encounters.filter(function (e) { return e && e.id && e.id !== card.activeId; });
+    const valid = {};
+    valid[card.activeId] = true;
+    card.encounters.forEach(function (e) { valid[e.id] = true; });
+    card.encounterOrder = card.encounterOrder.filter(function (id) { return valid[id]; });
+    card.encounters.forEach(function (e) {
+      if (card.encounterOrder.indexOf(e.id) === -1) card.encounterOrder.push(e.id);
+      iniNormRows(e);
+      if (e.spoiler == null) e.spoiler = false;
+    });
+    if (card.encounterOrder.indexOf(card.activeId) === -1) card.encounterOrder.unshift(card.activeId);
+    iniNormRows(card);
+    if (card.activeSpoiler == null) card.activeSpoiler = false;
+  }
+  function iniSnap(card, id) {
+    if (id === card.activeId) {
+      return {
+        id: card.activeId, name: card.activeName, rows: card.rows, phase: card.phase,
+        round: card.round, turnId: card.turnId, hFull: card.hFull, spoiler: !!card.activeSpoiler
+      };
+    }
+    return card.encounters.find(function (e) { return e.id === id; }) || null;
+  }
+  function iniMasked(card, id) {
+    const e = iniSnap(card, id);
+    return !!e && !!e.spoiler && !iniRevealed[iniRevealKey(card, id)];
+  }
+  function iniTabName(card, id) { return iniMasked(card, id) ? '•••' : (iniSnap(card, id) || {}).name || '—'; }
+  function iniSaveActive(card) {
+    const snap = {
+      id: card.activeId, name: card.activeName, rows: card.rows, phase: card.phase,
+      round: card.round, turnId: card.turnId, hFull: card.hFull, spoiler: !!card.activeSpoiler
+    };
+    const i = card.encounters.findIndex(function (e) { return e.id === snap.id; });
+    if (i >= 0) card.encounters[i] = snap;
+    else card.encounters.push(snap);
+    if (card.encounterOrder.indexOf(snap.id) === -1) card.encounterOrder.push(snap.id);
+  }
+  function iniLoadEnc(card, id) {
+    if (!id || id === card.activeId) return;
+    iniEnsureEnc(card);
+    iniSaveActive(card);
+    const snap = card.encounters.find(function (e) { return e.id === id; });
+    if (!snap) return;
+    card.encounters = card.encounters.filter(function (e) { return e.id !== id; });
+    card.rows = snap.rows || [];
+    card.phase = snap.phase === 'battle' ? 'battle' : 'prep';
+    card.round = num(snap.round) || 1;
+    card.turnId = snap.turnId || null;
+    card.hFull = num(snap.hFull) || card.hFull;
+    card.activeId = snap.id;
+    card.activeName = snap.name || card.activeName;
+    card.activeSpoiler = !!snap.spoiler;
+    card.viewStart = 0;
+    card.viewManual = false;
+    card.mini = false;
+    card.h = Math.max(num(card.h) || 0, 420);
+    iniClearReveal(card);
+    commit();
+  }
+  function iniUniqueEncName(card, base) {
+    let name = base || App.t('iniEncounterDefault');
+    let i = 2;
+    const used = [card.activeName].concat(card.encounters.map(function (e) { return e.name; }));
+    while (used.indexOf(name) !== -1) { name = base + ' ' + i; i++; }
+    return name;
+  }
+  function iniNewEnc(card) {
+    let name = '';
+    mutate(function () {
+      iniEnsureEnc(card);
+      iniSaveActive(card);
+      const id = uid();
+      card.activeId = id;
+      card.activeName = iniUniqueEncName(card, App.t('iniEncounterDefault'));
+      name = card.activeName;
+      card.activeSpoiler = false;
+      card.rows = [];
+      card.phase = 'prep';
+      card.round = 1;
+      card.turnId = null;
+      card.viewStart = 0;
+      card.viewManual = false;
+      card.encounterOrder.push(id);
+      iniClearReveal(card);
+    });
+    toast(App.tf('iniEncCreated', { name: name }));
+  }
+  function iniCopyEnc(card) {
+    let name = '';
+    mutate(function () {
+      iniEnsureEnc(card);
+      const src = {
+        rows: JSON.parse(JSON.stringify(card.rows || [])),
+        spoiler: !!card.activeSpoiler
+      };
+      iniSaveActive(card);
+      const id = uid();
+      card.activeId = id;
+      card.activeName = iniUniqueEncName(card, card.activeName + ' (' + App.t('iniEncCopy') + ')');
+      name = card.activeName;
+      card.activeSpoiler = src.spoiler;
+      card.rows = src.rows;
+      card.rows.forEach(function (r) {
+        r.id = uid();
+        (r.attacks || []).forEach(function (a) { a.id = uid(); });
+        r.value = null;
+        r.out = false;
+        r.open = false;
+        if (r.hp) { r.hp.current = r.hp.max; r.hp.shield = 0; }
+      });
+      card.phase = 'prep';
+      card.round = 1;
+      card.turnId = null;
+      card.viewStart = 0;
+      card.viewManual = false;
+      card.encounterOrder.push(id);
+      iniClearReveal(card);
+    });
+    toast(App.tf('iniEncCopied', { name: name }));
+  }
+  function iniDeleteEnc(card, id) {
+    iniEnsureEnc(card);
+    const e = iniSnap(card, id);
+    if (!e) return;
+    if (card.encounterOrder.length < 2) { toast(App.t('iniLastEnc')); return; }
+    askDelete({
+      text: App.tf('iniEncDeleteConfirm', { name: e.name }),
+      title: App.t('iniTabDelete'),
+      onYes: function () {
+        mutate(function () {
+          if (id === card.activeId) {
+            const nextId = card.encounterOrder.find(function (x) { return x !== id; });
+            const next = card.encounters.find(function (x) { return x.id === nextId; });
+            card.encounterOrder = card.encounterOrder.filter(function (x) { return x !== id; });
+            card.encounters = card.encounters.filter(function (x) { return x.id !== id; });
+            if (next) {
+              card.rows = next.rows || [];
+              card.phase = next.phase === 'battle' ? 'battle' : 'prep';
+              card.round = num(next.round) || 1;
+              card.turnId = next.turnId || null;
+              card.activeId = next.id;
+              card.activeName = next.name;
+              card.activeSpoiler = !!next.spoiler;
+              card.viewStart = 0;
+              card.viewManual = false;
+              card.mini = false;
+            }
+          } else {
+            card.encounterOrder = card.encounterOrder.filter(function (x) { return x !== id; });
+            card.encounters = card.encounters.filter(function (x) { return x.id !== id; });
+          }
+          iniClearReveal(card);
+        });
+        toast(App.t('iniEncDeleted'));
+      }
+    });
+  }
+  function iniRenameEnc(card, id) {
+    const e = iniSnap(card, id);
+    if (!e) return;
+    openModal(App.t('iniRenameEnc'),
+      '<div class="field"><label>' + esc(App.t('name')) + '</label><input id="mx-enc-name" type="text" value="' + esc(e.name) + '"></div>',
+      [{ label: App.t('cancel') }, { label: App.t('save'), cls: 'primary', onClick: function () {
+        const inp = document.getElementById('mx-enc-name');
+        const v = inp ? inp.value.trim() : '';
+        if (!v) return false;
+        mutate(function () {
+          if (id === card.activeId) card.activeName = v;
+          else {
+            const sn = card.encounters.find(function (x) { return x.id === id; });
+            if (sn) sn.name = v;
+          }
+        });
+        return true;
+      } }]);
+    const inp = document.getElementById('mx-enc-name');
+    if (inp) { inp.focus(); inp.select(); }
+  }
+  function iniToggleSpoiler(card, id) {
+    const e = iniSnap(card, id);
+    if (!e) return;
+    mutate(function () {
+      if (id === card.activeId) card.activeSpoiler = !card.activeSpoiler;
+      else {
+        const sn = card.encounters.find(function (x) { return x.id === id; });
+        if (sn) sn.spoiler = !sn.spoiler;
+      }
+      delete iniRevealed[iniRevealKey(card, id)];
+    });
+  }
+  function iniTabSuppressed(card) { return Date.now() < (iniTabSuppress[card.id] || 0); }
+  function iniRowByName(card, id) { return iniRows(card).find(function (r) { return r.id === id; }) || null; }
+  function iniRowStep(card, row) { return iniRowSteps[card.id + '/' + row.id] || 1; }
+  // v167: шаг HP — как у счётчика. Пока в поле есть число, «−» и «+» берут его;
+  // клик мимо карточки или Esc возвращают шаг 1 (поле пустое, «—»).
+  function readIniRowStep(card, inp) {
+    const rowId = inp.dataset.mxStep;
+    if (!rowId) return;
+    const clean = String(inp.value || '').replace(/[^\d]/g, '');
+    if (clean !== inp.value) inp.value = clean;
+    const key = card.id + '/' + rowId;
+    const n = parseInt(clean, 10);
+    if (n > 0) iniRowSteps[key] = n; else delete iniRowSteps[key];
+  }
+  function iniClearRowSteps() {
+    Object.keys(iniRowSteps).forEach(function (k) { delete iniRowSteps[k]; });
+    document.querySelectorAll('.mx-step').forEach(function (inp) { inp.value = ''; });
+  }
+  function iniUniqueRowName(card, base) {
+    base = String(base || App.t('iniNewFighter')).replace(/\s+\d+$/, '');
+    let n = 1, name = base;
+    while (iniRows(card).some(function (r) { return r.name === name; })) { n++; name = base + ' ' + n; }
+    return name;
+  }
+  function iniCopyRowName(card, name) {
+    const m = String(name || 'Боец').match(/^(.*?)(?:\s+(\d+))?$/);
+    const base = (m[1] || 'Боец').trim() || 'Боец';
+    let n = m[2] ? Number(m[2]) + 1 : 2;
+    let out = base + ' ' + n;
+    while (iniRows(card).some(function (r) { return r.name === out; })) { n++; out = base + ' ' + n; }
+    return out;
+  }
+  function iniRollRowValue(card, row) {
+    return 1 + Math.floor(Math.random() * iniDie(card)) + (num(row.bonus) || 0);
+  }
+  function iniNewRow(card, src) {
+    const row = src ? JSON.parse(JSON.stringify(src)) : {
+      name: App.t('iniNewFighter'), value: null, bonus: 0, hp: { current: 10, max: 10, shield: 0 },
+      ac: 0, attacks: [], notes: '', boss: false, out: false, open: false, seq: iniRows(card).length + 1
+    };
+    row.id = uid();
+    (row.attacks || []).forEach(function (a) { a.id = uid(); });
+    if (src) {
+      row.name = iniCopyRowName(card, src.name);
+      row.hp = { current: num(src.hp && src.hp.max), max: num(src.hp && src.hp.max), shield: 0 };
+      row.out = false;
+      row.open = false;
+      row.value = null;
+    } else {
+      row.name = iniUniqueRowName(card, row.name);
+      row.seq = iniRows(card).length + 1;
+    }
+    if (card.phase === 'battle') row.value = iniRollRowValue(card, row);
+    iniRows(card).push(row);
+    return row;
+  }
+  function iniAddNewRow(card) {
+    let row = null;
+    mutate(function () { row = iniNewRow(card, null); });
+    if (row && card.phase !== 'battle') iniOpenRowEditor(card, row);
+  }
+  function iniCopyRow(card, row) {
+    if (!row) return;
+    let copy = null;
+    mutate(function () { copy = iniNewRow(card, row); copy.open = false; });
+    if (copy) toast(App.tf('duplicatedGeneric', { name: copy.name }));
+  }
+  function iniDamageRow(card, row, heal) {
+    if (!row) return;
+    const step = Math.max(1, iniRowStep(card, row));
+    mutate(function () {
+      if (!row.hp) row.hp = { current: 0, max: 0, shield: 0 };
+      if (heal) {
+        row.hp.current = Math.min(row.hp.max, row.hp.current + step);
+      } else {
+        let left = step;
+        if (row.hp.shield > 0) {
+          const used = Math.min(row.hp.shield, left);
+          row.hp.shield -= used;
+          left -= used;
+        }
+        row.hp.current = Math.max(0, row.hp.current - left);
+      }
+    });
+  }
+  function iniAdvanceAfterOut(card, row) {
+    if (card.phase !== 'battle' || card.turnId !== row.id) return;
+    const order = iniSorted(card);
+    const alive = order.filter(function (r) { return !r.out; });
+    if (!alive.length) { card.turnId = null; return; }
+    const idx = order.findIndex(function (r) { return r.id === row.id; });
+    let next = null;
+    for (let i = idx + 1; i < order.length; i++) {
+      if (!order[i].out) { next = order[i]; break; }
+    }
+    if (!next) {
+      card.round = (num(card.round) || 1) + 1;
+      next = alive[0];
+    }
+    card.turnId = next.id;
+  }
+  function iniToggleRowOut(card, row) {
+    if (!row) return;
+    mutate(function () {
+      row.out = !row.out;
+      if (row.out) iniAdvanceAfterOut(card, row);
+    });
+  }
+  function iniDeleteRow(card, row) {
+    if (!row) return;
+    askDelete({
+      text: App.tf('iniRowDeleteConfirm', { name: row.name }),
+      title: App.t('delete'),
+      onYes: function () {
+        mutate(function () {
+          card.rows = iniRows(card).filter(function (r) { return r.id !== row.id; });
+          if (card.turnId === row.id) {
+            const next = iniSorted(card).find(function (r) { return !r.out; });
+            card.turnId = next ? next.id : null;
+          }
+        });
+      }
+    });
+  }
+  function iniResetFight(card) {
+    askDelete({
+      text: App.t('iniResetConfirm'),
+      title: App.t('iniNewFight'),
+      labels: { yes: App.t('yes'), yesCls: 'primary' },
+      onYes: function () {
+        mutate(function () {
+          iniRows(card).forEach(function (r) {
+            if (r.hp) { r.hp.current = r.hp.max; r.hp.shield = 0; }
+            r.out = false;
+            r.value = null;
+            r.open = false;
+          });
+          card.phase = 'prep';
+          card.round = 1;
+          card.turnId = null;
+          card.viewStart = 0;
+          card.viewManual = false;
+        });
+      }
+    });
+  }
+  function iniMaskedLabel(card, id) { return iniTabName(card, id); }
+
 
   function iniDie(card) { return Math.max(2, Math.round(num(card.die) || 20)); }
   function iniRows(card) { if (!Array.isArray(card.rows)) card.rows = []; return card.rows; }
@@ -2845,8 +3475,350 @@ window.App = window.App || {};
     return Math.max(0, Math.min(st, maxStart));
   }
 
+  function iniTabsHTML(card) {
+    let html = '<div class="mx-tabs">';
+    card.encounterOrder.forEach(function (id) {
+      const e = iniSnap(card, id);
+      if (!e) return;
+      const masked = iniMasked(card, id);
+      const label = masked ? '•••' : (e.name || '—');
+      html += '<button type="button" class="mx-tab' + (id === card.activeId ? ' active' : '') + '" data-act="ini-tab" data-enc="' + id + '"' +
+        ' title="' + esc(masked ? App.t('iniSpoiler') : label) + '" aria-label="' + esc(masked ? App.t('iniSpoiler') : label) + '">' +
+        esc(label) + '</button>';
+    });
+    html += '<button type="button" class="mx-tab mx-tab-more hidden" data-act="ini-tab-more" title="' + esc(App.t('iniTabMore')) + '" aria-label="' + esc(App.t('iniTabMore')) + '"></button>';
+    html += '<button type="button" class="mx-tab mx-tab-add" data-act="ini-tab-add" title="' + esc(App.t('iniTabAdd')) + '" aria-label="' + esc(App.t('iniTabAdd')) + '">+</button>';
+    return html + '</div>';
+  }
+
+  function iniRoundbarHTML(card) {
+    const prep = card.phase !== 'battle';
+    const total = iniRows(card).length;
+    const missing = total - iniFilledCount(card);
+    const label = prep
+      ? '<span class="mx-label prep">' + esc(App.t('iniPreparation')) + '</span>'
+      : '<span class="mx-label">' + esc(App.t('iniRound')) + ' <b>' + (num(card.round) || 1) + '</b></span>';
+    let pct = 0;
+    if (prep) pct = total ? iniFilledCount(card) / total * 100 : 0;
+    else {
+      const o = iniSorted(card);
+      const i = o.findIndex(function (r) { return r.id === card.turnId; });
+      pct = o.length && i >= 0 ? (i + 1) / o.length * 100 : 0;
+    }
+    const disabled = prep && (!total || missing > 0);
+    const disabledTitle = !total ? App.t('iniNoRows') : App.tf('iniMissing', { n: missing });
+    return '<div class="mx-round">' + label +
+      (prep ? '<button type="button" class="mx-icon" data-act="ini-roll-all" title="' + esc(App.tf('iniRollAllDie', { die: 'd' + iniDie(card) })) + '" aria-label="' + esc(App.t('iniRollAll')) + '">⚄</button>' : '') +
+      '<button type="button" class="mx-icon mx-flag" data-act="ini-reset" title="' + esc(App.t('iniNewFight')) + '" aria-label="' + esc(App.t('iniNewFight')) + '">' + FLAG_SVG + '</button>' +
+      '<button type="button" class="mx-pass' + (prep ? ' start' : '') + '" data-act="ini-pass"' + (disabled ? ' disabled title="' + esc(disabledTitle) + '"' : '') + '>' +
+        esc(App.t(prep ? 'iniStart' : 'iniNext')) + '</button></div>' +
+      '<div class="mx-prog' + (prep ? ' prep' : '') + '"><i style="width:' + pct.toFixed(1) + '%"></i></div>';
+  }
+
+  function iniRowHTML(card, r, rank, cur) {
+    const hp = r.hp || { current: 0, max: 0, shield: 0 };
+    const max = num(hp.max) || 0;
+    const curHp = num(hp.current) || 0;
+    const pct = max > 0 ? Math.max(0, Math.min(100, curHp / max * 100)) : 0;
+    const hpCls = pct <= 25 ? ' low' : pct <= 50 ? ' mid' : '';
+    const prep = card.phase !== 'battle';
+    const step = iniRowSteps[card.id + '/' + r.id];
+    const bonus = num(r.bonus) || 0;
+    const initCtl = prep
+      ? '<input class="mx-init" data-mx-init="' + r.id + '" type="number" value="' + (iniFilled(r) ? esc(r.value) : '') + '" placeholder="—" title="' + esc(App.t('iniInitValue')) + '" aria-label="' + esc(App.t('iniInitValue')) + '">' +
+        (bonus ? '<span class="mx-bonus">' + (bonus > 0 ? '+' : '−') + Math.abs(bonus) + '</span>' : '') +
+        '<button type="button" class="mx-dice" data-act="ini-roll" data-row="' + r.id + '" title="' + esc(App.tf('iniRollOneDie', { die: 'd' + iniDie(card) })) + '" aria-label="' + esc(App.t('roll')) + '">⚄</button>'
+      : '';
+    return '<div class="mx-row' + (cur ? ' cur' : '') + (r.boss ? ' boss' : '') + (r.out ? ' out' : '') + (r.open ? ' open' : '') + '" data-mx-row="' + r.id + '">' +
+      '<div class="mx-main">' +
+        '<span class="mx-rank">' + rank + '</span>' +
+        (r.boss ? CROWN_SVG : '') +
+        '<span class="mx-name" title="' + esc(r.name) + '">' + esc(r.name) + '</span>' +
+        (num(r.ac) ? '<span class="mx-ac">' + esc(App.t('iniAc')) + ' ' + num(r.ac) + '</span>' : '') +
+        initCtl +
+      '</div>' +
+      '<div class="mx-sub">' +
+        '<div class="mx-hp' + hpCls + '" title="HP">' +
+          '<i style="width:' + pct.toFixed(1) + '%"></i>' +
+          '<span class="mx-hptxt">' + (max > 0 ? curHp + '/' + max : '—') + '</span>' +
+        '</div>' +
+        (num(hp.shield) > 0 ? '<span class="mx-shield" title="' + esc(App.t('iniShield')) + '">🛡 ' + num(hp.shield) + '</span>' : '') +
+        '<button type="button" class="mx-mini" data-act="ini-row-dmg" data-row="' + r.id + '" title="' + esc(App.t('iniDamage')) + '" aria-label="' + esc(App.t('iniDamage')) + '">−</button>' +
+        '<input class="mx-step" data-mx-step="' + r.id + '" type="text" inputmode="numeric" autocomplete="off" spellcheck="false" placeholder="—" value="' + (step ? esc(step) : '') + '" title="' + esc(App.t('iniStep')) + '" aria-label="' + esc(App.t('iniStep')) + '">' +
+        '<button type="button" class="mx-mini" data-act="ini-row-heal" data-row="' + r.id + '" title="' + esc(App.t('iniHeal')) + '" aria-label="' + esc(App.t('iniHeal')) + '">+</button>' +
+      '</div>' +
+      (r.open ? iniRowPanelHTML(card, r) : '') +
+    '</div>';
+  }
+
+  function iniRowPanelHTML(card, r) {
+    const outLabel = App.t(r.out ? 'iniRowBack' : 'iniRowOut');
+    const attacks = (r.attacks || []).map(function (a) {
+      return '<button type="button" class="mx-attack" data-act="ini-row-attack" data-row="' + r.id + '" data-atk="' + a.id + '">' +
+        '<b>' + esc(a.name || '—') + '</b>' +
+        '<span class="mx-attack-meta">' + esc([a.hit, a.damage].filter(Boolean).join(' · ')) + '</span>' +
+        '<span class="mx-attack-die">⚄</span></button>';
+    }).join('') || '<div class="mx-empty-note">' + esc(App.t('iniNoAttacks')) + '</div>';
+    return '<div class="mx-panel">' +
+      '<div class="mx-panel-label">' + esc(App.t('iniAttacks')) + '</div>' + attacks +
+      (r.notes ? '<div class="mx-note">' + esc(r.notes) + '</div>' : '') +
+      '<div class="mx-actions">' +
+        '<button type="button" data-act="ini-row-props" data-row="' + r.id + '" title="' + esc(App.t('iniRowProps')) + '" aria-label="' + esc(App.t('iniRowProps')) + '">' + SEARCH_SVG + '</button>' +
+        '<button type="button" data-act="ini-row-copy" data-row="' + r.id + '" title="' + esc(App.t('iniRowCopy')) + '" aria-label="' + esc(App.t('iniRowCopy')) + '">' + DUP_SVG + '</button>' +
+        '<button type="button" data-act="ini-row-out" data-row="' + r.id + '" title="' + esc(outLabel) + '" aria-label="' + esc(outLabel) + '">' + OUT_SVG + '</button>' +
+        '<button type="button" class="danger" data-act="ini-row-del" data-row="' + r.id + '" title="' + esc(App.t('delete')) + '" aria-label="' + esc(App.t('delete')) + '">' + TRASH_SVG + '</button>' +
+      '</div></div>';
+  }
+
+  function iniSpoilerHTML() {
+    return '<button type="button" class="mx-spoiler" data-act="ini-reveal" aria-label="' + esc(App.t('iniSpoilerShow')) + '">' +
+      LOCK_SVG + '<b>' + esc(App.t('iniSpoiler')) + '</b><small>' + esc(App.t('iniSpoilerShow')) + '</small></button>';
+  }
+
+  function iniMasterBody(card) {
+    iniEnsureEnc(card);
+    const tabs = iniTabsHTML(card);
+    if (iniMasked(card, card.activeId)) {
+      return '<div class="card-body mx-body">' + tabs + iniSpoilerHTML() + '</div>';
+    }
+    const order = iniOrder(card);
+    const rows = order.map(function (r, i) {
+      iniNormRow(r);
+      return iniRowHTML(card, r, i + 1, card.phase === 'battle' && r.id === card.turnId);
+    }).join('');
+    const empty = order.length ? '' : '<div class="mx-empty">' + esc(App.t('iniEmptyMaster')) + '</div>';
+    return '<div class="card-body mx-body">' + tabs + iniRoundbarHTML(card) +
+      '<div class="mx-list">' + empty + rows +
+        '<button type="button" class="mx-add" data-act="ini-add-row"><span>＋</span>' + esc(App.t('iniAddFighter')) + '</button>' +
+      '</div></div>';
+  }
+
+  function iniCollapseTabs(card, root) {
+    const box = root.querySelector('.mx-tabs');
+    if (!box) return;
+    const tabs = Array.prototype.slice.call(box.querySelectorAll('.mx-tab[data-enc]'));
+    const more = box.querySelector('.mx-tab-more');
+    if (!more) return;
+    tabs.forEach(function (t) { t.classList.remove('hidden'); });
+    more.classList.add('hidden');
+    more.textContent = '';
+    if (box.scrollWidth <= box.clientWidth + 1) return;
+    let hidden = 0;
+    for (let i = tabs.length - 1; i >= 0; i--) {
+      const t = tabs[i];
+      if (t.classList.contains('active')) continue;
+      t.classList.add('hidden');
+      hidden++;
+      more.textContent = '+' + hidden;
+      more.classList.remove('hidden');
+      if (box.scrollWidth <= box.clientWidth + 1) break;
+    }
+  }
+
+  function iniOpenTabMenu(card, id, anchor) {
+    const e = iniSnap(card, id);
+    if (!e) return;
+    const menu = document.createElement('div');
+    menu.className = 'ctxmenu';
+    menu.innerHTML =
+      '<button type="button" data-m="rename">✎ ' + esc(App.t('iniRenameEnc')) + '</button>' +
+      '<button type="button" data-m="spoiler">' + (e.spoiler ? '👁 ' + esc(App.t('iniTabUnspoiler')) : '👁 ' + esc(App.t('iniTabSpoiler'))) + '</button>' +
+      '<button type="button" data-m="del"' + (card.encounterOrder.length < 2 ? ' disabled' : '') + '>' + TRASH_SVG + ' ' + esc(App.t('iniTabDelete')) + '</button>';
+    menu.addEventListener('click', function (ev) {
+      const b = ev.target.closest('button');
+      if (!b || b.disabled) return;
+      closeMountedMenu();
+      if (b.dataset.m === 'rename') iniRenameEnc(card, id);
+      else if (b.dataset.m === 'spoiler') iniToggleSpoiler(card, id);
+      else if (b.dataset.m === 'del') iniDeleteEnc(card, id);
+    });
+    mountMenu(menu, anchor, { align: 'right' });
+  }
+
+  function iniOpenTabAddMenu(card, anchor) {
+    const menu = document.createElement('div');
+    menu.className = 'ctxmenu';
+    menu.innerHTML =
+      '<button type="button" data-m="new">+ ' + esc(App.t('iniEncNew')) + '</button>' +
+      '<button type="button" data-m="copy">⧉ ' + esc(App.t('iniEncCopyAction')) + '</button>';
+    menu.addEventListener('click', function (ev) {
+      const b = ev.target.closest('button');
+      if (!b) return;
+      closeMountedMenu();
+      if (b.dataset.m === 'new') iniNewEnc(card);
+      else if (b.dataset.m === 'copy') iniCopyEnc(card);
+    });
+    mountMenu(menu, anchor, { align: 'right' });
+  }
+
+  function iniOpenTabsMore(card, anchor) {
+    const hidden = Array.prototype.slice.call(anchor.closest('.mx-tabs').querySelectorAll('.mx-tab[data-enc].hidden'));
+    if (!hidden.length) return;
+    const menu = document.createElement('div');
+    menu.className = 'ctxmenu';
+    menu.innerHTML = hidden.map(function (t) {
+      const id = t.dataset.enc;
+      const e = iniSnap(card, id);
+      return '<button type="button" data-enc="' + id + '">' + esc(e ? iniTabName(card, id) : '—') + '</button>';
+    }).join('');
+    menu.addEventListener('click', function (ev) {
+      const b = ev.target.closest('button');
+      if (!b) return;
+      closeMountedMenu();
+      iniLoadEnc(card, b.dataset.enc);
+    });
+    mountMenu(menu, anchor, { align: 'right' });
+  }
+
+  function iniOpenAddMenu(card, anchor) {
+    const menu = document.createElement('div');
+    menu.className = 'ctxmenu';
+    menu.innerHTML =
+      '<button type="button" data-m="new">+ ' + esc(App.t('iniNewFighter')) + '</button>' +
+      '<button type="button" data-m="from">⧉ ' + esc(App.t('iniFromEncounter')) + '</button>';
+    menu.addEventListener('click', function (ev) {
+      const b = ev.target.closest('button');
+      if (!b) return;
+      closeMountedMenu();
+      if (b.dataset.m === 'new') iniAddNewRow(card);
+      else iniOpenFromEncounter(card);
+    });
+    mountMenu(menu, anchor, { align: 'left' });
+  }
+
+  function iniOpenFromEncounter(card) {
+    const sources = card.encounters.filter(function (e) { return e.rows && e.rows.length; });
+    if (!sources.length) { toast(App.t('iniNoOtherRows')); return; }
+    let html = '<div class="mx-from-list">' + sources.map(function (e) {
+      return '<div class="mx-from-enc"><div class="mx-from-title">' + esc(e.name) + '</div>' +
+        e.rows.map(function (r) {
+          return '<button type="button" class="mx-from-row" data-enc="' + e.id + '" data-row="' + r.id + '">' +
+            '<span>' + esc(r.name) + '</span><span class="mx-from-meta">HP ' + (num(r.hp && r.hp.max) || 0) + (num(r.ac) ? ' · ' + esc(App.t('iniAc')) + ' ' + num(r.ac) : '') + '</span></button>';
+        }).join('') + '</div>';
+    }).join('') + '</div>';
+    openModal(App.t('iniFromEncounter'), html, [{ label: App.t('cancel') }]);
+    const m = document.getElementById('modal');
+    m.querySelectorAll('.mx-from-row').forEach(function (b) {
+      b.addEventListener('click', function () {
+        const src = card.encounters.find(function (e) { return e.id === b.dataset.enc; });
+        const row = src && src.rows.find(function (r) { return r.id === b.dataset.row; });
+        closeModal();
+        if (!row) return;
+        let copy = null;
+        mutate(function () { copy = iniNewRow(card, row); });
+        if (copy) toast(App.tf('iniRowAdded', { name: copy.name }));
+      });
+    });
+  }
+
+  function iniOpenRowEditor(card, row) {
+    if (!row) return;
+    const draft = JSON.parse(JSON.stringify(row.attacks || []));
+    function attacksHTML() {
+      return draft.map(function (a, i) {
+        return '<div class="mx-atk-edit" data-i="' + i + '">' +
+          '<input type="text" data-k="name" value="' + esc(a.name) + '" placeholder="' + esc(App.t('iniAttackName')) + '">' +
+          '<input type="text" data-k="hit" value="' + esc(a.hit) + '" placeholder="+5">' +
+          '<input type="text" data-k="damage" value="' + esc(a.damage) + '" placeholder="1d6+2">' +
+          '<button type="button" data-del="' + i + '" title="' + esc(App.t('delete')) + '">' + TRASH_SVG + '</button>' +
+        '</div>';
+      }).join('') || '<div class="mx-empty-note">' + esc(App.t('iniNoAttacks')) + '</div>';
+    }
+    const html = '<div class="mx-edit-grid">' +
+      '<label class="mx-edit-field"><span>' + esc(App.t('name')) + '</span><input id="mx-r-name" type="text" value="' + esc(row.name) + '"></label>' +
+      '<label class="mx-edit-field"><span>' + esc(App.t('iniInitValue')) + '</span><input id="mx-r-init" type="number" value="' + (row.value == null ? '' : esc(row.value)) + '"></label>' +
+      '<label class="mx-edit-field"><span>' + esc(App.t('iniHpMax')) + '</span><input id="mx-r-max" type="number" min="0" value="' + (num(row.hp && row.hp.max) || 0) + '"></label>' +
+      '<label class="mx-edit-field"><span>' + esc(App.t('iniAc')) + '</span><input id="mx-r-ac" type="number" min="0" value="' + (num(row.ac) || 0) + '"></label>' +
+      '<label class="mx-edit-field"><span>' + esc(App.t('iniHpCur')) + '</span><input id="mx-r-cur" type="number" value="' + (num(row.hp && row.hp.current) || 0) + '"></label>' +
+      '<label class="mx-edit-field"><span>' + esc(App.t('iniShield')) + '</span><input id="mx-r-shield" type="number" min="0" value="' + (num(row.hp && row.hp.shield) || 0) + '"></label>' +
+      '<label class="mx-edit-field"><span>' + esc(App.t('iniBonus')) + '</span><input id="mx-r-bonus" type="number" value="' + (num(row.bonus) || 0) + '"></label>' +
+      '</div>' +
+      '<label class="mx-edit-check"><input id="mx-r-boss" type="checkbox"' + (row.boss ? ' checked' : '') + '> ' + esc(App.t('iniBoss')) + '</label>' +
+      '<label class="mx-edit-field"><span>' + esc(App.t('iniRowNotes')) + '</span><textarea id="mx-r-notes">' + esc(row.notes || '') + '</textarea></label>' +
+      '<div class="mx-edit-sub">' + esc(App.t('iniAttacks')) + '</div>' +
+      '<div id="mx-r-attacks">' + attacksHTML() + '</div>' +
+      '<button type="button" class="mx-add-attack" id="mx-r-addattack">+ ' + esc(App.t('iniAttackAdd')) + '</button>';
+    openModal(App.t('iniRowProps'), html, [
+      { label: App.t('cancel') },
+      { label: App.t('save'), cls: 'primary', onClick: function () {
+        const m = document.getElementById('modal');
+        const name = m.querySelector('#mx-r-name').value.trim();
+        if (!name) { toast(App.t('uniqueNameError')); return false; }
+        const max = Math.max(0, Math.round(Number(m.querySelector('#mx-r-max').value) || 0));
+        const wasFull = row.hp && row.hp.current === row.hp.max;
+        let cur = Math.round(Number(m.querySelector('#mx-r-cur').value) || 0);
+        if (wasFull) cur = max;
+        if (cur > max) cur = max;
+        if (cur < 0) cur = 0;
+        mutate(function () {
+          row.name = name;
+          row.value = m.querySelector('#mx-r-init').value === '' ? null : Math.round(Number(m.querySelector('#mx-r-init').value));
+          row.hp = { current: cur, max: max, shield: Math.max(0, Math.round(Number(m.querySelector('#mx-r-shield').value) || 0)) };
+          row.ac = Math.max(0, Math.round(Number(m.querySelector('#mx-r-ac').value) || 0));
+          row.bonus = Math.round(Number(m.querySelector('#mx-r-bonus').value) || 0);
+          row.boss = m.querySelector('#mx-r-boss').checked;
+          row.notes = m.querySelector('#mx-r-notes').value;
+          row.attacks = draft.filter(function (a) { return (a.name || '').trim() || (a.hit || '').trim() || (a.damage || '').trim(); }).map(function (a) {
+            return { id: a.id || uid(), name: String(a.name || '').trim() || App.t('iniAttackName'), hit: String(a.hit || '').trim(), damage: String(a.damage || '').trim(), note: String(a.note || '') };
+          });
+        });
+        return true;
+      } }
+    ]);
+    const m = document.getElementById('modal');
+    function bindAttacks() {
+      m.querySelectorAll('.mx-atk-edit input').forEach(function (inp) {
+        inp.addEventListener('input', function () {
+          const i = Number(inp.closest('.mx-atk-edit').dataset.i);
+          draft[i][inp.dataset.k] = inp.value;
+        });
+      });
+      m.querySelectorAll('.mx-atk-edit [data-del]').forEach(function (b) {
+        b.addEventListener('click', function () {
+          draft.splice(Number(b.dataset.del), 1);
+          m.querySelector('#mx-r-attacks').innerHTML = attacksHTML();
+          bindAttacks();
+        });
+      });
+    }
+    bindAttacks();
+    m.querySelector('#mx-r-addattack').addEventListener('click', function () {
+      draft.push({ id: uid(), name: '', hit: '', damage: '', note: '' });
+      m.querySelector('#mx-r-attacks').innerHTML = attacksHTML();
+      bindAttacks();
+    });
+  }
+
+  function iniRollDamageExpr(expr) {
+    const s = String(expr || '').replace(/\s+/g, '');
+    if (!s) return null;
+    const m = s.match(/^(\d*)d(\d+)([+-]\d+)?$/i);
+    if (m) {
+      const n = m[1] ? Number(m[1]) : 1, d = Number(m[2]), mod = m[3] ? Number(m[3]) : 0;
+      let total = mod;
+      for (let i = 0; i < n; i++) total += 1 + Math.floor(Math.random() * d);
+      return total;
+    }
+    const v = Number(s);
+    return Number.isFinite(v) ? v : null;
+  }
+
+  function iniRollAttack(card, row, atk) {
+    const parts = [];
+    const hit = String(atk.hit || '').trim();
+    if (hit) {
+      const bonus = Number(hit.replace(/[^0-9+-]/g, '')) || 0;
+      const roll = 1 + Math.floor(Math.random() * 20);
+      parts.push(App.t('iniAttackWord') + ' ' + (roll + bonus) + (roll === 20 ? ' (' + App.t('iniCrit') + ')' : roll === 1 ? ' (' + App.t('iniMiss') + ')' : ''));
+    }
+    const dmg = iniRollDamageExpr(atk.damage);
+    if (dmg != null) parts.push(App.t('iniDamageWord') + ' ' + dmg);
+    toast((atk.name || App.t('iniAttacks')) + ': ' + (parts.length ? parts.join(' · ') : App.t('iniNoValues')));
+  }
+
   function initiativeBody(card) {
     iniRows(card);
+    if (iniMasterCard(card)) return iniMasterBody(card);
     if (card.mini) return initiativeMini(card);
 
     const order = iniOrder(card);
@@ -3824,6 +4796,38 @@ window.App = window.App || {};
   // Заметка — набор листов (title/color/text). Раньше был один card.text;
   // ensureNotePages переносит его в первую страницу и убирает старое поле.
   const NOTE_COLORS = ['#e6c25a', '#a79bff', '#7fd6a5', '#f09a7f', '#9fd8ff', '#f2a7c3'];
+  // v169: текст заметки правится на месте по умолчанию. Флаг спойлера живёт
+  // в данных карточки (`card.spoiler`), «раскрыто сейчас» — только в памяти.
+  const noteRevealed = {};
+  const noteEditSession = {};   // cardId → { timer, dirty } — один undo на сессию
+  function noteSpoilerHidden(card) {
+    return isMaster(activeChar()) && !!card.spoiler && !noteRevealed[card.id] && !editMode;
+  }
+  function noteEditFinish(card) {
+    const s = noteEditSession[card.id];
+    if (!s) return;
+    if (s.timer) clearTimeout(s.timer);
+    if (s.dirty) save();
+    delete noteEditSession[card.id];
+  }
+  function noteEditCancelAll() {
+    Object.keys(noteEditSession).forEach(function (k) {
+      const s = noteEditSession[k];
+      if (s.timer) clearTimeout(s.timer);
+      delete noteEditSession[k];
+    });
+  }
+  function toggleNoteSpoiler(card) {
+    noteEditFinish(card);
+    mutate(function () {
+      card.spoiler = !card.spoiler;
+      delete noteRevealed[card.id];
+    });
+  }
+  function revealNoteSpoiler(card) {
+    noteRevealed[card.id] = true;
+    render();
+  }
   function notePages(card) {
     if (!Array.isArray(card.pages)) card.pages = [];
     return card.pages;
@@ -3860,6 +4864,84 @@ window.App = window.App || {};
   function notePageTitle(p) {
     return (p && p.title || '').trim() || App.t('notePageNoName');
   }
+  // v170: страница заметки хранит HTML (`p.html`). Старые страницы — простой
+  // текст: переносим его в div'ы при показе, данные не трогаем до правки.
+  function notePlainToHtml(text) {
+    const src = String(text || '');
+    if (!src) return '';
+    return src.split('\n').map(function (line) {
+      return '<div>' + (line ? esc(line) : '<br>') + '</div>';
+    }).join('');
+  }
+  function sanitizeNoteHtml(html) {
+    const src = new DOMParser().parseFromString(String(html || ''), 'text/html');
+    const frag = document.createDocumentFragment();
+    const allowed = {
+      p: 1, div: 1, br: 1, h1: 1, h2: 1, h3: 1, h4: 1,
+      strong: 1, b: 1, em: 1, i: 1, u: 1, s: 1, strike: 1, del: 1,
+      mark: 1, code: 1, pre: 1, blockquote: 1, ul: 1, ol: 1, li: 1, a: 1
+    };
+    function copy(node, parent) {
+      Array.prototype.forEach.call(node.childNodes, function (ch) {
+        if (ch.nodeType === 3) {
+          const val = ch.nodeValue || '';
+          // невидимый маркер пустой вставки не тащим в сохранённый текст,
+          // если в узле есть настоящие символы
+          parent.appendChild(document.createTextNode(val.replace(/\u200b/g, '').trim() ? val.replace(/\u200b/g, '') : val));
+          return;
+        }
+        if (ch.nodeType !== 1) return;
+        const tag = (ch.tagName || '').toLowerCase();
+        if (tag === 'span') {
+          if (ch.getAttribute('data-check') === '1') {
+            const box = document.createElement('span');
+            box.setAttribute('data-check', '1');
+            box.setAttribute('contenteditable', 'false');
+            parent.appendChild(box);
+          } else if (ch.getAttribute('data-caret') === '1') {
+            // якорь ввода — только для редактора, в тексте ему делать нечего
+            return;
+          } else {
+            copy(ch, parent);
+          }
+          return;
+        }
+        if (!allowed[tag]) {
+          // script/style/iframe не копируем, остальные неизвестные теги разворачиваем
+          if (tag !== 'script' && tag !== 'style' && tag !== 'iframe' &&
+              tag !== 'object' && tag !== 'embed' && tag !== 'img' && tag !== 'svg') copy(ch, parent);
+          return;
+        }
+        if (tag === 'a') {
+          const href = (ch.getAttribute('href') || '').trim();
+          if (!/^(https?:|mailto:)/i.test(href)) { copy(ch, parent); return; }
+          const a = document.createElement('a');
+          a.setAttribute('href', href);
+          a.setAttribute('target', '_blank');
+          a.setAttribute('rel', 'noopener noreferrer');
+          copy(ch, a);
+          parent.appendChild(a);
+          return;
+        }
+        const el = document.createElement(tag);
+        if (tag === 'ul' && ch.getAttribute('data-task') === '1') el.setAttribute('data-task', '1');
+        if (tag === 'li') {
+          const ck = ch.getAttribute('data-checked');
+          if (ck === '0' || ck === '1') el.setAttribute('data-checked', ck);
+        }
+        copy(ch, el);
+        parent.appendChild(el);
+      });
+    }
+    copy(src.body, frag);
+    const box = document.createElement('div');
+    box.appendChild(frag);
+    return box.innerHTML;
+  }
+  function notePageHtml(p) {
+    if (!p) return '';
+    return p.html ? sanitizeNoteHtml(p.text) : notePlainToHtml(p.text);
+  }
   // Закладки на карточке: номера; подписи раскрываются наведением на полосу
   function noteTabsHTML(card) {
     const list = notePages(card);
@@ -3874,10 +4956,17 @@ window.App = window.App || {};
       '</button></div>';
     }).join('') + '</div>';
   }
-  function noteBody(card) {
+  function noteBody(card, ctx) {
     ensureNotePages(card);
     const p = notePage(card);
-    return '<div class="card-body"><div class="note-text">' + esc(p ? (p.text || '') : '') + '</div>' + noteTabsHTML(card) + '</div>';
+    const ro = !!(ctx && ctx.readonly);
+    if (!ro && noteSpoilerHidden(card)) {
+      return '<div class="card-body note-spoiler-body">' +
+        '<button type="button" class="note-reveal" data-act="note-reveal" title="' + esc(App.t('noteSpoilerShow')) + '">' +
+          NOTE_EYE_OFF_SVG + '<span>' + esc(App.t('noteSpoilerShow')) + '</span>' +
+        '</button></div>';
+    }
+    return '<div class="card-body"><div class="note-text note-rich">' + notePageHtml(p) + '</div>' + noteTabsHTML(card) + '</div>';
   }
 
   // v98: долгий тап по иконке предмета раскрывает «истинный предмет».
@@ -4065,9 +5154,11 @@ window.App = window.App || {};
     '</div>';
   }
 
-  function bindCard(card) {
+  function bindCard(card, ctx) {
+    ctx = ctx || viewCtx();
     const el = document.querySelector('.card[data-id="' + card.id + '"]');
     if (!el) return;
+    if (ctx.readonly) return;   // снимок (v169): действия не вешаем, только чтение
     el.querySelectorAll('[data-act]').forEach(function (btn) {
       btn.addEventListener('click', function (e) { handleAction(card.id, btn.dataset, e); });
     });
@@ -4088,11 +5179,14 @@ window.App = window.App || {};
       desc.classList.add('readable');
       desc.addEventListener('click', function () { openTextModal(card.name, card.description); });
     }
-    // заметка: прокрутка внутри карточки + клик — страницы во втором слое
+    // заметка: карточка — просмотр; клик открывает редактор во втором слое
     const note = el.querySelector('.note-text');
     if (note) {
       note.classList.add('readable');
-      note.addEventListener('click', function () { openLabelLayer(card.id); });
+      note.addEventListener('click', function (e) {
+        if (e.target.closest('a')) return;   // ссылку открываем, а не редактор
+        openLabelLayer(card.id);
+      });
     }
     const edit = el.querySelector('.card-edit');
     const dup = el.querySelector('.card-dup');
@@ -4145,6 +5239,84 @@ window.App = window.App || {};
           ev.preventDefault();
           handleInitiative(card, 'ini-scroll', { d: ev.deltaY > 0 ? '1' : '-1' }, { currentTarget: el });
         }, { passive: false });
+      }
+      // v166: мастерская инициатива — долгое нажатие на вкладку, строки, шаг HP
+      if (isMaster(activeChar())) {
+        const tabs = el.querySelector('.mx-tabs');
+        if (tabs) {
+          let timer = null, tabId = null, sx = 0, sy = 0;
+          const cancel = function () { clearTimeout(timer); timer = null; tabId = null; };
+          tabs.addEventListener('pointerdown', function (ev) {
+            const tab = ev.target.closest('.mx-tab[data-enc]');
+            if (!tab || ev.button !== 0) return;
+            cancel();
+            tabId = tab.dataset.enc;
+            sx = ev.clientX; sy = ev.clientY;
+            timer = setTimeout(function () {
+              if (!tabId) return;
+              iniTabSuppress[card.id] = Date.now() + 450;
+              iniOpenTabMenu(card, tabId, tab);
+              tabId = null;
+            }, 500);
+          });
+          tabs.addEventListener('pointermove', function (ev) {
+            if (!tabId) return;
+            if (Math.abs(ev.clientX - sx) > 8 || Math.abs(ev.clientY - sy) > 8) cancel();
+          });
+          tabs.addEventListener('pointerup', cancel);
+          tabs.addEventListener('pointercancel', cancel);
+          tabs.addEventListener('pointerleave', cancel);
+          tabs.addEventListener('contextmenu', function (ev) {
+            const tab = ev.target.closest('.mx-tab[data-enc]');
+            if (!tab) return;
+            ev.preventDefault();
+            iniTabSuppress[card.id] = Date.now() + 450;
+            iniOpenTabMenu(card, tab.dataset.enc, tab);
+          });
+          tabs.addEventListener('keydown', function (ev) {
+            if (!(ev.key === 'ContextMenu' || (ev.key === 'F10' && ev.shiftKey))) return;
+            const tab = ev.target.closest('.mx-tab[data-enc]');
+            if (!tab) return;
+            ev.preventDefault();
+            iniOpenTabMenu(card, tab.dataset.enc, tab);
+          });
+          iniCollapseTabs(card, el);
+        }
+        el.querySelectorAll('.mx-step').forEach(function (inp) {
+          inp.addEventListener('pointerdown', function (ev) { ev.stopPropagation(); });
+          inp.addEventListener('focus', function () { inp.select(); });
+          inp.addEventListener('input', function () { readIniRowStep(card, inp); });
+          inp.addEventListener('keydown', function (ev) { if (ev.key === 'Enter') inp.blur(); });
+        });
+        el.querySelectorAll('.mx-init').forEach(function (inp) {
+          inp.addEventListener('pointerdown', function (ev) { ev.stopPropagation(); });
+          inp.addEventListener('focus', function () { inp.select(); });
+          const sync = function () {
+            const row = iniRowByName(card, inp.dataset.mxInit);
+            if (!row) return;
+            const raw = inp.value.trim();
+            const v = parseInt(raw, 10);
+            row.value = raw === '' || !Number.isFinite(v) ? null : v;
+            const btn = el.querySelector('.mx-pass');
+            if (!btn || card.phase === 'battle') return;
+            const total = iniRows(card).length;
+            const missing = total - iniFilledCount(card);
+            btn.disabled = !total || missing > 0;
+            if (missing > 0) btn.title = App.tf('iniMissing', { n: missing });
+            else btn.removeAttribute('title');
+          };
+          inp.addEventListener('input', sync);
+          inp.addEventListener('change', sync);
+        });
+        el.querySelectorAll('.mx-row').forEach(function (rowEl) {
+          rowEl.addEventListener('click', function (ev) {
+            if (ev.target.closest('button, input, textarea, select, .mx-panel')) return;
+            const row = iniRowByName(card, rowEl.dataset.mxRow);
+            if (!row) return;
+            row.open = !row.open;
+            commit();
+          });
+        });
       }
     }
     // Язычок: клик — свернуть/развернуть (единственный способ). Клик по САМОЙ карточке
@@ -6492,7 +7664,7 @@ window.App = window.App || {};
   // встречается рядом с «Удалить предмет».
   function askDelete(opts) {
     if (opts.anchor) askInline(opts.anchor, opts.text, opts.onYes);
-    else confirmDialog(opts.text, opts.onYes, opts.title || App.t('delete'));
+    else confirmDialog(opts.text, opts.onYes, opts.title || App.t('delete'), opts.labels);
   }
 
   // Полный текст (описание перка/заклинания) отдельным окном
@@ -6534,6 +7706,9 @@ window.App = window.App || {};
   function openLabelLayer(cardId) {
     const card = findCard(cardId);
     if (!card || !foldable(card)) return;
+    // v169: спойлер заметки сначала только раскрывает её — иначе ярлык на
+    // телефоне открывал бы текст в обход замка. Следующий тап уже откроет слой.
+    if (card.type === 'note' && noteSpoilerHidden(card)) { revealNoteSpoiler(card); return; }
     // v142: заметку открываем и развёрнутой (клик по тексту), остальные ярлыки — только свёрнутыми
     if (card.type !== 'note' && !isCollapsed(card)) return;
     const ov = document.getElementById('labelLayer');
@@ -6551,8 +7726,11 @@ window.App = window.App || {};
     ov.classList.remove('hidden');
     updateScrollLock();
     // v126: диалог получает фокус (на телефоне поле заметки не автофокусим —
-    // иначе сразу выезжает клавиатура, поэтому берём первую кнопку шапки)
-    const firstFocus = ov.querySelector('button, textarea, input, [tabindex="0"]');
+    // иначе сразу выезжает клавиатура). У заметки шапки нет: фокусируем панель,
+    // чтобы не подсвечивать первую кнопку тулбара.
+    const firstFocus = card.type === 'note'
+      ? ov.querySelector('.note-pages-panel')
+      : ov.querySelector('button, textarea, input, [tabindex="0"]');
     if (firstFocus) {
       try { firstFocus.focus({ preventScroll: true }); } catch (e) { firstFocus.focus(); }
     }
@@ -6628,7 +7806,7 @@ window.App = window.App || {};
     el.appendChild(head);
     // cardBody уже возвращает обёртку .card-body — вставляем как есть
     const body = document.createElement('div');
-    body.innerHTML = cardBody(card);
+    body.innerHTML = cardBody(card, viewCtx({ desktop: desktop }));
     while (body.firstChild) el.appendChild(body.firstChild);
     el.querySelectorAll('[data-act]').forEach(function (btn) {
       btn.addEventListener('click', function (e) { handleAction(card.id, btn.dataset, e); });
@@ -6646,24 +7824,30 @@ window.App = window.App || {};
     return el;
   }
 
-  // ===== Заметка: страницы во втором слое (v142) =====
-  // Панель нарочно повторяет карточку: та же шапка, текст и закладки справа.
-  // По умолчанию закладки сжаты до номеров; наведение (ПК) или тап по активной
-  // (телефон) раскрывает подписи. Кебаб закладки — цвет/переименовать/удалить.
+  // ===== Заметка: страницы и WYSIWYG во втором слое (v170) =====
+  // Шапки с именем и тремя тулзами здесь нет: сверху на всю ширину — панель
+  // форматирования, ниже — текст и закладки. Слой закрывается Esc / тапом мимо.
   function buildNotePanel(card) {
     ensureNotePages(card);
     const panel = document.createElement('div');
     panel.className = 'layer-panel note-pages-panel';
+    panel.tabIndex = -1;
 
-    const head = buildLayerHead(card);
-    panel.appendChild(head);
+    const toolbar = document.createElement('div');
+    toolbar.className = 'note-toolbar';
+    panel.appendChild(toolbar);
 
     const body = document.createElement('div');
     body.className = 'note-pages-body';
-    const ta = document.createElement('textarea');
-    ta.className = 'note-pages-text';
-    ta.placeholder = App.t('text') + '…';
-    body.appendChild(ta);
+    const editor = document.createElement('div');
+    editor.className = 'note-pages-text note-rich';
+    editor.contentEditable = 'true';
+    editor.spellcheck = true;
+    editor.setAttribute('role', 'textbox');
+    editor.setAttribute('aria-multiline', 'true');
+    editor.setAttribute('aria-label', App.t('text'));
+    editor.dataset.placeholder = App.t('text') + '…';
+    body.appendChild(editor);
     const rail = document.createElement('div');
     rail.className = 'note-pages-rail';
     body.appendChild(rail);
@@ -6676,20 +7860,1006 @@ window.App = window.App || {};
     let railOpen = false;
     let menuFor = -1;
     let menuAnchor = null;
+    let savedRange = null;
+    // Своя история: contenteditable undo не видит ручных команд (чекбоксы,
+    // Enter внутри чек-листа), а кнопки ↶/↷ должны отменять всё подряд.
+    let histPast = [];
+    let histFuture = [];
+    let typingBase = null;
+    let typingTimer = 0;
+    let toolbarPointer = false;
 
     function pages() { return notePages(card); }
     function curPage() { return notePage(card); }
     function setRailOpen(v) { railOpen = v; rail.classList.toggle('open', v); }
 
-    // текст страницы пишем в данные только при уходе/закрытии: иначе undo
-    // получал бы шаг на каждую букву
-    function flushText(commit) {
+    // Один undo на сессию правки: pushUndo при первом изменении, save — по
+    // паузе и потере фокуса. HTML остаётся очищенным (sanitizeNoteHtml).
+    function saveNow() {
+      flushTyping();
+      cleanupCaretMarkers(null);
+      const s = noteEditSession[card.id];
+      if (!s) return;
+      if (s.timer) { clearTimeout(s.timer); s.timer = 0; }
+      if (!s.dirty) return;
+      const p = curPage();
+      if (p) {
+        p.text = sanitizeNoteHtml(editor.innerHTML);
+        p.html = true;
+      }
+      save();
+      s.dirty = false;
+    }
+    function syncText() {
       const p = curPage();
       if (!p) return;
-      const txt = ta.value;
-      if (txt === (p.text || '')) return;
-      if (commit) mutate(function () { p.text = txt; });
-      else p.text = txt;
+      let s = noteEditSession[card.id];
+      if (!s) {
+        pushUndo();
+        s = noteEditSession[card.id] = { timer: 0, dirty: false };
+      }
+      p.text = editor.innerHTML;
+      p.html = true;
+      s.dirty = true;
+      if (s.timer) clearTimeout(s.timer);
+      s.timer = setTimeout(saveNow, 450);
+    }
+    function flushText() {
+      saveNow();
+    }
+
+    // ---------- История редактора ----------
+    function remember(html) {
+      if (!html || html === editor.innerHTML) return;
+      histPast.push(html);
+      if (histPast.length > 80) histPast.shift();
+      histFuture = [];
+    }
+    function flushTyping() {
+      if (!typingBase) return;
+      if (typingTimer) { clearTimeout(typingTimer); typingTimer = 0; }
+      const base = typingBase;
+      typingBase = null;
+      remember(base);
+    }
+    function beginTyping() {
+      if (!typingBase) typingBase = editor.innerHTML;
+      if (typingTimer) clearTimeout(typingTimer);
+      typingTimer = setTimeout(flushTyping, 650);
+    }
+    function setEditorHtml(html) {
+      editor.innerHTML = html;
+      savedRange = null;
+    }
+    function undoEditor() {
+      flushTyping();
+      if (!histPast.length) return;
+      histFuture.push(editor.innerHTML);
+      setEditorHtml(histPast.pop());
+      syncText();
+      updateToolbarState();
+    }
+    function redoEditor() {
+      flushTyping();
+      if (!histFuture.length) return;
+      histPast.push(editor.innerHTML);
+      setEditorHtml(histFuture.pop());
+      syncText();
+      updateToolbarState();
+    }
+    function resetHistory() {
+      if (typingTimer) clearTimeout(typingTimer);
+      typingBase = null;
+      typingTimer = 0;
+      histPast = [];
+      histFuture = [];
+    }
+
+    // ---------- WYSIWYG: выделение, команды, панель ----------
+    let headingSel = null;
+    function saveRange() {
+      const sel = window.getSelection();
+      if (!sel || !sel.rangeCount) return;
+      const r = sel.getRangeAt(0);
+      if (editor.contains(r.startContainer) && editor.contains(r.endContainer)) savedRange = r.cloneRange();
+    }
+    function restoreRange() {
+      const sel = window.getSelection();
+      const cur = sel && sel.rangeCount ? sel.getRangeAt(0) : null;
+      // живое выделение в редакторе важнее сохранённого снимка
+      if (cur && !cur.collapsed && editor.contains(cur.commonAncestorContainer)) return;
+      if (!savedRange) return;
+      // после перестройки DOM (чекбокс, цитата) старый Range может указывать
+      // на удалённый узел — тогда команды молча ничего не делали
+      if (!editor.contains(savedRange.startContainer) || !editor.contains(savedRange.endContainer)) {
+        savedRange = null;
+        return;
+      }
+      sel.removeAllRanges();
+      sel.addRange(savedRange);
+    }
+    function closestAncestor(name) {
+      const sel = window.getSelection();
+      let n = sel && sel.anchorNode;
+      while (n && n !== editor) {
+        if (n.nodeType === 1 && n.tagName.toLowerCase() === name) return n;
+        n = n.parentNode;
+      }
+      return null;
+    }
+    function currentBlock() {
+      const sel = window.getSelection();
+      let n = sel && sel.anchorNode;
+      while (n && n !== editor) {
+        if (n.nodeType === 1) {
+          const tag = n.tagName.toLowerCase();
+          if (/^(p|div|h1|h2|h3|h4|li|blockquote|pre|ul|ol)$/.test(tag)) return n;
+        }
+        n = n.parentNode;
+      }
+      return null;
+    }
+    function unwrapNode(el) {
+      const parent = el.parentNode;
+      if (!parent) return;
+      while (el.firstChild) parent.insertBefore(el.firstChild, el);
+      parent.removeChild(el);
+      parent.normalize();
+    }
+    function toggleBlock(tag) {
+      const block = currentBlock();
+      const now = block ? block.tagName.toLowerCase() : '';
+      document.execCommand('formatBlock', false, now === tag ? 'p' : tag);
+    }
+    // v174: свои inline-переключатели вместо execCommand. Chrome в некоторых
+    // состояниях путает команды (курсив включал жирный), а снятие формата
+    // на выделении работало непредсказуемо. Здесь всегда один тег.
+    const INLINE_TAGS = { bold: 'b', italic: 'i', underline: 'u', strikeThrough: 's', highlight: 'mark' };
+    const INLINE_SET = ['b', 'i', 'u', 's', 'mark'];
+    function canonicalInline(name) {
+      const n = String(name || '').toLowerCase();
+      if (n === 'strong') return 'b';
+      if (n === 'em') return 'i';
+      if (n === 'strike' || n === 'del') return 's';
+      return INLINE_SET.indexOf(n) !== -1 ? n : '';
+    }
+    function caretFormats() {
+      const out = new Set();
+      const sel = window.getSelection();
+      if (!sel || !sel.rangeCount) return out;
+      let n = sel.getRangeAt(0).startContainer;
+      while (n && n !== editor) {
+        if (n.nodeType === 1) {
+          const t = canonicalInline(n.tagName);
+          if (t) out.add(t);
+        }
+        n = n.parentNode;
+      }
+      return out;
+    }
+    function normalizeCaretRange(range) {
+      if (!range || !range.collapsed) return range;
+      // курсор «внутри» пустого <br> — переносим перед ним, иначе ввод
+      // и якорь формата оказываются в невидимом узле
+      if (range.startContainer.nodeType === 1 && range.startContainer.tagName === 'BR') {
+        const r = document.createRange();
+        r.setStartBefore(range.startContainer);
+        r.collapse(true);
+        return r;
+      }
+      return range;
+    }
+    function normalizedCaret() {
+      const sel = window.getSelection();
+      if (!sel || !sel.rangeCount) return null;
+      const r = normalizeCaretRange(sel.getRangeAt(0));
+      if (r !== sel.getRangeAt(0)) { sel.removeAllRanges(); sel.addRange(r); }
+      return r;
+    }
+    function cleanupCaretMarkers(keep) {
+      Array.prototype.slice.call(editor.querySelectorAll('[data-caret]')).forEach(function (m) {
+        if (m === keep) return;
+        if (m.firstChild && m.firstChild.nodeType === 3) {
+          m.firstChild.nodeValue = m.firstChild.nodeValue.replace(/\u200b/g, '');
+        }
+        if (m.textContent.replace(/\u200b/g, '').length) unwrapNode(m);
+        else m.remove();
+      });
+    }
+    function cleanupInlineNodes() {
+      Array.prototype.slice.call(editor.querySelectorAll('b,strong,i,em,u,s,strike,del,mark')).forEach(function (n) {
+        if (!n.textContent.replace(/\u200b/g, '') && !n.querySelector('br,[data-caret]')) n.remove();
+      });
+    }
+    function splitTagAroundMarker(el, marker) {
+      const clone = el.cloneNode(false);
+      const after = [];
+      let sib = marker.nextSibling;
+      while (sib) { after.push(sib); sib = sib.nextSibling; }
+      after.forEach(function (n) { clone.appendChild(n); });
+      el.parentNode.insertBefore(clone, el.nextSibling);
+      el.parentNode.insertBefore(marker, clone);
+    }
+    // Курсор без выделения: не трогаем написанное. Разрезаем ненужные теги
+    // вокруг курсора и оставляем якорь с нужным набором форматов — следующий
+    // ввод наследует только их.
+    function applyTypingFormats(tags) {
+      const sel = window.getSelection();
+      if (!sel || !sel.rangeCount) return;
+      let range = normalizedCaret();
+      if (!range || !editor.contains(range.startContainer)) return;
+      cleanupCaretMarkers(null);
+      const marker = document.createElement('span');
+      marker.setAttribute('data-caret', '1');
+      marker.appendChild(document.createTextNode('\u200b'));
+      range.insertNode(marker);
+      const chain = [];
+      let n = marker.parentNode;
+      while (n && n !== editor) {
+        if (n.nodeType === 1) {
+          const t = canonicalInline(n.tagName);
+          if (t && !tags.has(t)) chain.push(n);
+        }
+        n = n.parentNode;
+      }
+      chain.forEach(function (el) { splitTagAroundMarker(el, marker); });
+      const present = new Set();
+      n = marker.parentNode;
+      while (n && n !== editor) {
+        if (n.nodeType === 1) {
+          const t = canonicalInline(n.tagName);
+          if (t) present.add(t);
+        }
+        n = n.parentNode;
+      }
+      INLINE_SET.forEach(function (t) {
+        if (!tags.has(t) || present.has(t)) return;
+        const el = document.createElement(t);
+        marker.parentNode.insertBefore(el, marker);
+        el.appendChild(marker);
+        present.add(t);
+      });
+      const r = document.createRange();
+      r.setStart(marker.firstChild, 1);
+      r.collapse(true);
+      sel.removeAllRanges();
+      sel.addRange(r);
+      cleanupInlineNodes();
+    }
+    function ancestorTagNode(node, tag) {
+      let n = node;
+      while (n && n !== editor) {
+        if (n.nodeType === 1 && n.tagName.toLowerCase() === tag) return n;
+        n = n.parentNode;
+      }
+      return null;
+    }
+    function rangeTextNodes(range) {
+      const out = [];
+      const walker = document.createTreeWalker(editor, NodeFilter.SHOW_TEXT, null);
+      let n;
+      while ((n = walker.nextNode())) {
+        if (!n.nodeValue || !n.nodeValue.replace(/\u200b/g, '').trim()) continue;
+        if (range.intersectsNode(n)) out.push(n);
+      }
+      return out;
+    }
+    // Формат считаем включённым, только если весь выделенный текст уже в теге.
+    // При частичном выделении кнопка выключена — нажатие добавит формат.
+    function formatActive(tag) {
+      const sel = window.getSelection();
+      if (!sel || !sel.rangeCount) return false;
+      const range = sel.getRangeAt(0);
+      if (!editor.contains(range.startContainer) || !editor.contains(range.endContainer)) return false;
+      if (range.collapsed) return !!ancestorTagNode(range.startContainer, tag);
+      const nodes = rangeTextNodes(range);
+      if (!nodes.length) return !!ancestorTagNode(range.startContainer, tag);
+      // Достаточно части: кнопка «включена», если выделение задевает формат.
+      // Тогда повторное нажатие снимет его с выделенной части.
+      return nodes.some(function (n) { return !!ancestorTagNode(n, tag); });
+    }
+    function cleanupInline(tag) {
+      Array.prototype.slice.call(editor.querySelectorAll(tag)).forEach(function (n) {
+        if (!n.textContent.replace(/\u200b/g, '') && !n.querySelector('br')) n.remove();
+      });
+    }
+    function caretAfterNode(node) {
+      const r = document.createRange();
+      r.setStartAfter(node);
+      r.collapse(true);
+      const sel = window.getSelection();
+      sel.removeAllRanges();
+      sel.addRange(r);
+    }
+    function splitInlineAtBoundary(tag, range, atStart) {
+      const node = atStart ? range.startContainer : range.endContainer;
+      const el = ancestorTagNode(node, tag);
+      if (!el) return;
+      const inner = document.createRange();
+      inner.selectNodeContents(el);
+      if (atStart && range.compareBoundaryPoints(Range.START_TO_START, inner) <= 0) return;
+      if (!atStart && range.compareBoundaryPoints(Range.END_TO_END, inner) >= 0) return;
+      const part = document.createRange();
+      if (atStart) {
+        part.setStart(el, 0);
+        part.setEnd(node, range.startOffset);
+      } else {
+        part.setStart(node, range.endOffset);
+        part.setEnd(el, el.childNodes.length);
+      }
+      const clone = document.createElement(tag);
+      clone.appendChild(part.extractContents());
+      if (atStart) el.parentNode.insertBefore(clone, el);
+      else el.parentNode.insertBefore(clone, el.nextSibling);
+    }
+    function blockOf(node) {
+      let n = node;
+      while (n && n !== editor) {
+        if (n.parentNode === editor && isBlockNode(n)) return n;
+        n = n.parentNode;
+      }
+      return null;
+    }
+    function clippedRangeForBlock(range, block) {
+      const blockRange = document.createRange();
+      blockRange.selectNodeContents(block);
+      const r = document.createRange();
+      if (range.compareBoundaryPoints(Range.START_TO_START, blockRange) <= 0) {
+        r.setStart(blockRange.startContainer, blockRange.startOffset);
+      } else {
+        r.setStart(range.startContainer, range.startOffset);
+      }
+      if (range.compareBoundaryPoints(Range.END_TO_END, blockRange) >= 0) {
+        r.setEnd(blockRange.endContainer, blockRange.endOffset);
+      } else {
+        r.setEnd(range.endContainer, range.endOffset);
+      }
+      return r;
+    }
+    function wrapRange(tag, range) {
+      const frag = range.extractContents();
+      const el = document.createElement(tag);
+      el.appendChild(frag);
+      range.insertNode(el);
+      // чекбокс чек-листа не должен попадать внутрь жирного/курсива:
+      // иначе он меняет размер и перестаёт нажиматься
+      Array.prototype.slice.call(el.querySelectorAll('[data-check]')).forEach(function (box) {
+        el.parentNode.insertBefore(box, el);
+      });
+      if (!el.textContent.replace(/\u200b/g, '') && !el.querySelector('br')) {
+        el.remove();
+        return null;
+      }
+      return el;
+    }
+    function unwrapInlineSelection(tag) {
+      const sel = window.getSelection();
+      if (!sel || !sel.rangeCount) return;
+      let range = sel.getRangeAt(0);
+      // Курсор внутри тега: снимаем формат со всей этой вставки. Так кнопка
+      // и текст совпадают: «выключил» = текст стал обычным.
+      if (range.collapsed) {
+        const el = ancestorTagNode(range.startContainer, tag);
+        if (!el) return;
+        const marker = document.createElement('span');
+        marker.setAttribute('data-caret', '1');
+        el.parentNode.insertBefore(marker, el.nextSibling);
+        unwrapNode(el);
+        caretAfterNode(marker);
+        marker.remove();
+        cleanupInline(tag);
+        return;
+      }
+      // Выделение через несколько абзацев: снимаем формат по блокам,
+      // иначе extractContents тащит div внутрь b/i и ломает разметку.
+      const startBlock = blockOf(range.startContainer);
+      const endBlock = blockOf(range.endContainer);
+      if (startBlock && endBlock && startBlock !== endBlock) {
+        const jobs = [];
+        Array.prototype.forEach.call(editor.children, function (block) {
+          if (!isBlockNode(block) || !range.intersectsNode(block)) return;
+          jobs.push(clippedRangeForBlock(range, block));
+        });
+        jobs.reverse().forEach(function (job) {
+          sel.removeAllRanges();
+          sel.addRange(job);
+          unwrapInlineSelection(tag);
+        });
+        cleanupInline(tag);
+        return;
+      }
+      // Разрезаем тег по краям выделения: тогда снятие формата работает
+      // и на части слова, а не только на всём теге целиком.
+      splitInlineAtBoundary(tag, range, true);
+      splitInlineAtBoundary(tag, range, false);
+      range = sel.getRangeAt(0);
+      // v174: если тег целиком входит в выделение, снимаем его ДО extractContents.
+      // Иначе диапазон остаётся внутри тега, и вставка возвращается внутрь него.
+      const owners = [];
+      const selectedText = range.toString().replace(/\u200b/g, '');
+      [range.startContainer, range.endContainer].forEach(function (node) {
+        let n = node;
+        while (n && n !== editor) {
+          if (n.nodeType === 1 && n.tagName.toLowerCase() === tag &&
+              n.textContent.replace(/\u200b/g, '') === selectedText &&
+              owners.indexOf(n) === -1) owners.push(n);
+          n = n.parentNode;
+        }
+      });
+      if (owners.length) {
+        // тег целиком в выделении: просто разворачиваем его, выделение
+        // переносим на те же узлы — иначе Range остаётся на удалённом теге
+        let first = null, last = null;
+        owners.forEach(function (n) {
+          if (!first) first = n.firstChild;
+          last = n.lastChild || last;
+          unwrapNode(n);
+        });
+        if (first && last && first.parentNode && last.parentNode) {
+          const r = document.createRange();
+          r.setStartBefore(first);
+          r.setEndAfter(last);
+          sel.removeAllRanges();
+          sel.addRange(r);
+        }
+        cleanupInline(tag);
+        return;
+      }
+      const frag = range.extractContents();
+      Array.prototype.slice.call(frag.querySelectorAll(tag)).forEach(unwrapNode);
+      const first = frag.firstChild;
+      const last = frag.lastChild;
+      range.insertNode(frag);
+      if (first && last) {
+        const r = document.createRange();
+        r.setStartBefore(first);
+        r.setEndAfter(last);
+        sel.removeAllRanges();
+        sel.addRange(r);
+      }
+      cleanupInline(tag);
+    }
+    function wrapInlineSelection(tag) {
+      const sel = window.getSelection();
+      if (!sel || !sel.rangeCount) return;
+      const range = sel.getRangeAt(0);
+      if (range.collapsed) {
+        const el = document.createElement(tag);
+        el.appendChild(document.createTextNode('\u200b'));
+        range.insertNode(el);
+        const r = document.createRange();
+        r.setStart(el.firstChild, 1);
+        r.collapse(true);
+        sel.removeAllRanges();
+        sel.addRange(r);
+        return;
+      }
+      const startBlock = blockOf(range.startContainer);
+      const endBlock = blockOf(range.endContainer);
+      if (startBlock && endBlock && startBlock !== endBlock) {
+        // по абзацам: каждый получает свой inline-тег, без <b><div>
+        const jobs = [];
+        Array.prototype.forEach.call(editor.children, function (block) {
+          if (!isBlockNode(block) || !range.intersectsNode(block)) return;
+          jobs.push(clippedRangeForBlock(range, block));
+        });
+        const els = [];
+        jobs.reverse().forEach(function (job) {
+          const el = wrapRange(tag, job);
+          if (el) els.push(el);
+        });
+        if (els.length) {
+          els.sort(function (a, b) {
+            return (a.compareDocumentPosition(b) & Node.DOCUMENT_POSITION_FOLLOWING) ? -1 : 1;
+          });
+          const r = document.createRange();
+          r.setStartBefore(els[0]);
+          r.setEndAfter(els[els.length - 1]);
+          sel.removeAllRanges();
+          sel.addRange(r);
+        }
+        return;
+      }
+      const el = wrapRange(tag, range);
+      if (el) {
+        const r = document.createRange();
+        r.selectNodeContents(el);
+        sel.removeAllRanges();
+        sel.addRange(r);
+      }
+    }
+    function toggleInlineTag(cmd) {
+      const tag = INLINE_TAGS[cmd];
+      if (!tag) return;
+      const sel = window.getSelection();
+      if (!sel || !sel.rangeCount) return;
+      const range = sel.getRangeAt(0);
+      // Курсор без выделения: не трогаем написанное, меняем только набор
+      // форматов для следующего ввода.
+      if (range.collapsed) {
+        const desired = caretFormats();
+        if (desired.has(tag)) desired.delete(tag);
+        else desired.add(tag);
+        applyTypingFormats(desired);
+        return;
+      }
+      if (formatActive(tag)) unwrapInlineSelection(tag);
+      else wrapInlineSelection(tag);
+    }
+    function insertTextAtCaret(text) {
+      if (!text) return;
+      const sel = window.getSelection();
+      if (!sel || !sel.rangeCount) return;
+      const range = normalizedCaret();
+      if (!range || !editor.contains(range.startContainer)) return;
+      if (!range.collapsed) range.deleteContents();
+      const node = document.createTextNode(text);
+      range.insertNode(node);
+      const r = document.createRange();
+      r.setStartAfter(node);
+      r.collapse(true);
+      sel.removeAllRanges();
+      sel.addRange(r);
+      cleanupCaretMarkers(null);
+      syncText();
+      saveRange();
+      updateToolbarState();
+    }
+    function taskBox() {
+      const box = document.createElement('span');
+      box.setAttribute('data-check', '1');
+      box.setAttribute('contenteditable', 'false');
+      return box;
+    }
+    function caretEnd(el) {
+      const r = document.createRange();
+      if (el.lastChild && el.lastChild.nodeName.toLowerCase() === 'br') r.setStart(el.lastChild, 0);
+      else { r.selectNodeContents(el); r.collapse(false); }
+      const sel = window.getSelection();
+      sel.removeAllRanges();
+      sel.addRange(r);
+    }
+    function isBlockNode(n) {
+      return n && n.nodeType === 1 && /^(DIV|P|H1|H2|H3|H4|UL|OL|LI|BLOCKQUOTE|PRE)$/.test(n.tagName);
+    }
+    function inlineLineRange() {
+      const sel = window.getSelection();
+      if (!sel || !sel.rangeCount) return null;
+      const caret = sel.getRangeAt(0);
+      let top = caret.startContainer;
+      if (top === editor) {
+        const nodes = editor.childNodes;
+        top = nodes[Math.min(caret.startOffset, nodes.length - 1)];
+      }
+      while (top && top.parentNode !== editor) top = top.parentNode;
+      if (!top || top.parentNode !== editor || isBlockNode(top)) return null;
+      let start = top;
+      let end = top;
+      const inline = function (n) { return n && !isBlockNode(n) && n.nodeName.toLowerCase() !== 'br'; };
+      while (inline(start.previousSibling)) start = start.previousSibling;
+      while (inline(end.nextSibling)) end = end.nextSibling;
+      const r = document.createRange();
+      r.setStartBefore(start);
+      r.setEndAfter(end);
+      return r;
+    }
+    function currentListItem() {
+      const sel = window.getSelection();
+      if (!sel || !sel.rangeCount) return null;
+      let n = sel.getRangeAt(0).startContainer;
+      while (n && n !== editor) {
+        if (n.nodeType === 1 && n.tagName.toLowerCase() === 'li') return n;
+        n = n.parentNode;
+      }
+      return null;
+    }
+    function exitListAfter(list, line) {
+      const div = line || document.createElement('div');
+      if (!div.firstChild) div.appendChild(document.createElement('br'));
+      list.parentNode.insertBefore(div, list.nextSibling);
+      if (!list.querySelector('li')) list.remove();
+      caretEnd(div);
+      syncText();
+    }
+    function listEnter(e) {
+      const li = currentListItem();
+      if (!li || li.hasAttribute('data-checked')) return;
+      if (li.textContent.replace(/\u200b/g, '').trim()) return;
+      e.preventDefault();
+      const list = li.parentNode;
+      li.remove();
+      exitListAfter(list);
+    }
+    function listBackspace() {
+      const li = currentListItem();
+      if (!li) return false;
+      if (li.textContent.replace(/\u200b/g, '').trim()) return false;
+      const list = li.parentNode;
+      const prev = li.previousElementSibling;
+      const next = li.nextElementSibling;
+      li.remove();
+      if (!list.querySelector('li')) {
+        exitListAfter(list);
+        return true;
+      }
+      if (prev) caretEnd(prev);
+      else if (next) {
+        const r = document.createRange();
+        r.setStart(next, next.childNodes.length);
+        r.collapse(true);
+        const sel = window.getSelection();
+        sel.removeAllRanges();
+        sel.addRange(r);
+      }
+      syncText();
+      return true;
+    }
+    function taskEnter(e) {
+      const sel = window.getSelection();
+      if (!sel || !sel.rangeCount) return;
+      const range = sel.getRangeAt(0);
+      let li = null;
+      let n = range.startContainer;
+      while (n && n !== editor) {
+        if (n.nodeType === 1 && n.tagName.toLowerCase() === 'li' && n.hasAttribute('data-checked')) { li = n; break; }
+        n = n.parentNode;
+      }
+      if (!li) return;
+      e.preventDefault();
+      // пустой пункт — выход из чек-листа на обычную строку
+      if (!li.textContent.replace(/\u200b/g, '').trim()) {
+        const list = li.parentNode;
+        const line = document.createElement('div');
+        line.appendChild(document.createElement('br'));
+        list.parentNode.insertBefore(line, list.nextSibling);
+        li.remove();
+        if (!list.querySelector('li')) list.remove();
+        const nr = document.createRange();
+        nr.setStart(line, 0);
+        nr.collapse(true);
+        sel.removeAllRanges();
+        sel.addRange(nr);
+        syncText();
+        return;
+      }
+      if (!range.collapsed) range.deleteContents();
+      // всё после курсора уходит в новый пункт, чекбокс остаётся в обоих
+      const after = range.cloneRange();
+      after.setEndAfter(li.lastChild || li);
+      const frag = after.extractContents();
+      const next = document.createElement('li');
+      next.setAttribute('data-checked', '0');
+      next.appendChild(taskBox());
+      if (frag.childNodes.length) next.appendChild(frag);
+      else next.appendChild(document.createElement('br'));
+      li.parentNode.insertBefore(next, li.nextSibling);
+      // курсор — в начале текста нового пункта (после чекбокса)
+      const nr = document.createRange();
+      if (next.childNodes.length > 1) nr.setStart(next.childNodes[1], 0);
+      else { nr.selectNodeContents(next); nr.collapse(false); }
+      sel.removeAllRanges();
+      sel.addRange(nr);
+      syncText();
+    }
+    function quoteEnter(e) {
+      const sel = window.getSelection();
+      if (!sel || !sel.rangeCount) return;
+      let n = sel.anchorNode;
+      let quote = null;
+      while (n && n !== editor) {
+        if (n.nodeType === 1 && n.tagName.toLowerCase() === 'blockquote') { quote = n; break; }
+        n = n.parentNode;
+      }
+      if (!quote) return;
+      const block = currentBlock();
+      if (block && block !== quote && block.textContent.replace(/\u200b/g, '').trim()) return;
+      if (block === quote && quote.textContent.replace(/\u200b/g, '').trim()) return;
+      e.preventDefault();
+      const line = document.createElement('div');
+      line.appendChild(document.createElement('br'));
+      quote.parentNode.insertBefore(line, quote.nextSibling);
+      if (block && block !== quote) block.remove();
+      if (!quote.textContent.replace(/\u200b/g, '').trim()) quote.remove();
+      const nr = document.createRange();
+      nr.setStart(line, 0);
+      nr.collapse(true);
+      sel.removeAllRanges();
+      sel.addRange(nr);
+      syncText();
+    }
+    function toggleTaskList() {
+      const sel = window.getSelection();
+      if (!sel || !sel.rangeCount) return;
+      const block = currentBlock();
+      const li = block && block.tagName.toLowerCase() === 'li' ? block : null;
+      const list = li && li.parentNode && li.parentNode.tagName.toLowerCase() === 'ul' ? li.parentNode : null;
+      if (list && list.getAttribute('data-task') === '1') {
+        // второй клик по «чекбоксу» возвращает обычные строки, а не вечный список
+        let caretLine = null;
+        let caretItem = null;
+        let n = sel.anchorNode;
+        while (n && n !== list) {
+          if (n.parentNode === list && n.tagName.toLowerCase() === 'li') { caretItem = n; break; }
+          n = n.parentNode;
+        }
+        Array.prototype.forEach.call(list.querySelectorAll(':scope > li'), function (item) {
+          const line = document.createElement('div');
+          let child;
+          while ((child = item.firstChild)) {
+            if (child.nodeType === 1 && child.hasAttribute('data-check')) { child.remove(); continue; }
+            line.appendChild(child);
+          }
+          if (!line.firstChild) line.appendChild(document.createElement('br'));
+          list.parentNode.insertBefore(line, list);
+          if (item === caretItem) caretLine = line;
+        });
+        list.remove();
+        if (caretLine) caretEnd(caretLine);
+        syncText();
+        return;
+      }
+      if (list) {
+        list.setAttribute('data-task', '1');
+        Array.prototype.forEach.call(list.children, function (item) {
+          if ((item.tagName || '').toLowerCase() !== 'li') return;
+          if (!item.getAttribute('data-checked')) item.setAttribute('data-checked', '0');
+          if (!item.querySelector(':scope > [data-check]')) item.insertBefore(taskBox(), item.firstChild);
+          if (!item.textContent.trim() && !item.querySelector('br')) item.appendChild(document.createElement('br'));
+        });
+        syncText();
+        return;
+      }
+      if (!block || block === editor) {
+        const line = inlineLineRange();
+        if (line) {
+          const frag = line.extractContents();
+          const ul = document.createElement('ul');
+          ul.setAttribute('data-task', '1');
+          const item = document.createElement('li');
+          item.setAttribute('data-checked', '0');
+          item.appendChild(taskBox());
+          item.appendChild(frag);
+          ul.appendChild(item);
+          line.insertNode(ul);
+          caretEnd(item);
+        } else {
+          document.execCommand('insertHTML', false,
+            '<ul data-task="1"><li data-checked="0"><span data-check="1" contenteditable="false"></span><br></li></ul>');
+          const added = closestAncestor('li');
+          if (added) caretEnd(added);
+        }
+        syncText();
+        return;
+      }
+      // Обычный абзац/заголовок становится одним пунктом чек-листа.
+      const ul = document.createElement('ul');
+      ul.setAttribute('data-task', '1');
+      const item = document.createElement('li');
+      item.setAttribute('data-checked', '0');
+      item.appendChild(taskBox());
+      while (block.firstChild) item.appendChild(block.firstChild);
+      if (!item.textContent.trim() && !item.querySelector('br')) item.appendChild(document.createElement('br'));
+      ul.appendChild(item);
+      block.replaceWith(ul);
+      caretEnd(item);
+      syncText();
+    }
+    function openListMenu(anchor) {
+      saveRange();
+      const menu = document.createElement('div');
+      menu.className = 'ctxmenu note-list-menu';
+      menu.innerHTML =
+        '<button type="button" data-list="ul">• ' + esc(App.t('noteTbBullets')) + '</button>' +
+        '<button type="button" data-list="ol">1. ' + esc(App.t('noteTbNumbers')) + '</button>';
+      menu.addEventListener('click', function (e) {
+        const b = e.target.closest('button[data-list]');
+        if (!b) return;
+        closeMountedMenu();
+        applyCommand(b.dataset.list === 'ul' ? 'insertUnorderedList' : 'insertOrderedList');
+      });
+      mountMenu(menu, anchor, { align: 'left' });
+    }
+    function openLinkModal() {
+      saveRange();
+      const linkRange = savedRange ? savedRange.cloneRange() : null;
+      const linkText = linkRange ? linkRange.toString() : '';
+      openModal(App.t('noteTbLink'),
+        '<div class="field"><label>' + esc(App.t('noteLinkUrl')) + '</label>' +
+          '<input id="note-link-url" type="text" inputmode="url" placeholder="https://" autocomplete="off" spellcheck="false"></div>',
+        [{ label: App.t('cancel') }, { label: App.t('save'), cls: 'primary', onClick: function () {
+          const inp = document.getElementById('note-link-url');
+          const url = inp ? inp.value.trim() : '';
+          if (!/^(https?:|mailto:)/i.test(url)) return false;
+          editor.focus();
+          flushTyping();
+          const before = editor.innerHTML;
+          if (linkRange && !linkRange.collapsed) {
+            const a = document.createElement('a');
+            a.setAttribute('href', url);
+            a.setAttribute('target', '_blank');
+            a.setAttribute('rel', 'noopener noreferrer');
+            try {
+              a.appendChild(linkRange.extractContents());
+              linkRange.insertNode(a);
+            } catch (e) {
+              document.execCommand('insertHTML', false, '<a href="' + esc(url) + '">' + esc(linkText || url) + '</a>');
+            }
+          } else {
+            const a = document.createElement('a');
+            a.setAttribute('href', url);
+            a.setAttribute('target', '_blank');
+            a.setAttribute('rel', 'noopener noreferrer');
+            a.textContent = url;
+            if (linkRange) linkRange.insertNode(a);
+            else document.execCommand('insertHTML', false, '<a href="' + esc(url) + '">' + esc(url) + '</a>');
+          }
+          remember(before);
+          saveRange();
+          syncText();
+          return true;
+        } }]);
+      const inp = document.getElementById('note-link-url');
+      if (inp) inp.focus();
+    }
+    function updateToolbarState() {
+      if (!headingSel) return;
+      const sel = window.getSelection();
+      let node = sel && sel.anchorNode;
+      const inTag = function (tag) {
+        let n = node;
+        while (n && n !== editor) {
+          if (n.nodeType === 1 && n.tagName.toLowerCase() === tag) return true;
+          n = n.parentNode;
+        }
+        return false;
+      };
+      const inTask = (function () {
+        let n = node;
+        while (n && n !== editor) {
+          if (n.nodeType === 1 && n.tagName.toLowerCase() === 'ul' && n.getAttribute('data-task') === '1') return true;
+          n = n.parentNode;
+        }
+        return false;
+      })();
+      const block = currentBlock();
+      const tag = block ? block.tagName.toLowerCase() : '';
+      headingSel.value = /^h[1-4]$/.test(tag) ? tag : 'p';
+      const state = {
+        bold: false, italic: false, underline: false, strikeThrough: false,
+        highlight: inTag('mark'), list: (inTag('ul') || inTag('ol')) && !inTask,
+        checkbox: inTask, quote: inTag('blockquote'), link: inTag('a')
+      };
+      // Состояние по DOM: якорь ввода уже содержит ровно те теги, которые
+      // выбраны; queryCommandState здесь не нужен и врёт после ручных вставок.
+      state.bold = formatActive('b') || formatActive('strong');
+      state.italic = formatActive('i') || formatActive('em');
+      state.underline = formatActive('u');
+      state.strikeThrough = formatActive('s') || formatActive('strike') || formatActive('del');
+      state.highlight = formatActive('mark');
+      toolbar.querySelectorAll('button[data-cmd]').forEach(function (b) {
+        const cmd = b.dataset.cmd;
+        const on = !!state[cmd];
+        b.classList.toggle('on', on);
+        if (cmd !== 'undo' && cmd !== 'redo' && cmd !== 'clear') b.setAttribute('aria-pressed', on ? 'true' : 'false');
+      });
+    }
+    function clearFormatting() {
+      const sel = window.getSelection();
+      if (!sel || !sel.rangeCount) return;
+      const range = sel.getRangeAt(0);
+      // removeFormat не убирает наши mark/code/a и иногда b/i — снимаем сами
+      const nodes = Array.prototype.slice.call(
+        editor.querySelectorAll('b,strong,i,em,u,s,strike,del,mark,code,a')
+      ).filter(function (n) { return range.intersectsNode(n); });
+      nodes.forEach(unwrapNode);
+      // Цитата может быть внешним блоком, а currentBlock внутри неё видит div.
+      // Поэтому снимаем blockquote/заголовки по всем пересечённым блокам.
+      const sel2 = window.getSelection();
+      const range2 = sel2 && sel2.rangeCount ? sel2.getRangeAt(0) : null;
+      let lastLine = null;
+      if (range2) {
+        const blocks = Array.prototype.slice.call(
+          editor.querySelectorAll('blockquote,h1,h2,h3,h4,pre')
+        ).filter(function (n) {
+          return range2.intersectsNode(n) || (range2.collapsed && n.contains(range2.startContainer));
+        });
+        blocks.forEach(function (n) {
+          // цитата вокруг одного div — просто вынимаем div, без div-в-div
+          if (n.children.length === 1 && n.firstElementChild &&
+              n.firstElementChild.tagName.toLowerCase() === 'div' &&
+              !String(n.firstChild && n.firstChild.nodeValue || '').trim()) {
+            const inner = n.firstElementChild;
+            n.replaceWith(inner);
+            lastLine = inner;
+            return;
+          }
+          const line = document.createElement('div');
+          while (n.firstChild) line.appendChild(n.firstChild);
+          if (!line.firstChild) line.appendChild(document.createElement('br'));
+          n.replaceWith(line);
+          lastLine = line;
+        });
+      }
+      if (lastLine) {
+        const r = document.createRange();
+        r.selectNodeContents(lastLine);
+        r.collapse(false);
+        sel2.removeAllRanges();
+        sel2.addRange(r);
+      }
+      document.execCommand('removeFormat');
+      saveRange();
+      syncText();
+    }
+    function applyCommand(cmd, val) {
+      if (cmd === 'undo') { undoEditor(); return; }
+      if (cmd === 'redo') { redoEditor(); return; }
+      editor.focus();
+      restoreRange();
+      flushTyping();
+      const before = editor.innerHTML;
+      if (INLINE_TAGS[cmd]) {
+        toggleInlineTag(cmd);
+      } else if (cmd === 'insertUnorderedList' || cmd === 'insertOrderedList') {
+        savedRange = null;
+        document.execCommand(cmd);
+      } else if (cmd === 'heading') {
+        savedRange = null;
+        document.execCommand('formatBlock', false, val || 'p');
+      } else if (cmd === 'quote') {
+        savedRange = null;
+        toggleBlock('blockquote');
+      } else if (cmd === 'checkbox') {
+        savedRange = null;
+        toggleTaskList();
+      } else if (cmd === 'link') { openLinkModal(); return; }
+      else if (cmd === 'clear') clearFormatting();
+      remember(before);
+      saveRange();
+      syncText();
+      updateToolbarState();
+    }
+    function tbBtn(cmd, label, html) {
+      return '<button type="button" class="note-tb" data-cmd="' + cmd + '" title="' + esc(label) +
+        '" aria-label="' + esc(label) + '">' + html + '</button>';
+    }
+    function buildToolbar() {
+      // теги вместо inline-стилей: sanitizeNoteHtml оставляет b/i/u/s/mark,
+      // а style-атрибуты вырезает
+      try { document.execCommand('styleWithCSS', false, false); } catch (e) {}
+      const sep = '<span class="note-tb-sep" aria-hidden="true"></span>';
+      toolbar.innerHTML =
+        tbBtn('undo', App.t('noteTbUndo'), '↶') +
+        tbBtn('redo', App.t('noteTbRedo'), '↷') + sep +
+        tbBtn('bold', App.t('noteTbBold'), '<b>B</b>') +
+        tbBtn('italic', App.t('noteTbItalic'), '<i>I</i>') +
+        tbBtn('underline', App.t('noteTbUnderline'), '<u>U</u>') +
+        tbBtn('strikeThrough', App.t('noteTbStrike'), '<s>S</s>') +
+        tbBtn('highlight', App.t('noteTbHighlight'), '<span class="note-tb-mark">A</span>') + sep +
+        '<select class="note-tb-select" data-cmd="heading" title="' + esc(App.t('noteTbHeading')) +
+          '" aria-label="' + esc(App.t('noteTbHeading')) + '">' +
+          '<option value="p">' + esc(App.t('noteTbText')) + '</option>' +
+          '<option value="h1">H1</option><option value="h2">H2</option><option value="h3">H3</option>' +
+        '</select>' +
+        tbBtn('list', App.t('noteTbList'), NOTE_LIST_SVG + '<span class="note-tb-caret">▾</span>') +
+        tbBtn('checkbox', App.t('noteTbCheck'), '<span class="note-tb-check">✓</span>') + sep +
+        tbBtn('quote', App.t('noteTbQuote'), '❝') +
+        tbBtn('link', App.t('noteTbLink'), NOTE_LINK_SVG) +
+        tbBtn('clear', App.t('noteTbClear'), '<span class="note-tb-clear">Tx</span>');
+      headingSel = toolbar.querySelector('.note-tb-select');
+      // клик по кнопке не должен уводить курсор из редактора
+      toolbar.addEventListener('pointerdown', function () {
+        toolbarPointer = true;
+        saveRange();
+      }, true);
+      toolbar.addEventListener('click', function (e) {
+        const btn = e.target.closest('button[data-cmd]');
+        if (!btn) return;
+        if (btn.dataset.cmd === 'list') { openListMenu(btn); return; }
+        applyCommand(btn.dataset.cmd);
+      });
+      if (headingSel) headingSel.addEventListener('change', function () { applyCommand('heading', headingSel.value); });
+      updateToolbarState();
     }
 
     function cardTabs() {
@@ -6718,7 +8888,7 @@ window.App = window.App || {};
           e.stopPropagation();
           if (e.target.tagName === 'INPUT') return;
           if (p.id === card.pageId) { setRailOpen(!railOpen); return; }
-          flushText(true);
+          flushText();
           card.pageId = p.id;
           save();
           render();
@@ -6753,17 +8923,118 @@ window.App = window.App || {};
     }
 
     function renderText() {
-      const p = curPage();
-      ta.value = p ? (p.text || '') : '';
+      editor.innerHTML = notePageHtml(curPage());
+      savedRange = null;
+      resetHistory();
     }
 
     function renderAll() {
       renderTabs();
       renderText();
+      updateToolbarState();
     }
 
+    const onToolbarUp = function () { toolbarPointer = false; };
+    window.addEventListener('pointerup', onToolbarUp, true);
+    window.addEventListener('pointercancel', onToolbarUp, true);
+    const onSelectionChange = function () {
+      if (toolbarPointer) return;   // кнопка тулбара не должна затирать выделение
+      if (document.activeElement === editor) { saveRange(); updateToolbarState(); }
+    };
+    document.addEventListener('selectionchange', onSelectionChange);
+    editor.addEventListener('beforeinput', function (e) {
+      // Ввод символов делаем сами: иначе Chrome подставляет своё «текущее»
+      // состояние (после сброса HTML оно может остаться жирным), и текст
+      // расходится с кнопками. Набор форматов берём из DOM и якоря.
+      if (!e.isComposing && (e.inputType === 'insertText' || e.inputType === 'insertReplacementText') && typeof e.data === 'string' && e.data) {
+        e.preventDefault();
+        beginTyping();
+        insertTextAtCaret(e.data);
+        return;
+      }
+      beginTyping();
+    });
+    editor.addEventListener('input', function () {
+      // как только в якоре появился первый символ, убираем обёртку-якорь:
+      // дальше текст живёт в обычных тегах формата
+      cleanupCaretMarkers(null);
+      syncText();
+      saveRange();
+      updateToolbarState();
+    });
+    editor.addEventListener('blur', saveNow);
+    editor.addEventListener('keydown', function (e) {
+      if ((e.ctrlKey || e.metaKey) && !e.altKey) {
+        if (e.code === 'KeyZ' || e.code === 'KeyY') {
+          e.preventDefault();
+          if (e.code === 'KeyY' || (e.code === 'KeyZ' && e.shiftKey)) redoEditor();
+          else undoEditor();
+          return;
+        }
+        if (e.code === 'KeyB' || e.code === 'KeyI' || e.code === 'KeyU') {
+          e.preventDefault();
+          applyCommand(e.code === 'KeyB' ? 'bold' : e.code === 'KeyI' ? 'italic' : 'underline');
+          return;
+        }
+      }
+      if (e.key === 'Backspace' && !e.isComposing) {
+        if (listBackspace()) { e.preventDefault(); return; }
+      }
+      if (e.key === 'Enter' && !e.shiftKey) {
+        flushTyping();
+        const before = editor.innerHTML;
+        const selNow = window.getSelection();
+        const enterFormats = !e.isComposing && selNow && selNow.rangeCount &&
+          selNow.getRangeAt(0).collapsed ? caretFormats() : null;
+        taskEnter(e);
+        if (!e.defaultPrevented) listEnter(e);
+        if (!e.defaultPrevented) quoteEnter(e);
+        if (e.defaultPrevented) remember(before);
+        // новая строка наследует выбранный формат: после Enter браузер
+        // создаёт новый блок, туда переносим якорь форматов
+        if (enterFormats) setTimeout(function () { applyTypingFormats(enterFormats); }, 0);
+        return;
+      }
+      if (e.key === 'Enter' && e.shiftKey) {
+        const selNow = window.getSelection();
+        const lineFormats = !e.isComposing && selNow && selNow.rangeCount &&
+          selNow.getRangeAt(0).collapsed ? caretFormats() : null;
+        if (lineFormats) setTimeout(function () { applyTypingFormats(lineFormats); }, 0);
+      }
+    });
+    editor.addEventListener('keyup', function () { saveRange(); updateToolbarState(); });
+    editor.addEventListener('mouseup', function () { saveRange(); updateToolbarState(); });
+    editor.addEventListener('focus', saveRange);
+    editor.addEventListener('drop', function (e) { e.preventDefault(); });
+    editor.addEventListener('paste', function (e) {
+      e.preventDefault();
+      const txt = (e.clipboardData || window.clipboardData).getData('text/plain');
+      if (!txt) return;
+      flushTyping();
+      const before = editor.innerHTML;
+      document.execCommand('insertText', false, txt);
+      remember(before);
+      syncText();
+    });
+    // Чекбокс — наш span, а не нативный input: клик переключает data-checked.
+    editor.addEventListener('click', function (e) {
+      const link = e.target.closest('a');
+      if (link) e.preventDefault();
+      const box = e.target.closest('[data-check]');
+      if (!box) return;
+      e.preventDefault();
+      const li = box.closest('li[data-checked]');
+      if (!li) return;
+      const before = editor.innerHTML;
+      li.setAttribute('data-checked', li.getAttribute('data-checked') === '1' ? '0' : '1');
+      remember(before);
+      syncText();
+    });
+    buildToolbar();
+
     function addPage() {
-      flushText(true);
+      flushText();
+      noteEditFinish(card);
       const id = uid();
       mutate(function () {
         card.pages.push({
@@ -6784,7 +9055,8 @@ window.App = window.App || {};
       if (!p || pages().length <= 1) return;
       const name = notePageTitle(p);
       confirmDialog(App.tf('confirmDeletePage', { name: name }), function () {
-        flushText(true);
+        flushText();
+        noteEditFinish(card);
         mutate(function () {
           const list = pages();
           const idx = list.findIndex(function (x) { return x.id === p.id; });
@@ -6920,7 +9192,14 @@ window.App = window.App || {};
 
     renderAll();
     // закрытие/редактор сначала сохраняют несохранённый текст текущей страницы
-    panel._noteFlush = function () { flushText(true); };
+    panel._noteRefresh = function () { renderAll(); };
+    panel._noteFlush = function () {
+      document.removeEventListener('selectionchange', onSelectionChange);
+      window.removeEventListener('pointerup', onToolbarUp, true);
+      window.removeEventListener('pointercancel', onToolbarUp, true);
+      flushText();
+      noteEditFinish(card);
+    };
     return panel;
   }
 
@@ -6966,10 +9245,7 @@ window.App = window.App || {};
     if (card.type === 'note') {
       const ov = document.getElementById('labelLayer');
       const panel = ov.querySelector('.note-pages-panel');
-      if (panel) {
-        const nameEl = panel.querySelector('.layer-head .card-name');
-        if (nameEl) nameEl.textContent = card.name;
-      }
+      if (panel && panel._noteRefresh) panel._noteRefresh();
       return;
     }
     // v65: слой состояния перестраиваем целиком — список и кнопки зависят от данных
@@ -7002,6 +9278,9 @@ window.App = window.App || {};
     ov.innerHTML = '';
     ov.removeAttribute('aria-label');
     updateScrollLock();
+    // v170: заметка правится в слое без render на каждый ввод — после закрытия
+    // обновляем карточку, иначе её предпросмотр остаётся старым.
+    if (closedCardId) render();
     // v126: фокус возвращается на язычок ярлыка, который открыл слой
     if (closedCardId) {
       const el = document.querySelector('.card[data-id="' + closedCardId + '"] .fold-tab');
@@ -8010,7 +10289,8 @@ window.App = window.App || {};
   function openAddMenu() {
     const ch = activeChar();
     if (!ch) return;
-    const presets = [
+    const role = roleOf(ch);
+    const presets = isMaster(ch) ? [] : [
       { type: 'counter', name: App.t('presetHealth'), extra: { current: 10, max: 10, restores: true } },
       { type: 'counter', name: App.t('presetMana'), extra: { current: 5, max: 5, restores: true } },
       { type: 'counter', name: App.t('presetArmor'), extra: { current: 10, max: null } },
@@ -8018,15 +10298,20 @@ window.App = window.App || {};
       { type: 'skill', name: App.t('presetSkill'), extra: { die: 20, bonus: '' } },
       { type: 'skill', name: App.t('presetStat'), extra: { value: 10, die: 20 } }
     ];
-    const presetBtns = presets.map(function (p) {
+    const presetBtns = presets.filter(function (p) {
+      return can('cards:' + p.type, ch);
+    }).map(function (p) {
       return '<button type="button" class="add-preset" data-type="' + p.type + '" data-name="' + esc(p.name) + '" data-extra="' + esc(JSON.stringify(p.extra)) + '">' + esc(p.name) + '</button>';
     }).join('');
-    const typeBtns = CARD_TYPES.map(function (tp) {
+    const typeBtns = menuTypes(role).map(function (tp) {
       return '<button type="button" class="add-type" data-type="' + tp + '">' + esc(typeLabel(tp)) + '</button>';
     }).join('');
+    const presetField = presetBtns
+      ? '<div class="field"><label>' + esc(App.t('presets')) + '</label><div class="btn-grid">' + presetBtns + '</div></div>'
+      : '';
 
     openModal(App.t('addCard'),
-      '<div class="field"><label>' + esc(App.t('presets')) + '</label><div class="btn-grid">' + presetBtns + '</div></div>' +
+      presetField +
       '<div class="field"><label>' + esc(App.t('customTypes')) + '</label><div class="btn-grid">' + typeBtns + '</div></div>',
       [{ label: App.t('cancel') }]
     );
@@ -8043,6 +10328,15 @@ window.App = window.App || {};
   function addCardFromMenu(type, name, extra) {
     const ch = activeChar();
     if (!ch) { closeModal(); return; }
+    if (isMaster(ch) && type === 'initiative') {
+      const ex = ch.cards.find(function (c) { return c.type === 'initiative'; });
+      if (ex) {
+        closeModal();
+        toast(App.t('iniAlready'));
+        openCardEditor(ex.id);
+        return;
+      }
+    }
     let newId = null;
     mutate(function () {
       let nm = name || defaultCardName(type);
@@ -9276,7 +11570,13 @@ window.App = window.App || {};
     const ch = activeChar();
     const lang = state.settings.language;
     const charOpts = state.characters.map(function (c) {
-      return '<option value="' + c.id + '"' + (c.id === state.activeCharacterId ? ' selected' : '') + '>' + esc(c.name) + '</option>';
+      const dupRole = isMaster(c) && c.name.trim().toLowerCase() === App.t('masterBadge').toLowerCase();
+      return '<option value="' + c.id + '"' + (c.id === state.activeCharacterId ? ' selected' : '') + '>' + esc(c.name) + (isMaster(c) && !dupRole ? ' · ' + esc(App.t('masterBadge')) : '') + '</option>';
+    }).join('');
+    const masters = masterSheets();
+    const activeMasterId = (ch && isMaster(ch)) ? ch.id : (state.lastMasterId || (masters[0] && masters[0].id) || '');
+    const masterOpts = masters.map(function (c) {
+      return '<option value="' + c.id + '"' + (c.id === activeMasterId ? ' selected' : '') + '>' + esc(c.name) + '</option>';
     }).join('');
     const setOpts = function (kind) {
       return libSets(kind).map(function (s) {
@@ -9313,6 +11613,17 @@ window.App = window.App || {};
           (ch ? '<button type="button" id="s-renchar">✎ ' + esc(App.t('renameCharacter')) + '</button>' : '') +
           (ch ? '<button type="button" class="danger" id="s-delchar">' + esc(App.t('deleteCharacter')) + '</button>' : '') +
         '</div></div>' +
+        '<div class="field"><label>' + esc(App.t('masterMode')) + '</label>' +
+          (masters.length
+            ? '<select id="s-master">' + masterOpts + '</select>'
+            : '<div class="formula-help">' + esc(App.t('masterNoSheet')) + '</div>') +
+          '<div class="f-buttons">' +
+            (masters.length ? '<button type="button" id="s-openmaster">' + esc(App.t('masterOpen')) + '</button>' : '') +
+            '<button type="button" id="s-newmaster">+ ' + esc(App.t('masterCreate')) + '</button>' +
+            (ch && isMaster(ch) ? '<button type="button" id="s-leavemaster">' + esc(App.t('masterLeave')) + '</button>' : '') +
+          '</div>' +
+          '<div class="formula-help">' + esc(App.t('masterHint')) + '</div>' +
+        '</div>' +
       '</div>';
 
     const dataPanel =
@@ -9362,6 +11673,21 @@ window.App = window.App || {};
     document.getElementById('s-newchar').addEventListener('click', function () {
       closeModal();
       openNewCharModal();
+    });
+    document.getElementById('s-newmaster').addEventListener('click', function () {
+      closeModal();
+      openNewCharModal('master');
+    });
+    const openMasterBtn = document.getElementById('s-openmaster');
+    if (openMasterBtn) openMasterBtn.addEventListener('click', function () {
+      const sel = document.getElementById('s-master');
+      closeModal();
+      switchToMaster(sel ? sel.value : null);
+    });
+    const leaveMasterBtn = document.getElementById('s-leavemaster');
+    if (leaveMasterBtn) leaveMasterBtn.addEventListener('click', function () {
+      closeModal();
+      leaveMasterMode();
     });
     if (ch) document.getElementById('s-delchar').addEventListener('click', function () {
       closeModal();
@@ -9712,15 +12038,17 @@ window.App = window.App || {};
     if (inp) { inp.focus(); inp.select(); }
   }
 
-  function openNewCharModal() {
-    openModal(App.t('newCharacter'),
-      '<div class="field"><label>' + esc(App.t('charName')) + '</label><input id="charNameInput" type="text" value="' + esc(App.t('newCharName')) + '" placeholder="' + esc(App.t('newCharName')) + '"></div>',
+  function openNewCharModal(role) {
+    const isM = role === 'master';
+    const defName = isM ? App.t('masterDefaultName') : App.t('newCharName');
+    openModal(isM ? App.t('masterCreate') : App.t('newCharacter'),
+      '<div class="field"><label>' + esc(isM ? App.t('masterName') : App.t('charName')) + '</label><input id="charNameInput" type="text" value="' + esc(defName) + '" placeholder="' + esc(defName) + '"></div>',
       [
         { label: App.t('cancel') },
         { label: App.t('save'), cls: 'primary', onClick: function () {
             const inp = document.getElementById('charNameInput');
-            const name = inp.value.trim() || App.t('newCharName');
-            mutate(function () { newCharacter(name); });
+            const name = inp.value.trim() || defName;
+            mutate(function () { if (isM) newMasterCharacter(name); else newCharacter(name); });
           } }
       ]
     );
@@ -9731,9 +12059,21 @@ window.App = window.App || {};
   function deleteActiveCharacter() {
     const ch = activeChar();
     if (!ch) return;
+    const wasMaster = isMaster(ch);
     mutate(function () {
       state.characters = state.characters.filter(function (c) { return c.id !== ch.id; });
-      if (state.activeCharacterId === ch.id) state.activeCharacterId = state.characters.length ? state.characters[0].id : null;
+      if (state.lastMasterId === ch.id) state.lastMasterId = null;
+      if (state.lastPlayerId === ch.id) state.lastPlayerId = null;
+      if (state.activeCharacterId === ch.id) {
+        // из мастерского листа возвращаемся к игроку, а не к случайному листу
+        const fallback = wasMaster
+          ? (state.characters.find(function (c) { return c.id === state.lastPlayerId && !isMaster(c); }) ||
+             state.characters.find(function (c) { return !isMaster(c); }))
+          : state.characters[0];
+        state.activeCharacterId = fallback ? fallback.id : null;
+        if (fallback && !isMaster(fallback)) state.lastPlayerId = fallback.id;
+        if (fallback && isMaster(fallback)) state.lastMasterId = fallback.id;
+      }
     });
     toast(App.t('charDeleted'));
   }
@@ -9819,7 +12159,7 @@ window.App = window.App || {};
   // Кидает ошибку для кривого файла.
   function normalizeImport(src) {
     if (!src || typeof src !== 'object' || !Array.isArray(src.cards)) throw new Error('bad');
-    const ch = { id: uid(), name: String(src.name || App.t('newCharName')), pages: [], cards: [] };
+    const ch = { id: uid(), name: String(src.name || App.t('newCharName')), role: src.role === 'master' ? 'master' : 'player', pages: [], cards: [] };
     if (src.packs && typeof src.packs === 'object') ch.packs = src.packs;
     if (src.itemSets) ch.itemSets = src.itemSets;
     if (Array.isArray(src.pages)) {
@@ -10192,11 +12532,84 @@ window.App = window.App || {};
   // Версия приложения для окна обновлений. При выпуске новой версии подними
   // APP_VERSION, добавь запись в NEWS (только новые пункты) и не забудь
   // style.css?v= в index.html и CACHE_NAME в sw.js.
-  const APP_VERSION = 163;
+  const APP_VERSION = 178;
   const NEWS_SEEN_KEY = 'custplay-news-seen';   // отдельно от state: не попадает в undo и экспорт
   const NEWS = {
     // 140–141 — хотфиксы, 142–145 — заметки со страницами, 146 — режим максимума,
     // 147 — полоса закладок заметки, 148–151 — состояния, 152 — щит баффов.
+    178: { ru: [], en: [] },
+    177: { ru: [], en: [] },
+    176: { ru: [], en: [] },
+    175: { ru: [], en: [] },
+    174: { ru: [], en: [] },
+    173: {
+      ru: ['Чекбоксы: курсор в пустом пункте стоит в колонке текста, а не под боксом.'],
+      en: ['Checkboxes: the caret in an empty item sits in the text column, not under the box.']
+    },
+    172: {
+      ru: [
+        'Заметки: активные инструменты подсвечиваются, выделение не слетает.',
+        'Чекбоксы контрастнее; курсор после них стоит на месте.',
+        'Очистка формата убирает выделение, цитата завершается пустым Enter.',
+        'Вкладки заметки больше не показывают HTML как текст.'
+      ],
+      en: [
+        'Notes: active tools are highlighted and selection is preserved.',
+        'Checkboxes are more visible and the caret stays in place.',
+        'Clear formatting removes marks; an empty Enter exits a quote.',
+        'Note tabs no longer show HTML as plain text.'
+      ]
+    },
+    171: {
+      ru: [
+        'Заметки: маркированный и нумерованный списки — в одном меню.',
+        'Чекбоксы создаются по одному, Enter добавляет следующий пункт.',
+        'Убраны подсветка текста жёлтым при наведении и фиолетовая рамка редактора.'
+      ],
+      en: [
+        'Notes: bulleted and numbered lists share one menu.',
+        'Checkboxes are created one at a time; Enter adds the next item.',
+        'Removed the yellow hover tint and the purple editor frame.'
+      ]
+    },
+    170: {
+      ru: [
+        'Заметки: редактор во втором слое и панель форматирования на всю ширину.',
+        'Карточка показывает оформленный текст; имя и три кнопки из шапки слоя убраны.',
+        'Спойлер мастера — перечёркнутый глаз: имя и текст скрыты до нажатия.'
+      ],
+      en: [
+        'Notes: the editor is in the second layer, with a full-width formatting toolbar.',
+        'The card shows formatted text; the name and three layer-header buttons are gone.',
+        'The GM spoiler is a crossed-out eye: name and text stay hidden until tapped.'
+      ]
+    },
+    167: {
+      ru: [
+        'Раскрытый боец приподнят и отделён от остальных строк.',
+        'Шаг HP работает как у счётчика: «−» и «+» берут введённое число до клика мимо карточки.'
+      ],
+      en: [
+        'An expanded combatant is raised and separated from other rows.',
+        'The HP step works like the counter: − and + use the typed number until you click outside the card.'
+      ]
+    },
+    166: {
+      ru: [
+        'Мастерский бой: одна инициатива с вкладками встреч.',
+        'Враги строками: HP на полосе, КД, атаки, копии и «из другой встречи».',
+        'Долгое нажатие на вкладку — переименовать, спойлер или удалить.',
+        'Спойлер скрывает встречу до нажатия.'
+      ],
+      en: [
+        'GM combat: one initiative with encounter tabs.',
+        'Enemies as rows: HP on the bar, AC, attacks, copies and “from another encounter”.',
+        'Long-press a tab to rename, spoiler or delete it.',
+        'A spoiler hides the encounter until tapped.'
+      ]
+    },
+    165: { ru: [], en: [] },
+    164: { ru: [], en: [] },
     163: { ru: [], en: [] },
     162: { ru: [], en: [] },
     161: {
@@ -10355,6 +12768,7 @@ window.App = window.App || {};
       if (e.key === 'Escape') {
         // v40: Esc ещё и сбрасывает шаг счётчика
         clearCounterSteps();
+        iniClearRowSteps();
         // редактор — ТРЕТИЙ слой ПОВЕРХ слоя ярлыка: Esc сначала закрывает модалку,
         // иначе открытие редактора из слоя «съедало» бы слой первым Esc
         if (!document.getElementById('modal').classList.contains('hidden')) closeModal();
@@ -10366,6 +12780,7 @@ window.App = window.App || {};
     document.addEventListener('pointerdown', function (e) {
       if (e.target && e.target.closest && e.target.closest('.card')) return;
       clearCounterSteps();
+      iniClearRowSteps();
     }, true);
     // v147: раскрытая полоса закладок заметки закрывается тапом мимо неё —
     // на мыши это делает pointerleave, а на телефоне наведения нет
