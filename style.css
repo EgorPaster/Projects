@@ -826,7 +826,35 @@ body.col-dragging .card { cursor: grabbing; }
 .note-spoiler:hover { color: var(--text); background: var(--panel2); }
 .note-expand svg,
 .note-spoiler svg { width: 14px; height: 14px; display: block; }
-.note-spoiler.on { color: var(--accent2); }
+/* v190: тело спойлера — большая пунктирная зона, нажимается вся */
+.card-spoiler {
+  flex: 1 1 auto; min-height: 0; padding: 8px;
+  display: flex;
+}
+.spoiler-reveal {
+  flex: 1 1 auto; width: 100%; min-height: 42px;
+  display: flex; align-items: center; justify-content: center; gap: 8px;
+  padding: 8px;
+  border: 1px dashed rgba(255, 255, 255, .18);
+  border-radius: var(--radius-sm);
+  background: transparent; color: var(--text-soft); font: inherit;
+  text-align: center; cursor: pointer;
+  transition: background .12s ease, border-color .12s ease, color .12s ease;
+}
+.spoiler-reveal:hover {
+  border-color: rgba(var(--gold-rgb), .55);
+  background: rgba(var(--gold-rgb), .06);
+  color: var(--text);
+}
+.spoiler-reveal svg { width: 22px; height: 22px; flex: none; color: var(--accent2); }
+.spoiler-text { font-size: 13px; }
+.skill-grid .card-spoiler { padding: 0; }
+.skill-grid .spoiler-reveal { min-height: 0; gap: 6px; padding: 3px 6px; }
+.skill-grid .spoiler-reveal svg { width: 18px; height: 18px; }
+.skill-grid .spoiler-text { font-size: 11px; }
+#topbar .icon svg { width: 18px; height: 18px; display: block; margin: 0 auto; }
+.ctxmenu .menu-ic { display: inline-flex; vertical-align: -2px; margin-right: 4px; }
+.ctxmenu .menu-ic svg { width: 14px; height: 14px; }
 .note-spoiler-body { min-height: 64px; justify-content: center; padding-right: 0 !important; }
 .note-reveal {
   display: flex; align-items: center; justify-content: center; gap: 8px;
@@ -2089,8 +2117,22 @@ body.col-dragging .card { cursor: grabbing; }
   max-height: none;
   padding: 0;
   position: relative;
+  transition: transform .18s ease, opacity .18s ease;
 }
 .note-pages-panel:focus { outline: none; }
+/* v181: ручка закрытия — тап закрывает, свайп вниз убирает панель */
+.note-grab {
+  flex: 0 0 auto; display: flex; align-items: center; justify-content: center;
+  width: 100%; height: 16px; margin: 0; padding: 0;
+  border: 0; background: transparent; cursor: grab; touch-action: none;
+}
+.note-grab i {
+  display: block; width: 38px; height: 4px; border-radius: 99px;
+  background: rgba(255, 255, 255, .22); transition: background .12s ease;
+}
+.note-grab:hover i, .note-grab:focus-visible i { background: rgba(255, 255, 255, .42); }
+.note-grab:focus-visible { outline: none; }
+.note-pages-panel.note-dragging { transition: none; }
 .note-pages-panel .layer-head { padding-right: 6px; }   /* тулзы — к самому краю */
 .note-toolbar {
   flex: 0 0 auto; display: flex; align-items: center; gap: 2px;
@@ -2575,6 +2617,73 @@ body.no-scroll { overflow: hidden; overscroll-behavior: none; }
 .s-tab:hover { color: var(--text); background: var(--panel2); }
 .s-tab.active { color: var(--text); border-bottom-color: var(--accent2); }
 .s-panel.hidden { display: none; }
+
+/* ---------- v192: переключатель режима в настройках ---------- */
+/* Вместо двух полей «персонажи» и «мастер» — два входа. Внизу виден только
+   лист выбранного режима, поэтому списки не дублируются. */
+.mode-switch {
+  display: grid; grid-template-columns: 1fr 1fr; gap: 8px;
+  margin: 0 0 12px; flex: 0 0 auto;
+}
+.mode-card {
+  display: flex; align-items: center; gap: 9px; text-align: left;
+  min-width: 0; padding: 9px 11px; position: relative;
+  border: 1px solid var(--border); border-radius: var(--radius);
+  background: var(--panel); color: var(--muted); cursor: pointer;
+}
+.mode-card:hover { background: var(--panel2); border-color: #454560; }
+.mode-card .mode-glyph {
+  flex: 0 0 auto; font-size: 19px; line-height: 1;
+  filter: grayscale(1); opacity: .6;
+}
+.mode-card-txt { min-width: 0; }
+.mode-card-name { display: block; font-size: 14px; font-weight: 600; color: var(--text); line-height: 1.1; }
+.mode-card-sub {
+  display: block; margin-top: 2px; font-size: 11px; color: var(--muted);
+  line-height: 1.25; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.mode-card .mode-check {
+  flex: 0 0 auto; margin-left: auto; font-size: 13px; font-weight: 700;
+  color: var(--gold); opacity: 0;
+}
+.mode-card.active {
+  border-color: rgba(var(--gold-rgb), .6);
+  background: linear-gradient(180deg, rgba(var(--gold-rgb), .15), rgba(var(--gold-rgb), .04));
+}
+.mode-card.active .mode-glyph { filter: none; opacity: 1; }
+.mode-card.active .mode-check { opacity: 1; }
+.mode-card[data-mode="master"].active {
+  border-color: rgba(var(--purple-rgb), .72);
+  background: linear-gradient(180deg, rgba(var(--purple-rgb), .19), rgba(var(--purple-rgb), .05));
+}
+.mode-card[data-mode="master"].active .mode-check { color: var(--purple-hi); }
+
+/* «кабинет» выбранного режима: у игрока золотая грань, у мастера — фиолетовая */
+.mode-body {
+  border: 1px solid var(--border); border-radius: var(--radius);
+  background: rgba(255, 255, 255, .02);
+  padding: 11px 12px 1px; margin: 0 0 12px;
+}
+.mode-body.player { border-left: 3px solid var(--gold); }
+.mode-body.master { border-left: 3px solid var(--purple); }
+.mode-body-head { display: flex; align-items: baseline; gap: 8px; flex-wrap: wrap; margin: 0 0 9px; }
+.mode-body-name { font-size: 14px; font-weight: 600; color: var(--text); }
+.mode-body-sub { font-size: 11px; color: var(--muted); }
+.mode-body .field { margin-bottom: 9px; }
+@media (max-width: 520px) {
+  /* на узком экране три кнопки режима должны остаться в одной строке */
+  .mode-body .f-buttons { gap: 3px; }
+  .mode-body .f-buttons button { padding-left: 7px; padding-right: 7px; }
+}
+.mode-common { border-top: 1px solid var(--border); margin-top: 4px; padding-top: 11px; }
+.mode-common-title {
+  margin: 0 0 8px; font-size: 11px; font-weight: 600;
+  text-transform: uppercase; letter-spacing: .06em; color: var(--muted);
+}
+/* мастерский режим красит заголовок окна и активную вкладку */
+.modal.settings-modal.master-mode { border-color: rgba(var(--purple-rgb), .38); }
+.modal.settings-modal.master-mode h2 { color: var(--purple-pale); }
+.modal.settings-modal.master-mode .s-tab.active { border-bottom-color: var(--purple-hi); }
 
 /* наборы — раскрывающиеся карточки: заголовок всегда сверху */
 #modal.settings-modal .s-panel[data-panel="states"],
@@ -3321,3 +3430,428 @@ body.no-scroll { overflow: hidden; overscroll-behavior: none; }
   .mx-actions button svg { width: 17px; height: 17px; }
 }
 
+/* ---------- Лист игрока (v179/v180): второй слой ---------- */
+/* Закладки страниц и поток карточек только для чтения. */
+.sheet-panel {
+  width: min(920px, 94vw);
+  height: min(80dvh, 720px);
+  max-width: none;
+  max-height: none;
+  padding: 0;
+}
+.sheet-head-date {
+  flex: 0 0 auto; color: var(--muted); font-size: 11.5px;
+  font-variant-numeric: tabular-nums;
+}
+.sheet-tabs {
+  flex: 0 0 auto; display: flex; gap: 2px; padding: 6px 8px;
+  border-bottom: 1px solid var(--border); overflow-x: auto; overflow-y: hidden;
+  scrollbar-width: thin;
+}
+.sheet-tab {
+  flex: 0 0 auto; height: 28px; padding: 0 10px; border: 1px solid transparent;
+  border-radius: var(--radius-xs); background: transparent; color: var(--muted);
+  font: inherit; font-size: 12px; white-space: nowrap; cursor: pointer;
+}
+.sheet-tab:hover { background: var(--panel2); color: var(--text); }
+.sheet-tab.on {
+  color: var(--accent); background: rgba(var(--gold-rgb), .14);
+  border-color: rgba(var(--gold-rgb), .45);
+}
+.sheet-body { flex: 1 1 auto; min-height: 0; overflow-y: auto; padding: 12px; }
+.sheet-flow { display: flex; flex-wrap: wrap; gap: 12px; align-items: flex-start; }
+.snap-card { min-width: 0; }
+.sheet-flow .card { position: relative; width: 100%; }
+/* Числа — «фотография»: никаких кнопок шага и применения, только значения. */
+.sheet-flow .counter-step,
+.sheet-flow .cbtn-wrap,
+.sheet-flow .inv-actions,
+.sheet-flow .use-btn,
+.sheet-flow .ini-dice,
+.sheet-flow .ini-del,
+.sheet-flow .ini-self,
+.sheet-flow .ini-scroll,
+.sheet-flow .ini-mini { display: none; }
+.sheet-flow .inv-fx-x,
+.sheet-flow .inv-add { display: none; }
+.sheet-flow .fold-tab,
+.sheet-flow .resize-handle { display: none; }
+.sheet-flow .card button { pointer-events: none; cursor: default; }
+.sheet-flow .note-tab { pointer-events: auto; cursor: pointer; }
+.sheet-flow .desc-text, .sheet-flow .note-text { cursor: default; }
+.sheet-flow .note-text { overflow-y: auto; }
+
+@media (max-width: 720px) {
+  .sheet-panel { width: 100%; height: 88dvh; }
+  .sheet-body { padding: 10px 6px; }
+  .sheet-flow { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }
+  /* внутри слоя мобильные правила холста (плитка/ряды) не нужны */
+  .sheet-flow .card {
+    width: 100% !important; height: auto !important; min-height: 0;
+    grid-column: auto; grid-row: auto; align-self: start;
+  }
+}
+
+/* ---------- Карточка отряда (v180) ---------- */
+/* Лицо — таблица «параметры × игроки». На телефоне — компактная сводка,
+   полная таблица открывается вторым слоем. */
+.card.type-party { padding: 8px 10px; overflow: hidden; }
+.card.type-party .card-body.party-face { flex: 1 1 auto; min-height: 0; gap: 6px; }
+.party-table-wrap {
+  flex: 1 1 auto; min-height: 0; overflow: auto;
+  border: 0; border-radius: 0; background: transparent;
+}
+.party-table {
+  --party-param: 150px;
+  width: calc(var(--party-param) + var(--pcols, 3) * 168px + 16px);
+  margin: 0 auto;
+  table-layout: fixed; border-collapse: separate; border-spacing: 8px 0;
+  font-size: 14px;
+}
+.party-table th, .party-table td {
+  padding: 8px 7px; border-bottom: 1px solid rgba(255, 255, 255, .06);
+  text-align: left; vertical-align: middle;
+}
+.party-table thead th {
+  position: sticky; top: 0; z-index: 2;
+  background: var(--panel2); font-weight: 600;
+}
+.party-table tbody tr:last-child td { border-bottom: 0; }
+.party-table .party-param-col {
+  position: sticky; left: 0; z-index: 1;
+  width: var(--party-param); max-width: var(--party-param);
+  color: var(--text-soft); background: #1e1e2e;
+}
+/* рейка на стыке параметров и карточек; на наведении строки — золотая */
+.party-table .party-param-col::before {
+  content: ""; position: absolute; top: 0; right: 0; bottom: 0; width: 2px;
+  background: rgba(255, 255, 255, .09); transition: background .12s ease;
+}
+.party-table tbody tr:hover .party-param-col::before { background: var(--gold); }
+/* закрываем зазор под липкой колонкой при горизонтальном скролле */
+.party-table .party-param-col::after {
+  content: ""; position: absolute; top: 0; right: -8px; bottom: 0; width: 8px; background: inherit;
+}
+.party-table thead .party-param-col {
+  z-index: 3;
+  padding: 10px 8px;
+  background: linear-gradient(180deg, #2b2b40, #222233);
+  color: var(--text-soft);
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: .05em;
+  border-top: 2px solid rgba(255, 255, 255, .12);
+  border-bottom: 2px solid rgba(255, 255, 255, .26);
+  border-radius: 8px 0 0 0;
+}
+.party-table tbody tr:hover .party-param-col { background: #26263a; }
+.party-table .party-player-col {
+  width: 160px; min-width: 0; max-width: none;
+  padding: 10px 8px 9px; text-align: center; white-space: normal;
+  border: 1px solid rgba(var(--pc-rgb), .5);
+  border-top: 2px solid rgba(var(--pc-rgb), .9);
+  border-bottom: 1px solid rgba(var(--pc-rgb), .35);
+  border-radius: 10px 10px 0 0;
+  background-color: #202031;
+  background-image: linear-gradient(180deg, rgba(var(--pc-rgb), .26), rgba(var(--pc-rgb), .07));
+  color: var(--text);
+}
+.party-player {
+  max-width: 100%; padding: 0; border: 0; background: none; color: var(--text);
+  font: inherit; font-weight: 650; text-align: center; cursor: pointer;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.party-player:hover { color: var(--pc, var(--accent)); }
+.party-param-name { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.party-cell {
+  width: 160px; text-align: center; font-variant-numeric: tabular-nums;
+  border-left: 1px solid rgba(var(--pc-rgb), .5);
+  border-right: 1px solid rgba(var(--pc-rgb), .5);
+  border-bottom: 1px solid rgba(var(--pc-rgb), .16);
+  background: rgba(var(--pc-rgb), .065);
+}
+.party-table .party-cell { text-align: center; }
+.party-table tbody tr:hover .party-cell { background: rgba(var(--pc-rgb), .13); }
+.party-table tbody tr:last-child .party-cell {
+  border-bottom: 1px solid rgba(var(--pc-rgb), .55);
+  border-radius: 0 0 10px 10px;
+}
+.party-cell.party-missing { color: var(--muted); }
+.party-cell.party-counter { cursor: pointer; }
+.party-cell.party-counter:hover,
+.party-cell.party-counter:focus-visible {
+  background: rgba(var(--pc-rgb), .18); outline: none;
+}
+.party-val { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 650; }
+.party-cell.party-currency .party-val {
+  white-space: pre-line; font-size: 12px; font-weight: 500;
+  color: var(--text-soft); line-height: 1.4;
+}
+.party-cell.party-skill .party-val { font-weight: 650; }
+.party-meter {
+  display: block; width: 100%; max-width: 96px; height: 4px; margin: 5px auto 0;
+  border-radius: 99px; background: rgba(255, 255, 255, .08); overflow: hidden;
+}
+.party-meter i { display: block; height: 100%; border-radius: inherit; background: var(--ok); }
+.party-meter.mid i { background: var(--accent); }
+.party-meter.low i { background: var(--danger); }
+
+.party-empty {
+  flex: 1 1 auto; display: flex; flex-direction: column; align-items: center;
+  justify-content: center; gap: 10px; padding: 12px; text-align: center;
+  color: var(--muted); font-size: 12px;
+}
+.party-empty button {
+  height: 28px; padding: 0 10px; border: 1px solid rgba(var(--gold-rgb), .45);
+  border-radius: var(--radius-xs); background: rgba(var(--gold-rgb), .10);
+  color: var(--accent); font: inherit; font-size: 12px; cursor: pointer;
+}
+.party-empty button:hover { background: rgba(var(--gold-rgb), .18); }
+/* v181: пустой отряд знакомит с собой, а не открывает настройки */
+.party-onboard-title { max-width: 320px; color: var(--text-soft); font-size: 13px; line-height: 1.35; }
+.party-onboard-actions { display: flex; flex-wrap: wrap; gap: 6px; justify-content: center; }
+.party-onboard-actions button { height: 32px; padding: 0 12px; }
+
+/* Компактный вид на телефоне */
+.party-mini { display: flex; flex-direction: column; gap: 4px; min-height: 0; }
+.party-mini-row { display: flex; align-items: center; gap: 6px; min-height: 20px; }
+.party-mini-name {
+  flex: 0 0 34%; font-size: 11.5px; font-weight: 600;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.party-mini-vals { display: flex; gap: 4px; min-width: 0; overflow: hidden; }
+.party-mini-chip {
+  padding: 1px 6px; border: 1px solid var(--border); border-radius: 99px;
+  background: var(--panel2); color: var(--text-soft); font-size: 10.5px; white-space: nowrap;
+}
+.party-mini-chip b { color: var(--muted); font-weight: 600; }
+.party-mini-more { color: var(--muted); font-size: 10px; }
+.party-mini-hint { margin-top: auto; color: var(--muted); font-size: 10px; text-align: right; }
+
+/* Полная таблица вторым слоем (телефон и кнопка «таблица») */
+.party-panel {
+  width: min(960px, 96vw);
+  height: min(82vh, 760px);
+  height: min(82dvh, 760px);
+  max-width: none; max-height: none; padding: 0;
+}
+.party-panel-body { flex: 1 1 auto; min-height: 0; display: flex; padding: 10px; }
+.party-panel-body .party-table-wrap { flex: 1 1 auto; }
+.party-panel .party-table { --party-param: 150px; }
+.sheet-back {
+  flex: 0 0 auto; width: 26px; height: 26px; padding: 0; border: 1px solid transparent;
+  border-radius: var(--radius-xs); background: transparent; color: var(--muted);
+  font: inherit; font-size: 16px; line-height: 1; cursor: pointer;
+}
+.sheet-back:hover { color: var(--text); background: var(--panel2); border-color: var(--border); }
+
+/* Настройки отряда */
+.party-settings-body { max-height: min(64vh, 600px); max-height: min(64dvh, 600px); overflow: auto; padding-right: 4px; }
+.party-settings { display: flex; flex-direction: column; gap: 10px; font-size: 12.5px; }
+/* v181: имя и две вкладки вместо простыни из четырёх секций */
+.party-name-field { margin-bottom: 0; }
+.party-tabs { display: flex; gap: 4px; border-bottom: 1px solid var(--border); }
+.party-tab {
+  padding: 7px 9px; border: 0; border-bottom: 2px solid transparent;
+  background: transparent; color: var(--muted); font: inherit; font-size: 12.5px; cursor: pointer;
+}
+.party-tab span { color: var(--muted); font-size: 10.5px; }
+.party-tab:hover { color: var(--text); }
+.party-tab.on { color: var(--text); border-bottom-color: var(--gold); }
+.party-tab.on span { color: var(--accent); }
+.party-tab-body { display: flex; flex-direction: column; gap: 10px; }
+.party-acc-head { display: flex; align-items: center; gap: 8px; }
+.party-acc-toggle {
+  flex: 1 1 auto; min-width: 0; display: flex; align-items: center; gap: 6px;
+  padding: 0; border: 0; background: transparent; color: var(--text);
+  font: inherit; font-size: 13px; font-weight: 600; text-align: left; cursor: pointer;
+}
+.party-acc-toggle:hover { color: var(--accent); }
+.party-acc-chev { flex: 0 0 12px; color: var(--muted); font-size: 10px; text-align: center; }
+.party-acc-title { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.party-acc-title span { color: var(--muted); font-weight: 400; }
+.party-acc-body { margin-top: 6px; }
+.party-acc-body[hidden] { display: none; }
+.party-drag-hint { margin: 0 0 6px; }
+.party-picked { display: flex; flex-direction: column; }
+.party-pick-row {
+  display: flex; align-items: center; gap: 8px; min-height: 30px; padding: 4px 6px;
+  border-bottom: 1px solid var(--border); cursor: grab;
+  user-select: none; -webkit-user-select: none; touch-action: none; outline: none;
+}
+.party-pick-row:last-child { border-bottom: 0; }
+.party-pick-row:hover { background: var(--panel2); }
+.party-pick-row.dragging {
+  background: var(--panel2); border-color: var(--accent2);
+  box-shadow: 0 6px 18px rgba(0, 0, 0, .35);
+}
+.party-pick-row:focus-visible { outline: 1px solid var(--accent2); outline-offset: -1px; }
+.party-pick-num { flex: 0 0 18px; color: var(--muted); font-size: 11px; text-align: right; }
+.party-pick-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.party-pick-x {
+  flex: 0 0 auto; width: 22px; height: 22px; padding: 0; border: 0; border-radius: 4px;
+  background: transparent; color: var(--muted); font-size: 15px; line-height: 1; cursor: pointer;
+}
+.party-pick-x:hover { color: var(--danger); background: var(--panel2); }
+/* v181.1: импорт с приложения — выбор конкретных листов */
+.party-char-pick { display: flex; flex-direction: column; max-height: 260px; overflow: auto; }
+.party-char-row {
+  display: flex; align-items: center; gap: 8px; min-height: 30px; padding: 4px 6px;
+  border-bottom: 1px solid var(--border); cursor: pointer;
+}
+.party-char-row:last-child { border-bottom: 0; }
+.party-char-row:hover { background: var(--panel2); }
+.party-char-row input { flex: 0 0 auto; margin: 0; }
+.party-char-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.party-char-note { flex: 0 0 auto; color: var(--muted); font-size: 10.5px; }
+.party-set-add button.primary {
+  border-color: rgba(var(--gold-rgb), .5); background: rgba(var(--gold-rgb), .14); color: var(--accent);
+}
+.party-search {
+  width: 100%;
+  margin: 6px 0;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  color: var(--text);
+  padding: 7px 9px;
+  font: inherit;
+  outline: none;
+}
+.party-search:focus { border-color: var(--accent2); }
+.party-manual {
+  display: flex; align-items: flex-end; gap: 6px; flex-wrap: wrap;
+}
+.party-manual label {
+  flex: 1 1 150px; min-width: 0; display: flex; flex-direction: column; gap: 3px;
+  color: var(--muted); font-size: 11px;
+}
+.party-manual select {
+  width: 100%; padding: 7px 9px;
+  background: var(--panel); border: 1px solid var(--border);
+  border-radius: var(--radius-sm); color: var(--text); font: inherit;
+}
+.party-manual select:focus { border-color: var(--accent2); outline: none; }
+.party-manual-eq { padding-bottom: 9px; color: var(--muted); }
+.party-manual button {
+  height: 34px; padding: 0 10px; margin-bottom: 1px;
+  border: 1px solid var(--border); border-radius: var(--radius-sm);
+  background: var(--panel2); color: var(--text-soft); font: inherit; font-size: 11.5px; cursor: pointer;
+}
+.party-manual button:hover { color: var(--text); border-color: var(--accent2); }
+.party-rename-input {
+  width: 100%; min-width: 40px; height: 22px; padding: 0 4px;
+  border: 1px solid var(--accent2); border-radius: 4px;
+  background: var(--bg); color: var(--text); font: inherit; font-size: 13px; outline: none;
+}
+.party-set-section {
+  padding: 8px 10px; border: 1px solid var(--border);
+  border-radius: var(--radius-sm); background: var(--panel);
+}
+.party-set-head { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-bottom: 6px; }
+.party-set-head h3 { margin: 0; font-size: 13px; font-weight: 600; }
+.party-set-head h3 span { color: var(--muted); font-weight: 400; }
+.party-set-size { margin-left: auto; color: var(--muted); font-size: 11px; }
+.party-set-tools { margin-left: auto; display: flex; gap: 4px; }
+.party-set-tools button,
+.party-set-add button,
+.party-set-sactions button {
+  height: 26px; padding: 0 8px; border: 1px solid var(--border);
+  border-radius: var(--radius-xs); background: var(--panel2); color: var(--text-soft);
+  font: inherit; font-size: 11.5px; cursor: pointer;
+}
+.party-set-tools button:hover,
+.party-set-add button:hover,
+.party-set-sactions button:hover { color: var(--text); border-color: var(--accent2); }
+.party-set-sactions button.primary {
+  border-color: rgba(var(--gold-rgb), .5); background: rgba(var(--gold-rgb), .14); color: var(--accent);
+}
+.party-set-empty { padding: 6px 2px; color: var(--muted); font-size: 12px; }
+.party-set-hint { color: var(--muted); font-size: 11px; }
+.party-set-add { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; margin-top: 8px; }
+.party-set-add select { max-width: 200px; }
+.party-sheet-list { display: flex; flex-direction: column; gap: 4px; }
+.party-sheet-row {
+  display: flex; align-items: center; gap: 8px; padding: 5px 2px;
+  border-bottom: 1px solid var(--border);
+}
+.party-sheet-row:last-child { border-bottom: 0; }
+.party-sheet-main { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 1px; }
+.party-sheet-main b { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.party-sheet-main span { color: var(--muted); font-size: 11px; }
+.party-sheet-actions { display: flex; gap: 2px; flex: 0 0 auto; }
+.party-sheet-actions button {
+  width: 26px; height: 26px; padding: 0; border: 1px solid transparent;
+  border-radius: var(--radius-xs); background: transparent; color: var(--muted);
+  font: inherit; font-size: 13px; cursor: pointer;
+}
+.party-sheet-actions button:hover { color: var(--text); background: var(--panel2); border-color: var(--border); }
+.party-sheet-actions .trash-ic { width: 14px; height: 14px; }
+.party-set-list { display: flex; flex-direction: column; max-height: 220px; overflow: auto; margin-top: 6px; }
+.party-set-param {
+  display: flex; align-items: center; gap: 6px; padding: 4px 3px;
+  border-bottom: 1px solid rgba(255, 255, 255, .04); cursor: pointer;
+}
+.party-set-param:last-child { border-bottom: 0; }
+.party-set-param.on { background: rgba(var(--gold-rgb), .06); }
+.party-set-param.hidden { display: none; }
+.party-set-param input { flex: 0 0 auto; margin: 0; }
+.party-set-pname { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.party-set-ptype { flex: 0 0 auto; color: var(--muted); font-size: 10.5px; }
+.party-set-powners {
+  flex: 0 1 42%; min-width: 0; color: var(--muted); font-size: 10.5px;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap; text-align: right;
+}
+.party-set-suggest {
+  padding: 6px 2px; border-bottom: 1px solid var(--border);
+}
+.party-set-suggest:last-child { border-bottom: 0; }
+.party-set-snames { display: flex; align-items: center; gap: 6px; }
+.party-set-snames span { color: var(--muted); }
+.party-set-sowners { margin: 2px 0 5px; color: var(--muted); font-size: 11px; }
+.party-set-sactions { display: flex; gap: 4px; }
+.party-set-order { display: flex; flex-direction: column; }
+.party-set-order-row {
+  display: flex; align-items: center; gap: 6px; padding: 3px 2px;
+  border-bottom: 1px solid rgba(255, 255, 255, .04);
+}
+.party-set-order-row:last-child { border-bottom: 0; }
+.party-set-onum { width: 18px; color: var(--muted); font-size: 11px; text-align: center; }
+.party-set-oname { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.party-set-order-row button {
+  width: 24px; height: 24px; padding: 0; border: 1px solid var(--border);
+  border-radius: var(--radius-xs); background: var(--panel2); color: var(--text-soft);
+  font: inherit; font-size: 10px; cursor: pointer;
+}
+.party-set-order-row button:hover { color: var(--accent); border-color: var(--accent2); }
+
+/* Правка счётчика в ячейке */
+.party-cell.editing { padding: 2px 4px; background: rgba(var(--gold-rgb), .10); }
+.party-step { display: flex; align-items: center; justify-content: center; gap: 3px; }
+.party-step button {
+  width: 24px; height: 26px; padding: 0; border: 1px solid var(--border);
+  border-radius: 5px; background: var(--panel2); color: var(--text); font-size: 14px; cursor: pointer;
+}
+.party-step button:hover { color: var(--accent); border-color: var(--accent2); }
+.party-step input {
+  width: 46px; height: 26px; min-width: 0; padding: 0 3px; text-align: center;
+  border: 1px solid var(--border); border-radius: 5px; background: var(--bg2); color: var(--text);
+  font: inherit; font-size: 13px; font-weight: 700; outline: none;
+}
+.party-step input:focus { border-color: var(--accent2); }
+
+@media (max-width: 720px) {
+  .card.type-party {
+    grid-column: span 4; height: auto !important; min-height: 176px;
+    align-self: start;
+  }
+  .card.type-party .party-face { gap: 4px; }
+  .card.type-party .party-mini-name { flex-basis: 36%; }
+  .party-panel { width: 100%; height: 88dvh; }
+  .party-panel-body { padding: 8px 6px; }
+  .party-settings-body { max-height: 70dvh; }
+  .party-manual { flex-direction: column; align-items: stretch; }
+  .party-manual label { flex: 0 0 auto; }
+  .party-manual-eq { display: none; }
+  .party-manual button { width: 100%; }
+}

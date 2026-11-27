@@ -9,7 +9,9 @@ window.App = window.App || {};
   // v94: паки предметов живут отдельно от состояния персонажа, чтобы save()/undo
   // не таскали каталог на каждый тап по счётчику.
   const PACKS_KEY = 'custplay-packs';
-  const CARD_TYPES = ['counter', 'skill', 'spell', 'currency', 'inventory', 'note', 'initiative', 'condition', 'buff'];
+  // v180: sheet → party. Старый тип оставляем в списке только для импорта
+  // резервных копий: layoutCharacter переводит его в карточку отряда.
+  const CARD_TYPES = ['counter', 'skill', 'spell', 'currency', 'inventory', 'note', 'initiative', 'condition', 'buff', 'sheet', 'party'];
   // v22: типы, которые можно использовать в формулах — без валюты/инвентаря/заметок
   const FORMULA_REF_TYPES = ['counter', 'skill', 'spell'];
   // Свертывание в ярлык (v29, со стенда «текущее свертывание И, З, В»): только типы
@@ -211,6 +213,9 @@ window.App = window.App || {};
     save();
     render();
     if (layerCardId) refreshLayer();   // слой ярлыка догоняет данные (кнопки −/＋ и т.п.)
+    // v180: настройки отряда открыты поверх — после undo/redo и любых правок
+    // перестраиваем их из актуальной карточки (объект мог замениться откатом)
+    if (partySettingsRefresh) partySettingsRefresh();
   }
   // skipUndo — для сохранения только что созданной сущности: шаг отката уже
   // сделан при создании, второй шаг заставлял бы нажимать Ctrl+Z дважды.
@@ -277,7 +282,7 @@ window.App = window.App || {};
     ],
     master: [
       'cards:note', 'cards:initiative',
-      'cards:sheet', 'cards:journal',
+      'cards:party', 'cards:journal',
       'encounter:rows', 'encounter:attacks', 'encounter:boss', 'encounter:reset',
       'journal:capture', 'journal:timers', 'journal:export',
       'search:sheets', 'search:master'
@@ -627,6 +632,9 @@ window.App = window.App || {};
     menu.id = 'topMenu';
     menu.innerHTML =
       '<button type="button" data-act="rest">☾ ' + esc(App.t('rest')) + '</button>' +
+      (isMaster(activeChar())
+        ? '<button type="button" data-act="spoiler"><span class="menu-ic">' + NOTE_EYE_OFF_SVG + '</span> ' + esc(App.t(spoilerAll ? 'spoilerAllShow' : 'spoilerAllHide')) + '</button>'
+        : '') +
       '<button type="button" data-act="log">☰ ' + esc(App.t('log')) + '</button>' +
       '<button type="button" data-act="undo">↶ ' + esc(App.t('menuUndo')) + '</button>' +
       '<button type="button" data-act="redo">↷ ' + esc(App.t('menuRedo')) + '</button>';
@@ -635,6 +643,7 @@ window.App = window.App || {};
       if (!b) return;
       closeTopMenu();
       if (b.dataset.act === 'rest') confirmRest();
+      else if (b.dataset.act === 'spoiler') toggleSpoilerAll();
       else if (b.dataset.act === 'log') toggleLog();
       else if (b.dataset.act === 'undo') undo();
       else if (b.dataset.act === 'redo') redo();
@@ -668,7 +677,8 @@ window.App = window.App || {};
         html += '<button type="button" data-m="page">' + esc(App.t('moveToPage')) + '…</button>';
       }
     }
-    html += (card.type === 'inventory' ? '' : '<button type="button" data-m="edit">✎ ' + esc(App.t('edit')) + '</button>') +
+    // у снимка листа «Изменить» и «Переименовать» — одно и то же; оставляем второе
+    html += ((card.type === 'inventory' || card.type === 'sheet') ? '' : '<button type="button" data-m="edit">✎ ' + esc(App.t('edit')) + '</button>') +
             '<button type="button" data-m="dup">⧉ ' + esc(App.t('duplicate')) + '</button>' +
             '<button type="button" data-m="del">' + TRASH_SVG + ' ' + esc(App.t('delete')) + '</button>';
     // v164: дополнительные пункты типа из реестра («В инициативу», «Свойства врага»)
@@ -750,6 +760,51 @@ window.App = window.App || {};
     });
     return legacy.concat(specTypes);
   }
+
+  // v180: карточка отряда — таблица листов игроков (этап F2).
+  // Данные листов лежат в card.sheets[].data как есть: id не перегенерируем,
+  // на них ссылаются заряды и эффекты. Второй слой листа работает с копией.
+  CARD_SPECS.party = {
+    id: 'party',
+    labelKey: 'typeParty',
+    roles: ['master'],
+    menuGroup: 'master',
+    menuOrder: 40,
+    caps: ['cards:party'],
+    defaults: function () {
+      return {
+        sheets: [],
+        selected: null,     // null — ещё не инициализировали, [] — мастер всё снял
+        rowOrder: [],
+        aliases: {},
+        ignored: [],
+        live: {},
+        selTouched: false,  // пока false — после нового листа показываем общие
+        spoiler: false
+      };
+    },
+    size: { w: 760, h: 480 },
+    minSize: function () { return { w: 640, h: 320 }; },
+    span: function () { return 4; },
+    className: function () { return ''; },
+    face: function (card, ctx) { return partyFaceHTML(card, ctx); },
+    layer: function (card) { return buildPartyPanel(card); },
+    menu: [
+      { act: 'party:addSheet', labelKey: 'partyAddSheet', icon: '＋' }
+    ],
+    actions: {
+      'party:settings': function (card) { openPartySettings(card); },
+      'party:addSheet': function (card, ds, e) { openPartyAddMenu(card, e && e.currentTarget); },
+      'party:importApp': function (card) { openPartyCharPicker(card); },
+      'party:importDevice': function (card) { partyPickFile(card); },
+      'party:member': function (card, ds) {
+        openPartyMember(card.id, ds.sheet, ds.from === 'table' ? {
+          back: function () { openLabelLayer(card.id); }
+        } : null);
+      },
+      'party:table': function (card) { openLabelLayer(card.id); }
+    }
+  };
 
   function defaultsFor(type) {
     const sp = specFor(type);
@@ -902,6 +957,8 @@ window.App = window.App || {};
         card.value = (card.expression && String(card.expression).trim() !== '') ? card.expression : null;
         delete card.expression;
       }
+      // v180: отдельный снимок листа стал карточкой отряда с одним листом
+      if (card.type === 'sheet') migrateSheetCard(card, ch);
       // v32: галочка «запретить использование без ресурса» → выбор действия при нехватке.
       // Старые карты: блокировка была ВКЛ → «Запретить», ВЫКЛ → «Уйти в минус»
       // (поведение сохраняется один в один)
@@ -997,7 +1054,7 @@ window.App = window.App || {};
   function newMasterCharacter(name) {
     const cur = activeChar();
     if (cur && !isMaster(cur)) state.lastPlayerId = cur.id;
-    let nm = String(name || '').trim() || App.t('masterDefaultName');
+    let nm = String(name || '').trim() || App.t('modeNew');
     let i = 2, base = nm;
     while (state.characters.some(function (c) { return c.name === nm; })) { nm = base + ' ' + i; i++; }
     const ch = { id: uid(), name: nm, role: 'master', cards: [] };
@@ -1017,6 +1074,7 @@ window.App = window.App || {};
     if (cur && !isMaster(cur)) state.lastPlayerId = cur.id;
     state.activeCharacterId = target.id;
     state.lastMasterId = target.id;
+    resetSpoilerView();
     commit();
     return true;
   }
@@ -1029,6 +1087,7 @@ window.App = window.App || {};
     if (target) state.activeCharacterId = target.id;
     else newCharacter();   // игрока нет — создаём обычный лист
     const now = activeChar();
+    resetSpoilerView();
     if (now) state.lastPlayerId = now.id;
     commit();
   }
@@ -1245,7 +1304,8 @@ window.App = window.App || {};
   function modIndex() {
     if (modIndexCache) return modIndexCache;
     const byTarget = {}, blocks = {};
-    collectEffects(activeChar()).forEach(function (it) {
+    // v179: hostChar — снимок считает эффекты по своему листу, а не по активному
+    collectEffects(hostChar()).forEach(function (it) {
       const ef = it.ef;
       if (!ef || !ef.target) return;              // флаг без цели на числа не влияет
       if (ef.mode === 'block') { blocks[ef.target] = ef.label || it.name || ''; return; }
@@ -1849,8 +1909,8 @@ window.App = window.App || {};
       }
     }
     else if (act === 'note-expand') openLabelLayer(card.id);
-    else if (act === 'note-spoiler') toggleNoteSpoiler(card);
-    else if (act === 'note-reveal') revealNoteSpoiler(card);
+    else if (act === 'spoiler-toggle' || act === 'note-spoiler') toggleCardSpoiler(card);
+    else if (act === 'spoiler-reveal' || act === 'note-reveal') revealCardSpoiler(card);
     else if (act === 'note-page') {
       // v142: закладка заметки на карточке — переключить страницу.
       // v147: после выбора страницы полоса остаётся раскрытой (как в слое) и
@@ -2543,8 +2603,16 @@ window.App = window.App || {};
       '<button class="icon" id="editModeBtn" title="' + esc(App.t('editMode')) + '">' + editGlyph + '</button>';
     const diceBtnHtml =
       '<button class="icon" id="diceBtn" title="' + esc(App.t('dice')) + '">⚄</button>';
+    const isM = ch && isMaster(ch);
+    // v185: спойлер всего листа — только мастеру, рядом с долгим отдыхом
+    const spoilerAllTitle = App.t(spoilerAll ? 'spoilerAllShow' : 'spoilerAllHide');
+    const spoilerBtnHtml = isM ?
+      '<button class="icon spoiler-top' + (spoilerAll ? ' on' : '') + '" id="spoilerBtn"' +
+        ' title="' + esc(spoilerAllTitle) + '" aria-label="' + esc(spoilerAllTitle) + '"' +
+        ' aria-pressed="' + spoilerAll + '">' + NOTE_EYE_OFF_SVG + '</button>' : '';
     const controlsHtml = desktop ?
       '<button class="icon" id="restBtn" title="' + esc(App.t('rest')) + '">☾</button>' +
+      spoilerBtnHtml +
       diceBtnHtml +
       '<button class="icon" id="logBtn" title="' + esc(App.t('log')) + '">☰</button>' +
       editBtnHtml :
@@ -2569,6 +2637,8 @@ window.App = window.App || {};
     document.getElementById('brandBtn').addEventListener('click', function () { openSettings(); });
     const restBtn = document.getElementById('restBtn');
     if (restBtn) restBtn.addEventListener('click', confirmRest);
+    const spoilerBtn = document.getElementById('spoilerBtn');
+    if (spoilerBtn) spoilerBtn.addEventListener('click', toggleSpoilerAll);
     document.getElementById('diceBtn').addEventListener('click', toggleDiceWidget);
     const logBtn = document.getElementById('logBtn');
     if (logBtn) logBtn.addEventListener('click', toggleLog);
@@ -2667,7 +2737,7 @@ window.App = window.App || {};
     ctx = ctx || viewCtx({ desktop: desktop });
     const sp = specFor(card.type);
     const ro = !!ctx.readonly;
-    const sel = (desktop && editMode && selIds.has(card.id)) ? ' selected' : '';
+    const sel = (!ro && desktop && editMode && selIds.has(card.id)) ? ' selected' : '';
     const folded = !ro && foldable(card) && isCollapsed(card);
     let style = '--span:' + cardSpan(card) + ';';
     if (card.type === 'buff') {
@@ -2690,7 +2760,7 @@ window.App = window.App || {};
     const resize = (editMode && desktop && !ro && card.type !== 'condition') ? '<span class="resize-handle" title="↘"></span>' : '';
     // язычок и иконка/подпись живут в DOM у ВСЕХ сворачиваемых карточек: видимость
     // переключает класс .collapsed — сворот без перерисовки сохранит CSS-переход
-    const labelTitle = (card.type === 'note' && noteSpoilerHidden(card)) ? '•••' : esc(card.name);
+    const labelTitle = esc(card.name);
     const label = (!ro && foldable(card)) ?
       '<div class="artifact" aria-hidden="true"><img src="icons/labels/' + esc(FOLDABLE_ICONS[card.type]) + '.png" alt=""></div>' +
       '<div class="card-title-small">' + labelTitle + '</div>' +
@@ -2703,7 +2773,8 @@ window.App = window.App || {};
     // v58: у навыка шапка и кнопка броска — соседи в сетке .skill-grid, чтобы на
     // узкой карточке кнопка уходила вниз, к значению (иначе из шапки её не вынуть).
     // v164: новые типы рисуют тело сами (spec.face), старые — прежним cardBody.
-    const bodyHtml = (sp && sp.face) ? sp.face(card, ctx) : cardBody(card, ctx);
+    let bodyHtml = (sp && sp.face) ? sp.face(card, ctx) : cardBody(card, ctx);
+    if (spoilerHidden(card, ctx)) bodyHtml = spoilerBodyHTML();
     if (card.type === 'skill') {
       const roll = cardRoller(card, ctx);
       return '<div class="' + cls + '" data-id="' + card.id + '" style="' + style + '">' +
@@ -2734,8 +2805,10 @@ window.App = window.App || {};
     } else if (!ro && toolsMode !== false && (editMode || toolsMode)) {
       tools = '<div class="tools">' +
         (desktop ? '' : '<button class="card-up" title="↑" aria-label="' + esc(App.t('moveUp')) + '">▲</button><button class="card-down" title="↓" aria-label="' + esc(App.t('moveDown')) + '">▼</button>') +
+        // v181: у отряда «＋» — добавить лист, «✎» — настройки (имя правится там же)
+        (card.type === 'party' ? '<button class="card-add" title="' + esc(App.t('partyAddSheet')) + '" aria-label="' + esc(App.t('partyAddSheet')) + '">＋</button>' : '') +
         // v102: у инвентаря нет редактора карточки — правка строк идёт в самих предметах
-        (card.type === 'inventory' ? '' : '<button class="card-edit" title="' + esc(App.t('edit')) + '" aria-label="' + esc(App.t('edit')) + '">✎</button>') +
+        (card.type === 'inventory' ? '' : '<button class="card-edit" title="' + esc(App.t(card.type === 'party' ? 'partySettings' : 'edit')) + '" aria-label="' + esc(App.t(card.type === 'party' ? 'partySettings' : 'edit')) + '">✎</button>') +
         '<button class="card-dup" title="' + esc(App.t('duplicate')) + '" aria-label="' + esc(App.t('duplicate')) + '">⧉</button>' +
         '<button class="card-del" title="' + esc(App.t('delete')) + '" aria-label="' + esc(App.t('delete')) + '">' + TRASH_SVG + '</button>' +
       '</div>';
@@ -2770,15 +2843,14 @@ window.App = window.App || {};
     // клик по тексту карточки остаётся тумблером (см. bindCard).
     const buffExpand = (!ro && !editMode && card.type === 'buff')
       ? '<button type="button" class="buff-expand" data-act="buff-expand" title="' + esc(App.t('buffExpand')) + '" aria-label="' + esc(App.t('buffExpand')) + '">⤢</button>' : '';
-    // v169: заметка пишется прямо в карточке; кнопка разворота открывает второй
-    // слой. Спойлер мастера доступен в обоих режимах, разворот в правке скрыт —
-    // там заметка правится через слой.
-    const noteHidden = card.type === 'note' && noteSpoilerHidden(card);
-    const noteSpoiler = (!ro && card.type === 'note' && isMaster(activeChar()))
-      ? '<button type="button" class="note-spoiler' + (card.spoiler ? ' on' : '') + '" data-act="note-spoiler"' +
-        ' title="' + esc(App.t(card.spoiler ? 'noteUnspoiler' : 'noteSpoiler')) + '"' +
-        ' aria-label="' + esc(App.t(card.spoiler ? 'noteUnspoiler' : 'noteSpoiler')) + '">' + NOTE_EYE_OFF_SVG + '</button>' : '';
-    const noteExpand = (!ro && !editMode && card.type === 'note' && !noteHidden)
+    // v190: спойлер есть у каждой карточки; когда она скрыта, кнопка в шапке не нужна.
+    const spoilerHiddenNow = spoilerHidden(card);
+    const spoilerLabel = App.t(spoilerAll ? 'spoilerHideTitle' : 'spoilerTitle');
+    const noteSpoiler = (!ro && isMaster(activeChar()) && !spoilerHiddenNow)
+      ? '<button type="button" class="note-spoiler" data-act="spoiler-toggle"' +
+        ' title="' + esc(spoilerLabel) + '"' +
+        ' aria-label="' + esc(spoilerLabel) + '">' + NOTE_EYE_OFF_SVG + '</button>' : '';
+    const noteExpand = (!ro && !editMode && card.type === 'note' && !spoilerHiddenNow)
       ? '<button type="button" class="note-expand" data-act="note-expand"' +
         ' title="' + esc(App.t('noteExpand')) + '"' +
         ' aria-label="' + esc(App.t('noteExpand')) + '">' + NOTE_EXPAND_SVG + '</button>' : '';
@@ -2788,10 +2860,10 @@ window.App = window.App || {};
     const shieldChip = shield > 0
       ? '<span class="counter-shield" title="' + esc(App.t('shieldHint')) + '">🛡 ' + shield + '</span>'
       : '';
-    const headName = noteHidden ? '•••' : esc(card.name);
-    return '<div class="card-head">' + handle + '<span class="card-name"' + (noteHidden ? ' title="' + esc(App.t('noteSpoilerShow')) + '"' : '') + '>' +
+    const headName = esc(card.name);
+    return '<div class="card-head">' + handle + '<span class="card-name">' +
       (card.restores && card.type !== 'counter' ? '<span class="restore-ic">☾</span>' : '') + headName +
-      '</span>' + modBadgeHTML(card) + shieldChip + finfo + linktag + buffExpand + roller + noteSpoiler + noteExpand + tools + '</div>';
+      '</span>' + (ro ? '' : modBadgeHTML(card)) + shieldChip + finfo + linktag + buffExpand + roller + noteSpoiler + noteExpand + tools + '</div>';
   }
 
   // v89: бейдж «на меня влияют»: число активных модификаторов, тап — список источников
@@ -3067,7 +3139,8 @@ window.App = window.App || {};
   const iniTabSuppress = {};
   const iniRowSteps = {};
 
-  function iniMasterCard(card) { return card.type === 'initiative' && isMaster(activeChar()); }
+  // v179: снимок игрока показывает инициативу в обычном виде, а не мастерском
+  function iniMasterCard(card) { return card.type === 'initiative' && isMaster(hostChar()); }
   function iniRevealKey(card, id) { return card.id + '/' + id; }
   function iniClearReveal(card) {
     Object.keys(iniRevealed).forEach(function (k) { if (k.indexOf(card.id + '/') === 0) delete iniRevealed[k]; });
@@ -3571,8 +3644,7 @@ window.App = window.App || {};
   }
 
   function iniSpoilerHTML() {
-    return '<button type="button" class="mx-spoiler" data-act="ini-reveal" aria-label="' + esc(App.t('iniSpoilerShow')) + '">' +
-      LOCK_SVG + '<b>' + esc(App.t('iniSpoiler')) + '</b><small>' + esc(App.t('iniSpoilerShow')) + '</small></button>';
+    return '<div class="card-spoiler">' + spoilerContentHTML('ini-reveal') + '</div>';
   }
 
   function iniMasterBody(card) {
@@ -4114,7 +4186,7 @@ window.App = window.App || {};
   // Сама часть живёт на счётчике (она поглощает урон), но чип показываем в
   // инвентаре того предмета, который её выдал.
   function itemShieldChips(card) {
-    const ch = activeChar();
+    const ch = hostChar();
     const out = [];
     if (!ch || !card) return out;
     (ch.cards || []).forEach(function (c) {
@@ -4796,12 +4868,74 @@ window.App = window.App || {};
   // Заметка — набор листов (title/color/text). Раньше был один card.text;
   // ensureNotePages переносит его в первую страницу и убирает старое поле.
   const NOTE_COLORS = ['#e6c25a', '#a79bff', '#7fd6a5', '#f09a7f', '#9fd8ff', '#f2a7c3'];
-  // v169: текст заметки правится на месте по умолчанию. Флаг спойлера живёт
-  // в данных карточки (`card.spoiler`), «раскрыто сейчас» — только в памяти.
-  const noteRevealed = {};
+  // v190: `card.spoiler` — карточка скрыта (переключается глазом/плейсхолдером).
+  // `spoilerAll` — режим «скрыть всё»: он перекрывает флаги, пока включён;
+  // `spoilerRevealed` — что показали вручную внутри этого режима.
+  const spoilerRevealed = {};
+  let spoilerAll = false;
   const noteEditSession = {};   // cardId → { timer, dirty } — один undo на сессию
-  function noteSpoilerHidden(card) {
-    return isMaster(activeChar()) && !!card.spoiler && !noteRevealed[card.id] && !editMode;
+  function spoilerHidden(card, ctx) {
+    if (!card || (ctx && ctx.readonly)) return false;
+    if (!isMaster(activeChar())) return false;   // спойлеры — только мастеру
+    if (spoilerAll) return !spoilerRevealed[card.id];
+    return !!card.spoiler;
+  }
+  function spoilerContentHTML(act) {
+    return '<button type="button" class="spoiler-reveal" data-act="' + act + '">' +
+      NOTE_EYE_OFF_SVG +
+      '<span class="spoiler-text">' + esc(App.t('spoilerShowTitle')) + '</span>' +
+    '</button>';
+  }
+  function spoilerBodyHTML() {
+    return '<div class="card-body card-spoiler">' + spoilerContentHTML('spoiler-reveal') + '</div>';
+  }
+  function revealCardSpoiler(card) {
+    if (spoilerAll) {
+      spoilerRevealed[card.id] = true;
+      render();
+      return;
+    }
+    if (card.spoiler) {
+      mutate(function () { card.spoiler = false; });
+    }
+  }
+  function toggleCardSpoiler(card) {
+    noteEditFinish(card);
+    if (spoilerAll) {
+      if (spoilerRevealed[card.id]) delete spoilerRevealed[card.id];
+      else spoilerRevealed[card.id] = true;
+      render();
+      return;
+    }
+    mutate(function () {
+      card.spoiler = !card.spoiler;
+      delete spoilerRevealed[card.id];
+    });
+  }
+  function toggleSpoilerAll() {
+    if (!isMaster(activeChar())) return;
+    const turnOff = spoilerAll;
+    spoilerAll = !spoilerAll;
+    Object.keys(spoilerRevealed).forEach(function (k) { delete spoilerRevealed[k]; });
+    if (turnOff) {
+      // «Показать все»: снимаем и индивидуальные спойлеры, иначе часть карточек
+      // осталась бы скрытой и кнопка врала бы про «все».
+      const ch = activeChar();
+      if (ch && ch.cards.some(function (c) { return c.spoiler; })) {
+        mutate(function () {
+          ch.cards.forEach(function (c) { c.spoiler = false; });
+        });
+      } else {
+        render();
+      }
+    } else {
+      render();
+    }
+    renderHeader();
+  }
+  function resetSpoilerView() {
+    spoilerAll = false;
+    Object.keys(spoilerRevealed).forEach(function (k) { delete spoilerRevealed[k]; });
   }
   function noteEditFinish(card) {
     const s = noteEditSession[card.id];
@@ -4816,17 +4950,6 @@ window.App = window.App || {};
       if (s.timer) clearTimeout(s.timer);
       delete noteEditSession[k];
     });
-  }
-  function toggleNoteSpoiler(card) {
-    noteEditFinish(card);
-    mutate(function () {
-      card.spoiler = !card.spoiler;
-      delete noteRevealed[card.id];
-    });
-  }
-  function revealNoteSpoiler(card) {
-    noteRevealed[card.id] = true;
-    render();
   }
   function notePages(card) {
     if (!Array.isArray(card.pages)) card.pages = [];
@@ -4959,13 +5082,6 @@ window.App = window.App || {};
   function noteBody(card, ctx) {
     ensureNotePages(card);
     const p = notePage(card);
-    const ro = !!(ctx && ctx.readonly);
-    if (!ro && noteSpoilerHidden(card)) {
-      return '<div class="card-body note-spoiler-body">' +
-        '<button type="button" class="note-reveal" data-act="note-reveal" title="' + esc(App.t('noteSpoilerShow')) + '">' +
-          NOTE_EYE_OFF_SVG + '<span>' + esc(App.t('noteSpoilerShow')) + '</span>' +
-        '</button></div>';
-    }
     return '<div class="card-body"><div class="note-text note-rich">' + notePageHtml(p) + '</div>' + noteTabsHTML(card) + '</div>';
   }
 
@@ -5179,6 +5295,8 @@ window.App = window.App || {};
       desc.classList.add('readable');
       desc.addEventListener('click', function () { openTextModal(card.name, card.description); });
     }
+    // отряд (v180): счётчики в таблице и компактный вид на телефоне
+    if (card.type === 'party') bindPartyCard(card, el);
     // заметка: карточка — просмотр; клик открывает редактор во втором слое
     const note = el.querySelector('.note-text');
     if (note) {
@@ -5189,11 +5307,13 @@ window.App = window.App || {};
       });
     }
     const edit = el.querySelector('.card-edit');
+    const add = el.querySelector('.card-add');
     const dup = el.querySelector('.card-dup');
     const del = el.querySelector('.card-del');
     const up = el.querySelector('.card-up');
     const down = el.querySelector('.card-down');
     if (edit) edit.addEventListener('click', function () { openCardEditor(card.id); });
+    if (add) add.addEventListener('click', function (e) { e.stopPropagation(); openPartyAddMenu(card, add); });
     if (dup) dup.addEventListener('click', function () { duplicateCard(card.id); });
     if (del) del.addEventListener('click', function () { deleteCard(card.id); });
     if (up) up.addEventListener('click', function () { moveCard(card.id, -1); });
@@ -7511,6 +7631,1630 @@ window.App = window.App || {};
     if (first) { try { first.focus({ preventScroll: true }); } catch (e) { first.focus(); } }
   }
 
+  // ===== Мастер: карточка отряда (v180) =====
+  // Внутри одной карточки лежат загруженные листы игроков. Лицо — таблица
+  // «параметры × игроки»; настройки и детальный лист живут во втором слое.
+  // Данные листов — копии экспорта: id карточек не перегенерируем, на них
+  // ссылаются заряды и эффекты. Правки чисел идут в card.live, снимок не трогают.
+  const PARTY_MAX_BYTES = 1024 * 1024;
+  const PARTY_MAX_PLAYERS = 8;
+  const PARTY_MAX_ROWS = 12;
+  // v186: цвета игроков как в стенде — без зелёного, чтобы не путать с полным счётчиком
+  const PARTY_ACCENTS = [
+    ['#8fb7ff', '143, 183, 255'],
+    ['#f2a7c3', '242, 167, 195'],
+    ['#c7a6ff', '199, 166, 255'],
+    ['#e6c25a', '230, 194, 90'],
+    ['#f09a7f', '240, 154, 127'],
+    ['#9fd8ff', '159, 216, 255'],
+    ['#d8a8ff', '216, 168, 255'],
+    ['#f5d08a', '245, 208, 138']
+  ];
+  function partyAccent(i) { return PARTY_ACCENTS[i % PARTY_ACCENTS.length]; }
+  function partyParamLabel(name) {
+    const s = String(name || '').trim();
+    return s.length > 14 ? s.slice(0, 14).replace(/\s+$/, '') + '…' : s;
+  }
+  const STORAGE_WARN_BYTES = 3.5 * 1024 * 1024;
+  const STORAGE_MAX_BYTES = 4.5 * 1024 * 1024;
+  // в таблицу попадают только числовые параметры: счётчик, навык, валюта
+  const PARTY_PARAM_TYPES = { counter: 1, skill: 1, currency: 1 };
+  const PARTY_TYPE_RANK = { counter: 0, skill: 1, currency: 2 };
+  // ручные синонимы к тем, что не ловятся префиксом/расстоянием
+  const PARTY_SYNONYMS = [
+    ['инт', 'интеллект'], ['кбп', 'броня'], ['деньги', 'валюта'],
+    ['здоровье', 'hp'], ['здоровье', 'health']
+  ];
+
+  function partySheets(card) {
+    return (card && Array.isArray(card.sheets)) ? card.sheets : [];
+  }
+  function partyEnsureSheets(card) {
+    if (!Array.isArray(card.sheets)) card.sheets = [];
+    if (!card.aliases || typeof card.aliases !== 'object') card.aliases = {};
+    if (!Array.isArray(card.ignored)) card.ignored = [];
+    if (!card.live || typeof card.live !== 'object') card.live = {};
+    return card.sheets;
+  }
+  function partyNorm(v) {
+    return String(v == null ? '' : v).trim().toLowerCase().replace(/\s+/g, ' ');
+  }
+  function partyResolveAlias(aliases, key) {
+    let k = key;
+    for (let i = 0; i < 12; i++) {
+      const next = aliases && aliases[k];
+      if (!next || next === k) break;
+      k = next;
+    }
+    return k;
+  }
+  function partyIsParam(c) {
+    return !!c && !!PARTY_PARAM_TYPES[c.type] && !!String(c.name || '').trim();
+  }
+  function partyOwnerName(sh) {
+    return String((sh && (sh.ownerName || (sh.data && sh.data.name))) || App.t('newCharName'));
+  }
+  function partySheetCards(sh) {
+    return (sh && sh.data && Array.isArray(sh.data.cards)) ? sh.data.cards.length : 0;
+  }
+  function partyToday() { return new Date().toISOString().slice(0, 10); }
+
+  // Старый отдельный снимок (v179) становится отрядом с одним листом.
+  function migrateSheetCard(card, ch) {
+    const data = (card.data && Array.isArray(card.data.cards)) ? card.data : null;
+    const oldOwner = card.ownerName || (data && data.name) || '';
+    card.type = 'party';
+    card.sheets = data ? [{
+      id: uid(),
+      ownerName: oldOwner || App.t('newCharName'),
+      savedAt: card.savedAt || null,
+      sourceCharId: null,
+      data: data
+    }] : [];
+    card.selected = null;
+    card.rowOrder = [];
+    card.aliases = {};
+    card.ignored = [];
+    card.live = {};
+    card.selTouched = false;
+    card.spoiler = false;
+    card.span = 4;
+    if (!card.name || card.name === oldOwner) card.name = uniqueCardNameIn(ch, App.t('typeParty'), card.id);
+    delete card.ownerName;
+    delete card.savedAt;
+    delete card.summary;
+    delete card.data;
+  }
+
+  function sheetBytes(txt) {
+    try { return new Blob([txt]).size; } catch (e) { return String(txt || '').length * 2; }
+  }
+  function sheetDateText(iso) {
+    if (!iso) return '';
+    const m = String(iso).match(/^(\d{4})-(\d{2})-(\d{2})/);
+    return m ? (m[3] + '.' + m[2]) : '';
+  }
+  function storageUsedBytes() {
+    let n = 0;
+    try {
+      for (let i = 0; i < localStorage.length; i++) {
+        const k = localStorage.key(i);
+        n += (String(k).length + String(localStorage.getItem(k) || '').length) * 2;
+      }
+    } catch (e) { return 0; }
+    return n;
+  }
+  function partyStorageOk(extraBytes) {
+    const used = storageUsedBytes() + (extraBytes || 0);
+    if (used > STORAGE_MAX_BYTES) { toast(App.t('sheetStorageFull')); return false; }
+    if (used > STORAGE_WARN_BYTES) toast(App.t('sheetStorageWarn'));
+    return true;
+  }
+  function uniqueCardNameIn(ch, base, exceptId) {
+    base = String(base || App.t('typeParty')).trim() || App.t('typeParty');
+    let name = base, i = 2;
+    while (ch && ch.cards.some(function (c) { return c.name === name && c.id !== exceptId; })) {
+      name = base + ' (' + i + ')';
+      i++;
+    }
+    return name;
+  }
+  function partyCardBytes(card) {
+    return JSON.stringify(partySheets(card)).length * 2;
+  }
+
+  // Мягкая проверка файла: принимаем только ОДНОГО персонажа.
+  function parseSheetFile(txt) {
+    let root;
+    try { root = JSON.parse(txt); } catch (e) { return { error: 'sheetBroken' }; }
+    if (!root || typeof root !== 'object') return { error: 'sheetBroken' };
+    if (Array.isArray(root.characters) || root.kind === 'backup') return { error: 'sheetMulti' };
+    const src = root.character || (Array.isArray(root.cards) ? root : null);
+    if (!src || !Array.isArray(src.cards)) return { error: 'sheetBadFile' };
+    return { data: sanitizeSnapshot(src) };
+  }
+
+  // Чистим только служебное: раскладку, метки новой карточки, вложенные наборы.
+  // id карточек и эффектов НЕ трогаем — иначе развалятся linkId и цели.
+  function sanitizeSnapshot(src) {
+    const ch = JSON.parse(JSON.stringify(src));
+    delete ch.packs;
+    delete ch.itemSets;
+    delete ch.lastPlayerId;
+    delete ch.lastMasterId;
+    ch.name = String(ch.name || '');
+    ch.role = ch.role === 'master' ? 'master' : 'player';
+    const pages = Array.isArray(ch.pages) ? ch.pages.filter(function (p) {
+      return p && typeof p === 'object' && typeof p.id === 'string';
+    }).map(function (p) {
+      return { id: p.id, name: String(p.name || '') };
+    }) : [];
+    ch.pages = pages.length ? pages : [{ id: uid(), name: App.t('pageDefault') }];
+    const allowed = CARD_TYPES.filter(function (t) { return t !== 'sheet' && t !== 'party'; });
+    const cards = [];
+    (Array.isArray(ch.cards) ? ch.cards : []).forEach(function (raw) {
+      if (!raw || typeof raw !== 'object') return;
+      const c = JSON.parse(JSON.stringify(raw));
+      // v8/v15/v26: старые типы приводим к нынешним, как normalizeImport
+      if (c.type === 'stat') c.type = 'skill';
+      if (c.type === 'perk') {
+        c.type = 'spell';
+        if (!c.charges) c.charges = { mode: 'own', current: 0, max: 0, linkId: null, cost: 1, emptyMode: 'block' };
+      }
+      if (c.type === 'formula') {
+        c.type = 'skill';
+        c.value = (c.expression && String(c.expression).trim() !== '') ? c.expression : null;
+        delete c.expression;
+      }
+      if (allowed.indexOf(c.type) === -1) return;
+      delete c._new;
+      delete c.collapsed;
+      delete c.collapsedM;
+      delete c.x;
+      delete c.y;
+      if (!c.id || typeof c.id !== 'string') c.id = uid();
+      if (!c.name) c.name = typeLabel(c.type);
+      if (!ch.pages.some(function (p) { return p.id === c.page; })) c.page = ch.pages[0].id;
+      cards.push(c);
+    });
+    ch.cards = cards;
+    return ch;
+  }
+
+  // ----- Объединение параметров -----
+  function partyIndex(card) {
+    const sheets = partySheets(card);
+    const aliases = (card && card.aliases) || {};
+    const map = new Map();
+    let order = 0;
+    sheets.forEach(function (sh) {
+      ((sh.data && sh.data.cards) || []).forEach(function (c) {
+        if (!partyIsParam(c)) return;
+        const raw = partyNorm(c.name);
+        const key = partyResolveAlias(aliases, raw);
+        let p = map.get(key);
+        if (!p) { p = { key: key, name: c.name, cards: {}, owners: [], types: [], order: order++ }; map.set(key, p); }
+        if (!p.cards[sh.id]) { p.cards[sh.id] = c; p.owners.push(sh.id); }
+        if (p.types.indexOf(c.type) === -1) p.types.push(c.type);
+      });
+    });
+    // имя группы — от карточки, чьё нормализованное имя совпало с ключом
+    map.forEach(function (p) {
+      for (let i = 0; i < sheets.length; i++) {
+        const hit = ((sheets[i].data && sheets[i].data.cards) || []).find(function (c) {
+          return partyIsParam(c) && partyNorm(c.name) === p.key;
+        });
+        if (hit) { p.name = String(hit.name || p.name); break; }
+      }
+    });
+    const all = Array.from(map.values()).sort(function (a, b) {
+      const ra = partyRank(a), rb = partyRank(b);
+      if (ra !== rb) return ra - rb;
+      return a.order - b.order;
+    });
+    const common = all.filter(function (p) { return p.owners.length === sheets.length; });
+    const unique = all.filter(function (p) { return p.owners.length < sheets.length; });
+    return { map: map, all: all, common: common, unique: unique, sheets: sheets };
+  }
+  function partyRank(p) {
+    let r = 9;
+    p.types.forEach(function (t) { r = Math.min(r, PARTY_TYPE_RANK[t] == null ? 9 : PARTY_TYPE_RANK[t]); });
+    return r;
+  }
+  function partySelectedKeys(card, index) {
+    const aliases = (card && card.aliases) || {};
+    let keys;
+    if (Array.isArray(card.selected)) keys = card.selected.map(function (k) { return partyResolveAlias(aliases, k); });
+    else keys = index.common.slice(0, PARTY_MAX_ROWS).map(function (p) { return p.key; });
+    const out = [];
+    keys.forEach(function (k) {
+      if (index.map.has(k) && out.indexOf(k) === -1) out.push(k);
+    });
+    return out;
+  }
+  function partyRows(card, index) {
+    const selected = partySelectedKeys(card, index);
+    const aliases = (card && card.aliases) || {};
+    const order = Array.isArray(card.rowOrder)
+      ? card.rowOrder.map(function (k) { return partyResolveAlias(aliases, k); }) : [];
+    const out = [];
+    order.forEach(function (k) {
+      if (selected.indexOf(k) === -1) return;
+      const p = index.map.get(k);
+      if (p && out.indexOf(p) === -1) out.push(p);
+    });
+    selected.forEach(function (k) {
+      const p = index.map.get(k);
+      if (p && out.indexOf(p) === -1) out.push(p);
+    });
+    return out.slice(0, PARTY_MAX_ROWS);
+  }
+  // Пока мастер не трогал выбор, после каждого добавления листа показываем
+  // общие параметры. Ручной выбор помечает selTouched и больше не сбрасывается.
+  function partyAutoSelect(card) {
+    const index = partyIndex(card);
+    if (!partySheets(card).length) { card.selected = null; card.rowOrder = []; return; }
+    // Общие имена — идеальный случай. Если их нет, показываем три самых частых
+    // параметра, счётчики первыми: иначе карточка встречает мастера пустотой.
+    let pool = index.common.slice();
+    if (!pool.length) {
+      pool = index.all.slice().sort(function (a, b) {
+        if (b.owners.length !== a.owners.length) return b.owners.length - a.owners.length;
+        return partyRank(a) - partyRank(b);
+      }).slice(0, 3);
+    }
+    card.selected = pool.slice(0, PARTY_MAX_ROWS).map(function (p) { return p.key; });
+    card.rowOrder = card.selected.slice();
+  }
+  function partyOrderKeys(card, index) {
+    const sel = partySelectedKeys(card, index);
+    const aliases = (card && card.aliases) || {};
+    const out = [];
+    (Array.isArray(card.rowOrder) ? card.rowOrder : []).forEach(function (k) {
+      const rk = partyResolveAlias(aliases, k);
+      if (sel.indexOf(rk) !== -1 && out.indexOf(rk) === -1) out.push(rk);
+    });
+    sel.forEach(function (k) { if (out.indexOf(k) === -1) out.push(k); });
+    return out;
+  }
+
+  // ----- Значения -----
+  function partyLiveKey(sh, c) { return sh.id + '/' + c.id; }
+  function partyLiveValue(card, sh, c) {
+    const k = partyLiveKey(sh, c);
+    if (card.live && Object.prototype.hasOwnProperty.call(card.live, k) &&
+        Number.isFinite(Number(card.live[k]))) return Number(card.live[k]);
+    return num(c.current);
+  }
+  function partyCurrencyText(c) {
+    const parts = [];
+    (c.units || []).forEach(function (u) {
+      const n = num((c.amounts || {})[u.id]);
+      if (!n) return;
+      parts.push(String(u.name || '—') + ' ' + fmt(n));
+    });
+    return parts.length ? parts.join('\n') : '—';
+  }
+  function partyCell(card, sh, c) {
+    if (c.type === 'counter') {
+      const max = counterMaxNum(c);
+      const cur = partyLiveValue(card, sh, c);
+      return {
+        kind: 'counter', current: cur, max: max,
+        text: fmt(cur) + (max != null ? ' / ' + fmt(max) : '')
+      };
+    }
+    if (c.type === 'skill') {
+      if (c.value == null || String(c.value).trim() === '') return { kind: 'skill', text: '—' };
+      let v = 0;
+      try { v = skillValueNum(c); } catch (e) { v = num(c.value); }
+      return { kind: 'skill', text: fmt(Number.isFinite(v) ? v : 0) };
+    }
+    if (c.type === 'currency') return { kind: 'currency', text: partyCurrencyText(c) };
+    return { kind: 'other', text: '—' };
+  }
+  function partyComputed(card, rows) {
+    const out = {};
+    partySheets(card).forEach(function (sh) {
+      out[sh.id] = {};
+      if (!sh.data || !Array.isArray(sh.data.cards)) return;
+      invalidateMods();
+      withHostChar(sh.data, function () {
+        rows.forEach(function (p) {
+          const c = p.cards[sh.id];
+          if (c) out[sh.id][p.key] = partyCell(card, sh, c);
+        });
+      });
+      invalidateMods();
+    });
+    return out;
+  }
+  function partyBarHTML(cell) {
+    if (!cell || cell.kind !== 'counter' || cell.max == null || !(cell.max > 0)) return '';
+    const pct = Math.max(0, Math.min(100, cell.current / cell.max * 100));
+    const cls = pct > 50 ? 'ok' : pct > 25 ? 'mid' : 'low';
+    return '<span class="party-meter ' + cls + '"><i style="width:' + pct.toFixed(1) + '%"></i></span>';
+  }
+
+  // ----- Лицо и таблица -----
+  function partyOwnersText(p, sheets) {
+    if (!sheets.length) return '';
+    if (p.owners.length === sheets.length) return App.t('partyAllOwners');
+    return p.owners.map(function (id) {
+      const sh = sheets.find(function (s) { return s.id === id; });
+      return sh ? partyOwnerName(sh) : '—';
+    }).join(', ');
+  }
+  function partyParamTypeText(p) {
+    if (!p.types.length) return '';
+    if (p.types.length > 1) return App.t('partyMixedTypes');
+    return App.t('type' + p.types[0].charAt(0).toUpperCase() + p.types[0].slice(1));
+  }
+  function partyOnboardHTML() {
+    return '<div class="party-empty party-onboard">' +
+      '<div class="party-onboard-title">' + esc(App.t('partyOnboard')) + '</div>' +
+      '<div class="party-onboard-actions">' +
+        '<button type="button" data-act="party:importApp">＋ ' + esc(App.t('partyAddAll')) + '</button>' +
+        '<button type="button" data-act="party:importDevice">＋ ' + esc(App.t('partyAddFiles')) + '</button>' +
+      '</div></div>';
+  }
+  function partyTableHTML(card, opts) {
+    const index = partyIndex(card);
+    const rows = partyRows(card, index);
+    const sheets = partySheets(card);
+    const computed = partyComputed(card, rows);
+    const full = !!(opts && opts.full);
+    if (!sheets.length) return partyOnboardHTML();
+    if (!rows.length) {
+      return '<div class="party-empty">' +
+        '<div>' + esc(App.t('partyNoParams')) + '</div>' +
+        '<button type="button" data-act="party:settings">' + esc(App.t('partySetup')) + '</button>' +
+      '</div>';
+    }
+    const head = '<thead><tr><th class="party-param-col">' + esc(App.t('partyParam')) + '</th>' +
+      sheets.map(function (sh, i) {
+        const a = partyAccent(i);
+        return '<th class="party-player-col" style="--pc:' + a[0] + ';--pc-rgb:' + a[1] + '">' +
+          '<button type="button" class="party-player"' +
+          ' data-act="party:member" data-sheet="' + esc(sh.id) + '"' +
+          (full ? ' data-from="table"' : '') +
+          ' title="' + esc(App.t('partyOpenSheet')) + '">' + esc(partyOwnerName(sh)) + '</button></th>';
+      }).join('') + '</tr></thead>';
+    const body = '<tbody>' + rows.map(function (p) {
+      const cells = sheets.map(function (sh, i) {
+        const a = partyAccent(i);
+        const pc = ' style="--pc:' + a[0] + ';--pc-rgb:' + a[1] + '"';
+        const cell = computed[sh.id] && computed[sh.id][p.key];
+        if (!cell) return '<td class="party-cell party-missing"' + pc + '>—</td>';
+        if (cell.kind === 'counter') {
+          return '<td class="party-cell party-counter"' + pc + ' data-pcell="1" data-sheet="' + esc(sh.id) + '"' +
+            ' data-card="' + esc(p.cards[sh.id].id) + '" tabindex="0" role="button"' +
+            ' title="' + esc(App.t('partyEditCounter')) + '"' +
+            ' aria-label="' + esc(App.t('partyEditCounter') + ': ' + p.name + ' — ' + partyOwnerName(sh)) + '">' +
+            '<span class="party-val">' + esc(cell.text) + '</span>' + partyBarHTML(cell) + '</td>';
+        }
+        return '<td class="party-cell party-' + esc(cell.kind) + '"' + pc + '><span class="party-val">' + esc(cell.text) + '</span></td>';
+      }).join('');
+      return '<tr><td class="party-param-col"><span class="party-param-name" title="' + esc(p.name) + '">' + esc(partyParamLabel(p.name)) + '</span></td>' + cells + '</tr>';
+    }).join('') + '</tbody>';
+    return '<div class="party-table-wrap"><table class="party-table' + (full ? ' party-table-full' : '') + '"' +
+      ' style="--pcols:' + sheets.length + '">' + head + body + '</table></div>';
+  }
+
+  function partyMiniHTML(card) {
+    const index = partyIndex(card);
+    const rows = partyRows(card, index);
+    const sheets = partySheets(card);
+    if (!sheets.length) return partyOnboardHTML();
+    if (!rows.length) {
+      return '<div class="party-empty">' +
+        '<div>' + esc(App.t('partyNoParams')) + '</div>' +
+        '<button type="button" data-act="party:settings">' + esc(App.t('partySetup')) + '</button>' +
+      '</div>';
+    }
+    const computed = partyComputed(card, rows.slice(0, 3));
+    const shown = sheets.slice(0, 4);
+    const lines = shown.map(function (sh) {
+      const chips = rows.slice(0, 3).map(function (p) {
+        const cell = computed[sh.id] && computed[sh.id][p.key];
+        return '<span class="party-mini-chip" title="' + esc(p.name) + '">' +
+          '<b>' + esc(p.name) + '</b> ' + esc(cell ? cell.text : '—') + '</span>';
+      }).join('');
+      return '<div class="party-mini-row"><span class="party-mini-name">' + esc(partyOwnerName(sh)) + '</span>' +
+        '<span class="party-mini-vals">' + chips + '</span></div>';
+    }).join('');
+    return '<div class="party-mini">' + lines +
+      (sheets.length > shown.length ? '<div class="party-mini-more">+' + (sheets.length - shown.length) + '</div>' : '') +
+      '<div class="party-mini-hint">' + esc(App.t('partyTapTable')) + '</div></div>';
+  }
+
+  function partyFaceHTML(card, ctx) {
+    const desktop = ctx ? !!ctx.desktop : isDesktop();
+    if (!desktop) {
+      return '<div class="card-body party-face party-face-mini">' + partyMiniHTML(card) + '</div>';
+    }
+    return '<div class="card-body party-face">' + partyTableHTML(card) + '</div>';
+  }
+
+  // ----- Загрузка листов -----
+  function partyAddSheetData(card, data, sourceCharId) {
+    const sheets = partyEnsureSheets(card);
+    const name = String(data.name || App.t('newCharName'));
+    const existing = sheets.find(function (s) {
+      return (sourceCharId && s.sourceCharId === sourceCharId) || partyNorm(partyOwnerName(s)) === partyNorm(name);
+    });
+    if (!existing && sheets.length >= PARTY_MAX_PLAYERS) return { error: 'partyTooMany' };
+    const sh = {
+      id: existing ? existing.id : uid(),
+      ownerName: name,
+      savedAt: partyToday(),
+      sourceCharId: sourceCharId || (existing && existing.sourceCharId) || null,
+      data: data
+    };
+    Object.keys(card.live || {}).forEach(function (k) {
+      if (k.indexOf(sh.id + '/') === 0) delete card.live[k];
+    });
+    if (existing) sheets[sheets.indexOf(existing)] = sh;
+    else sheets.push(sh);
+    if (!Array.isArray(card.selected) || !card.selTouched) partyAutoSelect(card);
+    return { sheet: sh, replaced: !!existing };
+  }
+
+  function partyAvailableChars() {
+    const cur = activeChar();
+    return state.characters.filter(function (c) {
+      return c && c.id !== (cur && cur.id) && !isMaster(c);
+    });
+  }
+  // v181: импорт с приложения — выбор конкретных листов, а не все подряд.
+  function partyAddChars(card, ids, after) {
+    const list = (ids || []).map(function (id) {
+      return state.characters.find(function (c) { return c.id === id; });
+    }).filter(Boolean);
+    if (!list.length) { toast(App.t('partyPickNone')); return; }
+    let bytes = 0;
+    const prepared = [];
+    list.forEach(function (ch) {
+      const data = sanitizeSnapshot(ch);
+      const size = sheetBytes(JSON.stringify(data));
+      if (size > PARTY_MAX_BYTES) return;
+      bytes += size * 2;
+      prepared.push({ data: data, id: ch.id });
+    });
+    if (!prepared.length) { toast(App.t('partyNoPlayersHint')); return; }
+    if (!partyStorageOk(bytes)) return;
+    let added = 0, updated = 0;
+    mutate(function () {
+      prepared.forEach(function (p) {
+        const res = partyAddSheetData(card, p.data, p.id);
+        if (!res || res.error) return;
+        if (res.replaced) updated++; else added++;
+      });
+    });
+    if (added + updated) toast(App.tf(added ? 'partyAddedMany' : 'partyUpdatedMany', { n: added + updated }));
+    if (after) after();
+  }
+
+  function partyPickFile(card, after, targetSheetId) {
+    // Замена одного листа — по-прежнему один файл.
+    if (targetSheetId) {
+      pickFile(function (txt) {
+        const parsed = parseSheetFile(txt);
+        if (!parsed.data) { toast(App.t(parsed.error)); return; }
+        const bytes = sheetBytes(txt);
+        if (bytes > PARTY_MAX_BYTES) { toast(App.t('sheetTooBig')); return; }
+        if (!partyStorageOk(bytes * 2)) return;
+        let res = null;
+        mutate(function () {
+          const old = partySheets(card).find(function (s) { return s.id === targetSheetId; });
+          if (!old) return;
+          Object.keys(card.live || {}).forEach(function (k) {
+            if (k.indexOf(old.id + '/') === 0) delete card.live[k];
+          });
+          old.data = parsed.data;
+          old.ownerName = String(parsed.data.name || old.ownerName);
+          old.savedAt = partyToday();
+          old.sourceCharId = null;
+          res = { sheet: old, replaced: true };
+        });
+        if (!res) return;
+        toast(App.tf('partySheetUpdated', { name: partyOwnerName(res.sheet) }));
+        if (after) after();
+      });
+      return;
+    }
+    // v181: «Из файлов» — можно выбрать несколько листов сразу.
+    pickFiles(function (texts) {
+      let bytes = 0;
+      const parsed = [];
+      texts.forEach(function (txt) {
+        const p = parseSheetFile(txt);
+        if (!p.data) return;
+        const size = sheetBytes(txt);
+        if (size > PARTY_MAX_BYTES) return;
+        bytes += size * 2;
+        parsed.push(p.data);
+      });
+      if (!parsed.length) { toast(App.t('sheetBadFile')); return; }
+      if (!partyStorageOk(bytes)) return;
+      let added = 0, updated = 0;
+      mutate(function () {
+        parsed.forEach(function (data) {
+          const res = partyAddSheetData(card, data, null);
+          if (!res || res.error) return;
+          if (res.replaced) updated++; else added++;
+        });
+      });
+      if (added + updated) toast(App.tf(added ? 'partyAddedMany' : 'partyUpdatedMany', { n: added + updated }));
+      if (after) after();
+    });
+  }
+
+  function partyRefreshSheet(card, sheetId, after) {
+    const sh = partySheets(card).find(function (s) { return s.id === sheetId; });
+    if (!sh) return;
+    const src = sh.sourceCharId ? state.characters.find(function (c) { return c.id === sh.sourceCharId; }) : null;
+    if (!src) { partyPickFile(card, after, sheetId); return; }
+    const data = sanitizeSnapshot(src);
+    if (sheetBytes(JSON.stringify(data)) > PARTY_MAX_BYTES) { toast(App.t('sheetTooBig')); return; }
+    mutate(function () {
+      Object.keys(card.live || {}).forEach(function (k) {
+        if (k.indexOf(sh.id + '/') === 0) delete card.live[k];
+      });
+      sh.data = data;
+      sh.ownerName = String(data.name || sh.ownerName);
+      sh.savedAt = partyToday();
+    });
+    toast(App.tf('partySheetUpdated', { name: partyOwnerName(sh) }));
+    if (after) after();
+  }
+
+  function partyRemoveSheet(card, sheetId, after) {
+    const sh = partySheets(card).find(function (s) { return s.id === sheetId; });
+    if (!sh) return;
+    mutate(function () {
+      card.sheets = partySheets(card).filter(function (s) { return s.id !== sheetId; });
+      Object.keys(card.live || {}).forEach(function (k) {
+        if (k.indexOf(sheetId + '/') === 0) delete card.live[k];
+      });
+      if (!card.sheets.length) { card.selected = null; card.rowOrder = []; card.selTouched = false; }
+      else if (!card.selTouched) partyAutoSelect(card);
+    });
+    toast(App.tf('partySheetRemoved', { name: partyOwnerName(sh) }));
+    if (after) after();
+  }
+
+  // ----- Совпадения -----
+  function partyLevenshtein(a, b) {
+    const m = a.length, n = b.length;
+    if (!m) return n;
+    if (!n) return m;
+    let prev = new Array(n + 1);
+    for (let j = 0; j <= n; j++) prev[j] = j;
+    for (let i = 1; i <= m; i++) {
+      const cur = [i];
+      for (let j = 1; j <= n; j++) {
+        cur[j] = Math.min(prev[j] + 1, cur[j - 1] + 1, prev[j - 1] + (a.charAt(i - 1) === b.charAt(j - 1) ? 0 : 1));
+      }
+      prev = cur;
+    }
+    return prev[n];
+  }
+  const PARTY_MAX_WORDS = ['макс', 'максимум', 'максимальный', 'максимальная', 'max'];
+  function partyIsMaxWord(w) {
+    return PARTY_MAX_WORDS.indexOf(w) !== -1 || w.indexOf('максим') === 0;
+  }
+  function partyNameWords(v) {
+    return partyNorm(v).replace(/ё/g, 'е').split(/[^a-zа-я0-9]+/).filter(function (w) {
+      return w.length >= 2;
+    });
+  }
+  function partyStem(w) {
+    return w.length >= 5 ? w.slice(0, 4) : '';
+  }
+  // v183.1: сравнение по словам и основам — ловит «Физика / Физические возможности»,
+  // «Выносливость / Боевая выносливость». Пары «макс X / X» намеренно не сводим.
+  function partyTokenScore(a, b) {
+    const wa = partyNameWords(a), wb = partyNameWords(b);
+    if (!wa.length || !wb.length) return 0;
+    const maxA = wa.some(partyIsMaxWord), maxB = wb.some(partyIsMaxWord);
+    if (maxA !== maxB) return 0;
+    const ca = maxA ? wa.filter(function (w) { return !partyIsMaxWord(w); }) : wa;
+    const cb = maxB ? wb.filter(function (w) { return !partyIsMaxWord(w); }) : wb;
+    let best = 0;
+    ca.forEach(function (x) {
+      cb.forEach(function (y) {
+        if (x === y && x.length >= 4) best = Math.max(best, 0.82);
+        const sx = partyStem(x), sy = partyStem(y);
+        if (sx && sy && sx === sy) best = Math.max(best, 0.6);
+      });
+    });
+    return best;
+  }
+  function partySimilarity(a, b) {
+    if (!a || !b || a === b) return 0;
+    for (let i = 0; i < PARTY_SYNONYMS.length; i++) {
+      const s = PARTY_SYNONYMS[i];
+      if ((s[0] === a && s[1] === b) || (s[0] === b && s[1] === a)) return 1;
+    }
+    let best = partyTokenScore(a, b);
+    if (a.length >= 3 && b.length >= 3 && (a.indexOf(b) === 0 || b.indexOf(a) === 0)) {
+      best = Math.max(best, 0.9 - Math.abs(a.length - b.length) / Math.max(a.length, b.length) * 0.2);
+    }
+    if (a.length >= 4 && b.length >= 4) {
+      const d = partyLevenshtein(a, b);
+      if (d <= 2) best = Math.max(best, 0.8 - d * 0.1);
+    }
+    return best;
+  }
+  function partySuggestions(card, index) {
+    const out = [];
+    const ignored = card.ignored || [];
+    const all = index.all;
+    for (let i = 0; i < all.length; i++) {
+      for (let j = i + 1; j < all.length; j++) {
+        const a = all[i], b = all[j];
+        // один игрок не может дать две карточки в одну строку
+        if (a.owners.some(function (id) { return b.owners.indexOf(id) !== -1; })) continue;
+        const pair = [a.key, b.key].sort().join('|');
+        if (ignored.indexOf(pair) !== -1) continue;
+        const score = partySimilarity(a.key, b.key);
+        if (!score) continue;
+        const canonical = a.owners.length >= b.owners.length ? a : b;
+        const alias = canonical === a ? b : a;
+        out.push({ a: a, b: b, alias: alias, canonical: canonical, pair: pair, score: score });
+      }
+    }
+    out.sort(function (x, y) { return y.score - x.score || x.a.name.localeCompare(y.a.name); });
+    return out.slice(0, 8);
+  }
+
+  // ----- Настройки -----
+  let partySettingsRefresh = null;
+  let partySettingsQuery = '';
+  let partySettingsTab = 'sheets';
+  let partySettingsPick = false;
+  let partyTabResetScroll = false;
+  const PARTY_ACC_KEY = 'custplay-party-acc';
+  const partyAcc = { suggest: true, picked: true, manual: true, add: true };
+  try {
+    const rawAcc = localStorage.getItem(PARTY_ACC_KEY);
+    if (rawAcc) {
+      const acc = JSON.parse(rawAcc);
+      if (acc && typeof acc === 'object') {
+        ['suggest', 'picked', 'manual', 'add'].forEach(function (k) {
+          if (typeof acc[k] === 'boolean') partyAcc[k] = acc[k];
+        });
+      }
+    }
+  } catch (e) { /* ignore */ }
+  function savePartyAcc() {
+    try { localStorage.setItem(PARTY_ACC_KEY, JSON.stringify(partyAcc)); } catch (e) { /* ignore */ }
+  }
+  function partyApply(card, fn, after) {
+    mutate(fn);
+    if (after) after();
+  }
+  function partySetSelected(card, key, on) {
+    const index = partyIndex(card);
+    card.selTouched = true;
+    if (!Array.isArray(card.selected)) card.selected = partySelectedKeys(card, index);
+    if (!Array.isArray(card.rowOrder)) card.rowOrder = card.selected.slice();
+    const keys = card.selected.slice();
+    const at = keys.indexOf(key);
+    if (on && at === -1) keys.push(key);
+    if (!on && at !== -1) keys.splice(at, 1);
+    card.selected = keys;
+    const order = card.rowOrder.filter(function (k) { return keys.indexOf(k) !== -1; });
+    if (on && order.indexOf(key) === -1) order.push(key);
+    card.rowOrder = order;
+  }
+  function partyDoMerge(card, aliasKey, canonicalKey) {
+    card.selTouched = true;
+    const aliases = card.aliases || (card.aliases = {});
+    const a = partyResolveAlias(aliases, aliasKey);
+    const b = partyResolveAlias(aliases, canonicalKey);
+    if (!a || !b || a === b) return;
+    aliases[a] = b;
+    if (Array.isArray(card.selected)) {
+      card.selected = Array.from(new Set(card.selected.map(function (k) { return k === a ? b : k; })));
+    }
+    if (Array.isArray(card.rowOrder)) {
+      card.rowOrder = Array.from(new Set(card.rowOrder.map(function (k) { return k === a ? b : k; })));
+    }
+    const pair = [a, b].sort().join('|');
+    card.ignored = (card.ignored || []).filter(function (p) { return p !== pair; });
+  }
+  function partyDoIgnore(card, pair) {
+    if (!pair) return;
+    if (!Array.isArray(card.ignored)) card.ignored = [];
+    if (card.ignored.indexOf(pair) === -1) card.ignored.push(pair);
+  }
+  function partySelectCommon(card) {
+    card.selTouched = true;
+    const index = partyIndex(card);
+    card.selected = index.common.slice(0, PARTY_MAX_ROWS).map(function (p) { return p.key; });
+    card.rowOrder = card.selected.slice();
+  }
+  function partyClearSelection(card) {
+    card.selTouched = true;
+    card.selected = [];
+    card.rowOrder = [];
+  }
+  function partyMoveRow(card, key, dir) {
+    card.selTouched = true;
+    const index = partyIndex(card);
+    const keys = partyOrderKeys(card, index);
+    const i = keys.indexOf(key);
+    if (i === -1) return;
+    const j = i + (dir < 0 ? -1 : 1);
+    if (j < 0 || j >= keys.length) return;
+    keys.splice(i, 1);
+    keys.splice(j, 0, key);
+    card.rowOrder = keys;
+  }
+  function partyFilterParams(root, q) {
+    const nq = partyNorm(q);
+    root.querySelectorAll('.party-set-param').forEach(function (el) {
+      const hit = !nq || String(el.dataset.pname || '').indexOf(nq) !== -1;
+      el.classList.toggle('hidden', !hit);
+    });
+  }
+
+  function partyTabsHTML(card, index) {
+    const sheets = partySheets(card).length;
+    const sel = partySelectedKeys(card, index).length;
+    function tab(id, label, count) {
+      const on = partySettingsTab === id;
+      return '<button type="button" role="tab" class="party-tab' + (on ? ' on' : '') + '"' +
+        ' data-party="tab" data-tab="' + id + '" aria-selected="' + on + '">' +
+        esc(label) + ' <span>' + count + '</span></button>';
+    }
+    return '<div class="party-tabs" role="tablist">' +
+      tab('sheets', App.t('partyTabSheets'), sheets) +
+      tab('table', App.t('partyTabTable'), sel) +
+      '</div>';
+  }
+
+  function partySheetsSectionHTML(card) {
+    const sheets = partySheets(card);
+    const avail = partyAvailableChars();
+    let html = '<div class="party-set-section">' +
+      '<div class="party-set-head"><h3>' + esc(App.t('partySheets')) + ' <span>' + sheets.length + ' / ' + PARTY_MAX_PLAYERS + '</span></h3></div>';
+    if (!sheets.length) {
+      html += '<div class="party-set-empty">' + esc(App.t('partyNoSheets')) + '</div>';
+    } else {
+      html += '<div class="party-sheet-list">' + sheets.map(function (sh) {
+        return '<div class="party-sheet-row">' +
+          '<div class="party-sheet-main"><b>' + esc(partyOwnerName(sh)) + '</b>' +
+            '<span>' + esc(App.tf('partySheetMeta', {
+              date: sheetDateText(sh.savedAt) || '—',
+              cards: partySheetCards(sh)
+            })) + '</span></div>' +
+          '<div class="party-sheet-actions">' +
+            '<button type="button" data-party="refresh-sheet" data-sheet="' + esc(sh.id) + '"' +
+              ' title="' + esc(App.t('partyRefreshSheet')) + '" aria-label="' + esc(App.t('partyRefreshSheet')) + '">⟳</button>' +
+            '<button type="button" data-party="remove-sheet" data-sheet="' + esc(sh.id) + '"' +
+              ' title="' + esc(App.t('partyRemoveSheet')) + '" aria-label="' + esc(App.t('partyRemoveSheet')) + '">' + TRASH_SVG + '</button>' +
+          '</div></div>';
+      }).join('') + '</div>';
+    }
+    html += '<div class="party-set-add">' +
+      (avail.length ? '<button type="button" data-party="import-app">＋ ' + esc(App.t('partyAddAll')) + '</button>' : '') +
+      '<button type="button" data-party="import-device">＋ ' + esc(App.t('partyAddFiles')) + '</button>' +
+      '</div>';
+    if (!avail.length) {
+      html += '<div class="party-set-hint">' + esc(App.t('partyNoPlayersHint')) + '</div>';
+    }
+    html += '</div>';
+    return html;
+  }
+
+  function partyAccHTML(id, title, count, body, tools) {
+    const open = partyAcc[id] !== false;
+    return '<section class="party-set-section party-acc">' +
+      '<div class="party-acc-head">' +
+        '<button type="button" class="party-acc-toggle" data-party="acc" data-acc="' + id + '" aria-expanded="' + open + '">' +
+          '<span class="party-acc-chev" aria-hidden="true">' + (open ? '▾' : '▸') + '</span>' +
+          '<span class="party-acc-title">' + esc(title) +
+            (count != null ? ' <span>' + count + '</span>' : '') +
+          '</span>' +
+        '</button>' +
+        (tools || '') +
+      '</div>' +
+      '<div class="party-acc-body"' + (open ? '' : ' hidden') + '>' + body + '</div>' +
+    '</section>';
+  }
+
+  function partyTableSectionHTML(card, index) {
+    const sheets = partySheets(card);
+    const keys = partyOrderKeys(card, index);
+    const picked = new Set(keys);
+    const suggestions = partySuggestions(card, index);
+    let html = '';
+
+    // Совпадения показываем только когда они есть, и не отдельной постоянной секцией.
+    if (suggestions.length) {
+      const body = suggestions.map(function (s) {
+        return '<div class="party-set-suggest">' +
+          '<div class="party-set-snames"><b>' + esc(s.a.name) + '</b><span>≈</span><b>' + esc(s.b.name) + '</b></div>' +
+          '<div class="party-set-sowners">' + esc(partyOwnersText(s.a, sheets)) + ' · ' + esc(partyOwnersText(s.b, sheets)) + '</div>' +
+          '<div class="party-set-sactions">' +
+            '<button type="button" class="primary" data-party="merge" data-a="' + esc(s.alias.key) + '" data-b="' + esc(s.canonical.key) + '">' + esc(App.t('partyMerge')) + '</button>' +
+            '<button type="button" data-party="ignore" data-pair="' + esc(s.pair) + '">' + esc(App.t('partyNotSimilar')) + '</button>' +
+          '</div></div>';
+      }).join('');
+      html += partyAccHTML('suggest', App.t('partyMatches'), suggestions.length, body);
+    }
+
+    const pickedTools = '<span class="party-set-tools">' +
+      '<button type="button" data-party="select-common">' + esc(App.t('partySelectCommon')) + '</button>' +
+      '<button type="button" data-party="clear-sel">' + esc(App.t('partyClearSel')) + '</button>' +
+      '</span>';
+    let pickedBody;
+    if (!keys.length) {
+      pickedBody = '<div class="party-set-empty">' + esc(App.t('partyPickedEmpty')) + '</div>';
+    } else {
+      pickedBody = '<p class="party-set-hint party-drag-hint">' + esc(App.t('partyDragHint')) + '</p>' +
+        '<div class="party-picked" id="party-picked" role="list">' + keys.map(function (k, i) {
+          const p = index.map.get(k);
+          const name = p ? p.name : k;
+          return '<div class="party-pick-row" data-key="' + esc(k) + '" tabindex="0" role="listitem"' +
+              ' aria-label="' + esc(name + '. ' + App.t('partyDragHint')) + '">' +
+            '<span class="party-pick-num">' + (i + 1) + '</span>' +
+            '<span class="party-pick-name">' + esc(name) + '</span>' +
+            '<button type="button" class="party-pick-x" data-party="unpick" data-key="' + esc(k) + '"' +
+              ' title="' + esc(App.t('partyClearSel')) + '" aria-label="' + esc(App.t('partyClearSel')) + '">×</button>' +
+          '</div>';
+        }).join('') + '</div>';
+    }
+    html += partyAccHTML('picked', App.t('partyPicked'), keys.length + ' / ' + PARTY_MAX_ROWS, pickedBody, pickedTools);
+
+    // Ручное сопоставление: любые два параметра, даже если алгоритм не нашёл сходства.
+    let manualBody;
+    if (index.all.length < 2) {
+      manualBody = '<div class="party-set-empty">' + esc(App.t('partyNoParams')) + '</div>';
+    } else {
+      const opts = function (selIndex) {
+        return index.all.map(function (p, i) {
+          return '<option value="' + esc(p.key) + '"' + (i === selIndex ? ' selected' : '') + '>' + esc(p.name) + '</option>';
+        }).join('');
+      };
+      manualBody = '<div class="party-manual">' +
+        '<label>' + esc(App.t('partyMergeFirst')) + '<select id="party-merge-a">' + opts(0) + '</select></label>' +
+        '<span class="party-manual-eq">≈</span>' +
+        '<label>' + esc(App.t('partyMergeSecond')) + '<select id="party-merge-b">' + opts(1) + '</select></label>' +
+        '<button type="button" data-party="merge-manual">' + esc(App.t('partyMerge')) + '</button>' +
+      '</div>' +
+      '<p class="party-set-hint">' + esc(App.t('partyMergeOverlap')) + '</p>';
+    }
+    html += partyAccHTML('manual', App.t('partyMergeManual'), null, manualBody);
+
+    const addBody = (index.all.length > 8
+      ? '<input id="party-search" class="party-search" type="search" placeholder="' + esc(App.t('partySearch')) + '" autocomplete="off" value="' + esc(partySettingsQuery) + '">'
+      : '') +
+      '<div class="party-set-list">' +
+        (index.all.length ? index.all.map(function (p) {
+          const meta = [partyParamTypeText(p), partyOwnersText(p, sheets)].filter(Boolean).join(' · ');
+          return '<label class="party-set-param' + (picked.has(p.key) ? ' on' : '') + '" data-pname="' + esc(p.key) + '"' +
+              (meta ? ' title="' + esc(meta) + '"' : '') + '>' +
+            '<input type="checkbox" data-party="param" data-key="' + esc(p.key) + '"' + (picked.has(p.key) ? ' checked' : '') + '>' +
+            '<span class="party-set-pname">' + esc(p.name) + '</span>' +
+          '</label>';
+        }).join('') : '<div class="party-set-empty">' + esc(App.t('partyNoParams')) + '</div>') +
+      '</div>';
+    html += partyAccHTML('add', App.t('partyAddParams'), null, addBody);
+
+    return html;
+  }
+
+  function partyPickSectionHTML(card) {
+    const list = partyAvailableChars();
+    return '<div class="party-set-section">' +
+      '<div class="party-set-head"><h3>' + esc(App.t('partyAddAll')) + '</h3></div>' +
+      '<p class="party-set-hint">' + esc(App.t('partySelectSheets')) + '</p>' +
+      partyCharPickerHTML(card) +
+      '<div class="party-set-add">' +
+        (list.length ? '<button type="button" class="primary" data-party="import-add">' + esc(App.t('partyAddSelected')) + '</button>' : '') +
+        '<button type="button" data-party="import-cancel">' + esc(App.t('cancel')) + '</button>' +
+      '</div></div>';
+  }
+
+  function partySettingsHTML(card) {
+    const index = partyIndex(card);
+    const hasSheets = partySheets(card).length > 0;
+    if (!hasSheets) partySettingsTab = 'sheets';
+    const body = partySettingsPick
+      ? partyPickSectionHTML(card)
+      : (partySettingsTab === 'sheets' ? partySheetsSectionHTML(card) : partyTableSectionHTML(card, index));
+    return '<div class="party-settings">' +
+      (hasSheets && !partySettingsPick ? partyTabsHTML(card, index) : '') +
+      '<div class="party-tab-body">' + body + '</div></div>';
+  }
+
+  // Перетаскивание выбранных параметров: без ручки, тянется вся строка.
+  function partyBindPickedDrag(root, cardId, refresh) {
+    const list = root.querySelector('#party-picked');
+    if (!list) return;
+    function rows() {
+      return Array.prototype.slice.call(list.querySelectorAll('.party-pick-row'));
+    }
+    function renumber() {
+      rows().forEach(function (r, i) {
+        const n = r.querySelector('.party-pick-num');
+        if (n) n.textContent = i + 1;
+      });
+    }
+    let drag = null;
+    function onMove(e) {
+      if (!drag) return;
+      if (!drag.moved) {
+        if (Math.abs(e.clientY - drag.startY) < 4) return;
+        drag.moved = true;
+        drag.row.classList.add('dragging');
+      }
+      e.preventDefault();
+      const rest = rows().filter(function (r) { return r !== drag.row; });
+      let before = null;
+      for (let i = 0; i < rest.length; i++) {
+        const b = rest[i].getBoundingClientRect();
+        if (e.clientY < b.top + b.height / 2) { before = rest[i]; break; }
+      }
+      if (before) {
+        if (before.previousElementSibling !== drag.row) list.insertBefore(drag.row, before);
+      } else if (list.lastElementChild !== drag.row) {
+        list.appendChild(drag.row);
+      }
+      renumber();
+    }
+    function onUp() {
+      document.removeEventListener('pointermove', onMove);
+      document.removeEventListener('pointerup', onUp);
+      document.removeEventListener('pointercancel', onUp);
+      if (!drag) return;
+      const moved = drag.moved;
+      drag.row.classList.remove('dragging');
+      drag = null;
+      if (!moved) return;
+      const card = findCard(cardId);
+      if (!card) return;
+      const keys = rows().map(function (r) { return r.dataset.key; });
+      mutate(function () {
+        card.selTouched = true;
+        card.rowOrder = keys;
+      });
+      refresh();
+    }
+    rows().forEach(function (row) {
+      row.addEventListener('pointerdown', function (e) {
+        if (e.pointerType === 'mouse' && e.button !== 0) return;
+        if (e.target.closest('button')) return;
+        e.preventDefault();
+        try { row.focus({ preventScroll: true }); } catch (err) { row.focus(); }
+        drag = { row: row, startY: e.clientY, moved: false };
+        document.addEventListener('pointermove', onMove, { passive: false });
+        document.addEventListener('pointerup', onUp);
+        document.addEventListener('pointercancel', onUp);
+      });
+      row.addEventListener('keydown', function (e) {
+        if (!e.altKey || (e.key !== 'ArrowUp' && e.key !== 'ArrowDown')) return;
+        e.preventDefault();
+        const card = findCard(cardId);
+        if (!card) return;
+        partyApply(card, function () {
+          partyMoveRow(card, row.dataset.key, e.key === 'ArrowUp' ? -1 : 1);
+        }, refresh);
+      });
+    });
+  }
+
+  function partyWireSettings(cardId, root, refresh) {
+    root.addEventListener('click', function (e) {
+      const b = e.target.closest('[data-party]');
+      if (!b) return;
+      const card = findCard(cardId);
+      if (!card) return;
+      const act = b.dataset.party;
+      if (act === 'acc') {
+        const id = b.dataset.acc;
+        partyAcc[id] = !(partyAcc[id] !== false);
+        savePartyAcc();
+        refresh();
+        return;
+      }
+      if (act === 'tab') {
+        partySettingsPick = false;
+        partySettingsTab = b.dataset.tab === 'table' ? 'table' : 'sheets';
+        partyTabResetScroll = true;
+        refresh();
+        return;
+      }
+      if (act === 'import-device') {
+        partyPickFile(card, function () {
+          partySettingsPick = false;
+          partySettingsTab = 'table';
+          partyTabResetScroll = true;
+          refresh();
+        });
+        return;
+      }
+      if (act === 'import-app') {
+        if (!partyAvailableChars().length) { toast(App.t('partyNoPlayersHint')); return; }
+        partySettingsPick = true;
+        partyTabResetScroll = true;
+        refresh();
+        return;
+      }
+      if (act === 'import-cancel') {
+        partySettingsPick = false;
+        partyTabResetScroll = true;
+        refresh();
+        return;
+      }
+      if (act === 'import-add') {
+        const ids = Array.prototype.slice.call(root.querySelectorAll('.party-char-pick input[type="checkbox"]:checked'))
+          .map(function (i) { return i.value; });
+        if (!ids.length) { toast(App.t('partyPickNone')); return; }
+        partyAddChars(card, ids);
+        partySettingsPick = false;
+        partySettingsTab = 'table';
+        partyTabResetScroll = true;
+        refresh();
+        return;
+      }
+      if (act === 'refresh-sheet') { partyRefreshSheet(card, b.dataset.sheet, refresh); return; }
+      if (act === 'remove-sheet') {
+        const sh = partySheets(card).find(function (s) { return s.id === b.dataset.sheet; });
+        if (!sh) return;
+        askDelete({
+          anchor: b,
+          text: App.tf('partyRemoveConfirm', { name: partyOwnerName(sh) }),
+          title: App.t('partyRemoveSheet'),
+          onYes: function () {
+            const cur = findCard(cardId);
+            if (cur) partyRemoveSheet(cur, b.dataset.sheet, refresh);
+          }
+        });
+        return;
+      }
+      if (act === 'select-common') { partyApply(card, function () { partySelectCommon(card); }, refresh); return; }
+      if (act === 'clear-sel') { partyApply(card, function () { partyClearSelection(card); }, refresh); return; }
+      if (act === 'unpick') {
+        partyApply(card, function () { partySetSelected(card, b.dataset.key, false); }, refresh);
+        return;
+      }
+      if (act === 'merge') {
+        partyApply(card, function () { partyDoMerge(card, b.dataset.a, b.dataset.b); }, refresh);
+        return;
+      }
+      if (act === 'merge-manual') {
+        const aSel = document.getElementById('party-merge-a');
+        const bSel = document.getElementById('party-merge-b');
+        if (!aSel || !bSel || !aSel.value || !bSel.value || aSel.value === bSel.value) {
+          toast(App.t('partyMergeSame'));
+          return;
+        }
+        const aName = aSel.options[aSel.selectedIndex] ? aSel.options[aSel.selectedIndex].text : aSel.value;
+        const bName = bSel.options[bSel.selectedIndex] ? bSel.options[bSel.selectedIndex].text : bSel.value;
+        partyApply(card, function () { partyDoMerge(card, aSel.value, bSel.value); }, refresh);
+        toast(App.tf('partyMerged', { a: aName, b: bName }));
+        return;
+      }
+      if (act === 'ignore') { partyApply(card, function () { partyDoIgnore(card, b.dataset.pair); }, refresh); return; }
+    });
+    root.addEventListener('change', function (e) {
+      const cb = e.target.closest('[data-party="param"]');
+      if (!cb) return;
+      const card = findCard(cardId);
+      if (!card) return;
+      partyApply(card, function () { partySetSelected(card, cb.dataset.key, cb.checked); }, refresh);
+    });
+    root.addEventListener('input', function (e) {
+      if (!e.target || e.target.id !== 'party-search') return;
+      partySettingsQuery = e.target.value;
+      partyFilterParams(root, partySettingsQuery);
+    });
+  }
+
+  function openPartySettings(card) {
+    const cardId = card.id;
+    partySettingsQuery = '';
+    partySettingsPick = false;
+    // С листами встречаем таблицей, без листов — добавлением.
+    partySettingsTab = partySheets(card).length ? 'table' : 'sheets';
+    openModal(App.t('partySettings'), '<div id="party-settings" class="party-settings-body"></div>', [
+      { label: App.t('close'), cls: 'primary', onClick: function () { partySettingsRefresh = null; } }
+    ]);
+    const root = document.getElementById('party-settings');
+    const modal = document.getElementById('modal');
+    function refresh() {
+      if (!root || !root.isConnected || modal.classList.contains('hidden')) {
+        partySettingsRefresh = null;
+        return;
+      }
+      const current = findCard(cardId);
+      if (!current) { partySettingsRefresh = null; closeModal(); return; }
+      const top = modal.scrollTop;
+      root.innerHTML = partySettingsHTML(current);
+      partyFilterParams(root, partySettingsQuery);
+      partyBindPickedDrag(root, cardId, refresh);
+      modal.scrollTop = partyTabResetScroll ? 0 : top;
+      partyTabResetScroll = false;
+    }
+    partyWireSettings(cardId, root, refresh);
+    partySettingsRefresh = refresh;
+    refresh();
+  }
+
+  // ----- Добавление листа -----
+  function openPartyAddMenu(card, anchor) {
+    const menu = document.createElement('div');
+    menu.className = 'ctxmenu';
+    menu.id = 'partyAddMenu';
+    menu.innerHTML =
+      '<button type="button" data-p="app">＋ ' + esc(App.t('partyAddAll')) + '</button>' +
+      '<button type="button" data-p="device">＋ ' + esc(App.t('partyAddFiles')) + '</button>';
+    menu.addEventListener('click', function (e) {
+      const b = e.target.closest('button');
+      if (!b) return;
+      if (typeof closeMenuById === 'function') closeMenuById('partyAddMenu');
+      else menu.remove();
+      if (b.dataset.p === 'app') openPartyCharPicker(card);
+      else partyPickFile(card);
+    });
+    // из кебаба кнопка-якорь уже оторвана от DOM — берём кнопку на карточке
+    if (!anchor || !anchor.isConnected) {
+      anchor = document.querySelector('.card[data-id="' + card.id + '"] [data-act="party:addSheet"]') ||
+        document.querySelector('.card[data-id="' + card.id + '"]');
+    }
+    if (!anchor) return;
+    mountMenu(menu, anchor, { align: 'right' });
+  }
+  function partyCharPickerHTML(card) {
+    const list = partyAvailableChars();
+    const inParty = new Set(partySheets(card).map(function (s) { return s.sourceCharId; }).filter(Boolean));
+    if (!list.length) return '<div class="party-set-empty">' + esc(App.t('partyNoPlayersHint')) + '</div>';
+    return '<div class="party-char-pick">' + list.map(function (c) {
+      return '<label class="party-char-row">' +
+        '<input type="checkbox" value="' + esc(c.id) + '">' +
+        '<span class="party-char-name">' + esc(c.name) + '</span>' +
+        (inParty.has(c.id) ? '<span class="party-char-note">' + esc(App.t('partyInParty')) + '</span>' : '') +
+      '</label>';
+    }).join('') + '</div>';
+  }
+  function openPartyCharPicker(card, after) {
+    const list = partyAvailableChars();
+    if (!list.length) { toast(App.t('partyNoPlayersHint')); return; }
+    openModal(App.t('partyAddAll'),
+      partyCharPickerHTML(card) +
+      '<p class="party-set-hint">' + esc(App.t('partySelectSheets')) + '</p>',
+      [
+        { label: App.t('cancel') },
+        { label: App.t('partyAddSelected'), cls: 'primary', onClick: function () {
+          const m = document.getElementById('modal');
+          const ids = Array.prototype.slice.call(m.querySelectorAll('input[type="checkbox"]:checked')).map(function (i) { return i.value; });
+          if (!ids.length) { toast(App.t('partyPickNone')); return false; }
+          partyAddChars(card, ids, after);
+          return true;
+        } }
+      ]
+    );
+  }
+
+  // ----- Детальный лист и встреча -----
+  function partyHpScore(o) {
+    const name = String(o.name || '').toLowerCase();
+    const health = String(App.t('presetHealth')).toLowerCase();
+    let s = 0;
+    if (name === health) s += 4;
+    if (name.indexOf('здоров') !== -1 || /(^|\s)(hp|health)(\s|$)/i.test(name)) s += 1;
+    if (o.restores) s += 2;
+    return s;
+  }
+  function partyHpOptions(card, sh) {
+    const data = sh && sh.data;
+    if (!data) return [];
+    const list = [];
+    invalidateMods();
+    withHostChar(data, function () {
+      (data.cards || []).forEach(function (c) {
+        if (c.type !== 'counter') return;
+        const mx = counterMaxNum(c);
+        if (mx == null || !Number.isFinite(mx) || mx <= 0) return;
+        list.push({
+          name: String(c.name || App.t('typeCounter')),
+          current: Math.max(0, Math.min(partyLiveValue(card, sh, c), mx)),
+          max: mx,
+          restores: !!c.restores
+        });
+      });
+    });
+    invalidateMods();
+    list.sort(function (a, b) { return partyHpScore(b) - partyHpScore(a); });
+    return list;
+  }
+  function partyAddFighter(card, sheetId) {
+    const sh = partySheets(card).find(function (s) { return s.id === sheetId; });
+    if (!sh) return;
+    const options = partyHpOptions(card, sh);
+    if (!options.length) { toast(App.t('sheetNoHp')); return; }
+    if (options.length === 1) { partyAddFighterWith(card, sh, options[0]); return; }
+    openModal(App.t('sheetPickHp'),
+      '<div class="btn-col sheet-hp-pick">' + options.map(function (o, i) {
+        return '<button type="button" data-i="' + i + '">' + esc(o.name) + ' · ' + esc(fmt(o.current) + '/' + fmt(o.max)) + '</button>';
+      }).join('') + '</div>',
+      [{ label: App.t('cancel') }]
+    );
+    const m = document.getElementById('modal');
+    m.querySelectorAll('.sheet-hp-pick button').forEach(function (b) {
+      b.addEventListener('click', function () {
+        const o = options[Number(b.dataset.i) || 0];
+        closeModal();
+        if (o) partyAddFighterWith(card, sh, o);
+      });
+    });
+  }
+  function partyAddFighterWith(card, sh, hp) {
+    const ch = activeChar();
+    if (!ch) return;
+    let rowName = '';
+    mutate(function () {
+      let enc = ch.cards.find(function (c) { return c.type === 'initiative'; });
+      if (!enc) {
+        enc = createCard('initiative', uniqueCardNameIn(ch, typeLabel('initiative')));
+        enc.page = curPageId(ch);
+        ch.cards.push(enc);
+        autoPlace(ch, enc);
+      }
+      const row = iniNewRow(enc, null);
+      row.name = iniUniqueRowName(enc, partyOwnerName(sh));
+      row.hp = { current: hp.current, max: hp.max, shield: 0 };
+      row.ac = 0;
+      row.attacks = [];
+      row.notes = '';
+      row.boss = false;
+      row.out = false;
+      rowName = row.name;
+    });
+    toast(App.tf('sheetFighterAdded', { name: rowName }));
+  }
+
+  // ----- Второй слой: полная таблица (телефон) -----
+  let partyMemberView = null;
+  function bindPartyCells(root, card) {
+    root.querySelectorAll('[data-pcell]').forEach(function (td) {
+      td.addEventListener('click', function () { partyInlineEdit(td, card); });
+      td.addEventListener('keydown', function (e) {
+        if (e.key !== 'Enter' && e.key !== ' ') return;
+        e.preventDefault();
+        partyInlineEdit(td, card);
+      });
+    });
+  }
+  function buildPartyPanel(card) {
+    partyMemberView = null;
+    const panel = document.createElement('div');
+    panel.className = 'layer-panel party-panel';
+    panel.tabIndex = -1;
+    function draw() {
+      panel.innerHTML =
+        '<div class="layer-head"><span class="card-name">' + esc(card.name || App.t('typeParty')) + '</span>' +
+          '<div class="tools">' +
+            '<button type="button" class="party-set-btn" title="' + esc(App.t('partySettings')) + '"' +
+              ' aria-label="' + esc(App.t('partySettings')) + '">✎</button>' +
+            '<button type="button" class="party-add-btn" title="' + esc(App.t('partyAddSheet')) + '"' +
+              ' aria-label="' + esc(App.t('partyAddSheet')) + '">＋</button>' +
+          '</div></div>' +
+        '<div class="party-panel-body">' + partyTableHTML(card, { full: true }) + '</div>';
+      const ov = document.getElementById('labelLayer');
+      const nameEl = panel.querySelector('.layer-head .card-name');
+      if (nameEl) {
+        nameEl.title = App.t('partyRenameHint');
+        nameEl.addEventListener('dblclick', function (e) {
+          e.preventDefault();
+          e.stopPropagation();
+          partyStartRename(card, nameEl);
+        });
+      }
+      panel.querySelector('.party-set-btn').addEventListener('click', function () { openPartySettings(card); });
+      panel.querySelector('.party-add-btn').addEventListener('click', function (e) { openPartyAddMenu(card, e.currentTarget); });
+      panel.querySelectorAll('[data-act]').forEach(function (b) {
+        b.addEventListener('click', function (e) { handleAction(card.id, b.dataset, e); });
+      });
+      bindPartyCells(panel, card);
+      if (ov && !ov.contains(panel)) ov.appendChild(panel);
+    }
+    panel._partyRefresh = draw;
+    draw();
+    return panel;
+  }
+
+  // ----- Второй слой: лист игрока -----
+  function openPartyMember(cardId, sheetId, opts) {
+    const card = findCard(cardId);
+    if (!card || card.type !== 'party') return;
+    const sheet = partySheets(card).find(function (s) { return s.id === sheetId; });
+    if (!sheet) { closeLabelLayer(); return; }
+    partyMemberView = { cardId: cardId, sheetId: sheetId, opts: opts || {} };
+    const ov = document.getElementById('labelLayer');
+    const panel = buildSheetView(function () {
+      const c = findCard(cardId);
+      return c ? partySheets(c).find(function (s) { return s.id === sheetId; }) : null;
+    }, {
+      cardId: cardId,
+      sheetId: sheetId,
+      partyCard: card,
+      back: opts && opts.back
+    });
+    layerCardId = cardId;
+    ov.innerHTML = '';
+    ov.appendChild(panel);
+    ov.setAttribute('aria-label', partyOwnerName(sheet));
+    ov.classList.remove('hidden');
+    updateScrollLock();
+    const first = ov.querySelector('button, [tabindex="0"]');
+    if (first) { try { first.focus({ preventScroll: true }); } catch (e) { first.focus(); } }
+  }
+
+  // Бывший слой снимка: страницы и поток карточек только для чтения.
+  function buildSheetView(getSheet, opts) {
+    opts = opts || {};
+    const panel = document.createElement('div');
+    panel.className = 'layer-panel sheet-panel';
+    panel.tabIndex = -1;
+    let data = null;
+    let pageId = null;
+
+    function draw(flow, body) {
+      const scroll = body.scrollTop;
+      flow.innerHTML = '';
+      if (!data) {
+        flow.innerHTML = '<div class="empty-hint">' + esc(App.t('sheetEmpty')) + '</div>';
+        return;
+      }
+      const list = data.cards.filter(function (c) { return c.page === pageId; });
+      if (!list.length) {
+        flow.innerHTML = '<div class="empty-hint">' + esc(App.t('sheetPageEmpty')) + '</div>';
+        return;
+      }
+      const desktop = isDesktop();
+      const roCtx = viewCtx({ desktop: desktop, readonly: true, host: data });
+      invalidateMods();
+      withHostChar(data, function () {
+        list.forEach(function (c) {
+          const wrap = document.createElement('div');
+          wrap.className = 'snap-card';
+          if (desktop) {
+            const w = Math.max(143, Math.min(560, num(c.w) || 300));
+            const h = Math.max(80, Math.min(900, num(c.h) || 120));
+            wrap.style.width = w + 'px';
+            wrap.innerHTML = cardView(c, true, roCtx);
+            const el = wrap.firstElementChild;
+            if (el) { el.style.width = '100%'; el.style.height = h + 'px'; }
+          } else {
+            const wide = (num(c.w) || 300) > 160;
+            wrap.style.gridColumn = wide ? 'span 2' : 'span 1';
+            wrap.innerHTML = cardView(c, false, roCtx);
+          }
+          flow.appendChild(wrap);
+        });
+      });
+      invalidateMods();
+      flow.querySelectorAll('input, textarea, select').forEach(function (inp) {
+        inp.tabIndex = -1;
+        if (inp.tagName === 'SELECT') inp.disabled = true;
+        else inp.readOnly = true;
+      });
+      flow.querySelectorAll('.note-tab').forEach(function (b) {
+        b.addEventListener('click', function () {
+          const pid = b.dataset.page;
+          const nc = (data.cards || []).find(function (x) {
+            return x.type === 'note' && Array.isArray(x.pages) &&
+              x.pages.some(function (p) { return p.id === pid; });
+          });
+          if (!nc) return;
+          nc.pageId = pid;
+          draw(flow, body);
+        });
+      });
+      body.scrollTop = scroll;
+    }
+
+    function reload(resetPage) {
+      const sheet = getSheet();
+      const src = sheet && sheet.data && Array.isArray(sheet.data.cards) ? sheet.data : null;
+      data = src ? JSON.parse(JSON.stringify(src)) : null;
+      if (!data || !data.pages.length) pageId = null;
+      else if (resetPage || !data.pages.some(function (p) { return p.id === pageId; })) {
+        pageId = data.pages[0].id;
+      }
+      panel.innerHTML = '';
+      const head = document.createElement('div');
+      head.className = 'layer-head';
+      const date = sheetDateText(sheet && sheet.savedAt);
+      head.innerHTML =
+        (opts.back ? '<button type="button" class="sheet-back" title="' + esc(App.t('partyBackToTable')) + '"' +
+          ' aria-label="' + esc(App.t('partyBackToTable')) + '">←</button>' : '') +
+        '<span class="card-name">' + esc(sheet ? partyOwnerName(sheet) : App.t('partyOpenSheet')) + '</span>' +
+        (date ? '<span class="sheet-head-date">' + date + '</span>' : '') +
+        '<div class="tools">' +
+          '<button type="button" class="sheet-refresh" title="' + esc(App.t('partyRefreshSheet')) + '"' +
+            ' aria-label="' + esc(App.t('partyRefreshSheet')) + '">⟳</button>' +
+          '<button type="button" class="sheet-fight" title="' + esc(App.t('sheetAddFighter')) + '"' +
+            ' aria-label="' + esc(App.t('sheetAddFighter')) + '">⚔</button>' +
+        '</div>';
+      panel.appendChild(head);
+      const back = head.querySelector('.sheet-back');
+      if (back) back.addEventListener('click', function () {
+        if (opts.back) opts.back();
+      });
+      head.querySelector('.sheet-refresh').addEventListener('click', function () {
+        partyRefreshSheet(opts.partyCard, opts.sheetId);
+      });
+      head.querySelector('.sheet-fight').addEventListener('click', function () {
+        partyAddFighter(opts.partyCard, opts.sheetId);
+      });
+      if (data && data.pages.length > 1) {
+        const tabs = document.createElement('div');
+        tabs.className = 'sheet-tabs';
+        data.pages.forEach(function (p, i) {
+          const b = document.createElement('button');
+          b.type = 'button';
+          b.className = 'sheet-tab' + (p.id === pageId ? ' on' : '');
+          b.textContent = (p.name || '').trim() || (App.t('pageDefault') + ' ' + (i + 1));
+          b.addEventListener('click', function () {
+            if (pageId === p.id) return;
+            pageId = p.id;
+            reload(false);
+          });
+          tabs.appendChild(b);
+        });
+        panel.appendChild(tabs);
+      }
+      const body = document.createElement('div');
+      body.className = 'sheet-body';
+      const flow = document.createElement('div');
+      flow.className = 'sheet-flow';
+      body.appendChild(flow);
+      panel.appendChild(body);
+      draw(flow, body);
+    }
+
+    panel._sheetRefresh = function () { reload(false); };
+    reload(true);
+    return panel;
+  }
+
+  // Редактирование счётчика прямо в таблице. Правка живёт в card.live,
+  // исходный снимок листа не меняется.
+  function partyInlineEdit(td, card) {
+    if (!td || td.querySelector('.party-step')) return;
+    const sh = partySheets(card).find(function (s) { return s.id === td.dataset.sheet; });
+    const c = sh && ((sh.data && sh.data.cards) || []).find(function (x) { return x.id === td.dataset.card; });
+    if (!sh || !sh.data || !c || c.type !== 'counter') return;
+    const key = partyLiveKey(sh, c);
+    const start = partyLiveValue(card, sh, c);
+    invalidateMods();
+    const max = withHostChar(sh.data, function () { return counterMaxNum(c); });
+    invalidateMods();
+    let draft = start;
+    let done = false;
+    td.classList.add('editing');
+    td.innerHTML = '<div class="party-step">' +
+      '<button type="button" data-step="-1" aria-label="' + esc(App.t('decrease')) + '">−</button>' +
+      '<input type="text" inputmode="numeric" value="' + esc(String(start)) + '" aria-label="' + esc(App.t('partyEditCounter')) + '">' +
+      '<button type="button" data-step="1" aria-label="' + esc(App.t('increase')) + '">+</button>' +
+      '</div>';
+    const inp = td.querySelector('input');
+    function clamp(v) {
+      let n = Math.round(num(v));
+      if (n < 0) n = 0;
+      if (max != null && max > 0 && n > max) n = max;
+      return n;
+    }
+    function set(v) {
+      draft = clamp(v);
+      inp.value = String(draft);
+    }
+    td.querySelectorAll('[data-step]').forEach(function (b) {
+      // не отдаём фокус кнопке: иначе input.blur закроет редактор до клика
+      b.addEventListener('pointerdown', function (e) { e.preventDefault(); });
+      b.addEventListener('click', function (e) {
+        e.stopPropagation();
+        set(draft + Number(b.dataset.step));
+      });
+    });
+    inp.addEventListener('input', function () { draft = clamp(inp.value); });
+    function finish(apply) {
+      if (done) return;
+      done = true;
+      td.classList.remove('editing');
+      if (apply && draft !== start) {
+        mutate(function () {
+          if (!card.live || typeof card.live !== 'object') card.live = {};
+          if (draft === num(c.current)) delete card.live[key];
+          else card.live[key] = draft;
+        });
+      } else {
+        render();
+        if (layerCardId) refreshLayer();
+      }
+    }
+    inp.addEventListener('keydown', function (e) {
+      if (e.key === 'Enter') { e.preventDefault(); finish(true); }
+      else if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); finish(false); }
+    });
+    inp.addEventListener('blur', function () { finish(true); });
+    inp.focus();
+    inp.select();
+  }
+
+  // ----- Настройки хранилища / сводка -----
+  function partyStorageStats() {
+    let count = 0, kb = 0;
+    state.characters.forEach(function (c) {
+      (c.cards || []).forEach(function (x) {
+        if (x.type !== 'party') return;
+        count++;
+        kb += partyCardBytes(x) / 1024;
+      });
+    });
+    return { count: count, kb: Math.max(1, Math.round(kb)) };
+  }
+
+  // Привязка карточки на холсте: счётчики в таблице и компактный вид на телефоне.
+  function partyStartRename(card, el) {
+    if (!card || !el || el.querySelector('input')) return;
+    const old = card.name;
+    const input = document.createElement('input');
+    input.type = 'text';
+    input.className = 'party-rename-input';
+    input.maxLength = 80;
+    input.value = old;
+    input.addEventListener('pointerdown', function (e) { e.stopPropagation(); });
+    input.addEventListener('click', function (e) { e.stopPropagation(); });
+    el.textContent = '';
+    el.appendChild(input);
+    input.focus();
+    input.select();
+    let done = false;
+    function restore() { el.textContent = old; }
+    function commit(saveIt) {
+      if (done) return;
+      done = true;
+      const name = input.value.trim();
+      if (!saveIt || !name || name === old) { restore(); return; }
+      if (isNameUsed(name, card.id)) { toast(App.t('uniqueNameError')); restore(); return; }
+      mutate(function () { card.name = name; });
+    }
+    input.addEventListener('keydown', function (e) {
+      if (e.key === 'Enter') { e.preventDefault(); commit(true); }
+      else if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); commit(false); }
+    });
+    input.addEventListener('blur', function () { commit(true); });
+  }
+
+  function bindPartyCard(card, el) {
+    bindPartyCells(el, card);
+    // v181.1: имя меняется двойным кликом по тексту, отдельного поля в настройках нет.
+    const nameEl = el.querySelector('.card-head .card-name');
+    if (nameEl) {
+      nameEl.title = App.t('partyRenameHint');
+      nameEl.addEventListener('dblclick', function (e) {
+        e.preventDefault();
+        e.stopPropagation();
+        partyStartRename(card, nameEl);
+      });
+    }
+    const mini = el.querySelector('.party-face-mini');
+    if (mini) {
+      mini.addEventListener('click', function (e) {
+        if (e.target.closest('[data-act]') || e.target.closest('.party-step')) return;
+        openLabelLayer(card.id);
+      });
+    }
+  }
+
   // ===== Modals =====
   // Пока открыто окно или второй слой, страница под ним не прокручивается
   // (иначе колесо/палец уводит лист и окно «уезжает» из вида).
@@ -7530,6 +9274,7 @@ window.App = window.App || {};
     const wasHidden = m.classList.contains('hidden');
     if (wasHidden) modalReturnFocus = document.activeElement;
     m.classList.remove('settings-modal');
+    m.classList.remove('master-mode');
     m.classList.remove('hidden');
     m.setAttribute('role', 'dialog');
     m.setAttribute('aria-modal', 'true');
@@ -7705,10 +9450,27 @@ window.App = window.App || {};
 
   function openLabelLayer(cardId) {
     const card = findCard(cardId);
-    if (!card || !foldable(card)) return;
+    if (!card) return;
+    if (spoilerHidden(card)) { revealCardSpoiler(card); return; }
+    // v179: типы из реестра приносят свой слой (снимок листа)
+    const spec = specFor(card.type);
+    if (spec && spec.layer) {
+      const ov = document.getElementById('labelLayer');
+      layerCardId = cardId;
+      ov.innerHTML = '';
+      ov.appendChild(spec.layer(card));
+      ov.setAttribute('aria-label', card.name || typeLabel(card.type));
+      ov.classList.remove('hidden');
+      updateScrollLock();
+      const firstFocus = ov.querySelector('button, textarea, input, [tabindex="0"]');
+      if (firstFocus) {
+        try { firstFocus.focus({ preventScroll: true }); } catch (e) { firstFocus.focus(); }
+      }
+      return;
+    }
+    if (!foldable(card)) return;
     // v169: спойлер заметки сначала только раскрывает её — иначе ярлык на
     // телефоне открывал бы текст в обход замка. Следующий тап уже откроет слой.
-    if (card.type === 'note' && noteSpoilerHidden(card)) { revealNoteSpoiler(card); return; }
     // v142: заметку открываем и развёрнутой (клик по тексту), остальные ярлыки — только свёрнутыми
     if (card.type !== 'note' && !isCollapsed(card)) return;
     const ov = document.getElementById('labelLayer');
@@ -7806,7 +9568,7 @@ window.App = window.App || {};
     el.appendChild(head);
     // cardBody уже возвращает обёртку .card-body — вставляем как есть
     const body = document.createElement('div');
-    body.innerHTML = cardBody(card, viewCtx({ desktop: desktop }));
+    body.innerHTML = spoilerHidden(card) ? spoilerBodyHTML() : cardBody(card, viewCtx({ desktop: desktop }));
     while (body.firstChild) el.appendChild(body.firstChild);
     el.querySelectorAll('[data-act]').forEach(function (btn) {
       btn.addEventListener('click', function (e) { handleAction(card.id, btn.dataset, e); });
@@ -7832,6 +9594,56 @@ window.App = window.App || {};
     const panel = document.createElement('div');
     panel.className = 'layer-panel note-pages-panel';
     panel.tabIndex = -1;
+
+    // v181: ручка сверху. Тап закрывает, свайп вниз убирает панель —
+    // на телефоне у заметки нет шапки и места «тапнуть мимо».
+    const grab = document.createElement('button');
+    grab.type = 'button';
+    grab.className = 'note-grab';
+    grab.title = App.t('noteSwipeHint');
+    grab.setAttribute('aria-label', App.t('noteSwipeHint'));
+    grab.innerHTML = '<i></i>';
+    panel.appendChild(grab);
+    let grabState = null;
+    grab.addEventListener('pointerdown', function (e) {
+      if (e.pointerType === 'mouse' && e.button !== 0) return;
+      e.preventDefault();
+      grabState = { y: e.clientY, dy: 0, moved: false };
+      panel.classList.add('note-dragging');
+      try { grab.setPointerCapture(e.pointerId); } catch (err) { /* ignore */ }
+    });
+    grab.addEventListener('pointermove', function (e) {
+      if (!grabState) return;
+      const dy = Math.max(0, e.clientY - grabState.y);
+      if (dy > 2) grabState.moved = true;
+      grabState.dy = dy;
+      panel.style.transform = dy ? 'translateY(' + dy + 'px)' : '';
+      panel.style.opacity = String(Math.max(.55, 1 - dy / 420));
+    });
+    function endGrab() {
+      if (!grabState) return;
+      const dy = grabState.dy, moved = grabState.moved;
+      grabState = null;
+      panel.classList.remove('note-dragging');
+      if (dy > 90) {
+        panel.style.transform = 'translateY(110%)';
+        panel.style.opacity = '0';
+        setTimeout(function () { closeLabelLayer(); }, 140);
+      } else {
+        panel.style.transform = '';
+        panel.style.opacity = '';
+        if (moved) {
+          grab._dragged = true;
+          setTimeout(function () { grab._dragged = false; }, 0);
+        }
+      }
+    }
+    grab.addEventListener('pointerup', endGrab);
+    grab.addEventListener('pointercancel', endGrab);
+    grab.addEventListener('click', function () {
+      if (grab._dragged) return;
+      closeLabelLayer();
+    });
 
     const toolbar = document.createElement('div');
     toolbar.className = 'note-toolbar';
@@ -7863,9 +9675,12 @@ window.App = window.App || {};
     let savedRange = null;
     // Своя история: contenteditable undo не видит ручных команд (чекбоксы,
     // Enter внутри чек-листа), а кнопки ↶/↷ должны отменять всё подряд.
+    // В записи храним и HTML, и позицию каретки — иначе после отмены курсор
+    // прыгал в начало редактора.
     let histPast = [];
     let histFuture = [];
     let typingBase = null;
+    let typingCaret = null;
     let typingTimer = 0;
     let toolbarPointer = false;
 
@@ -7909,9 +9724,9 @@ window.App = window.App || {};
     }
 
     // ---------- История редактора ----------
-    function remember(html) {
+    function remember(html, caret) {
       if (!html || html === editor.innerHTML) return;
-      histPast.push(html);
+      histPast.push({ html: html, caret: caret || null });
       if (histPast.length > 80) histPast.shift();
       histFuture = [];
     }
@@ -7919,11 +9734,16 @@ window.App = window.App || {};
       if (!typingBase) return;
       if (typingTimer) { clearTimeout(typingTimer); typingTimer = 0; }
       const base = typingBase;
+      const caret = typingCaret;
       typingBase = null;
-      remember(base);
+      typingCaret = null;
+      remember(base, caret);
     }
     function beginTyping() {
-      if (!typingBase) typingBase = editor.innerHTML;
+      if (!typingBase) {
+        typingBase = editor.innerHTML;
+        typingCaret = caretPath();
+      }
       if (typingTimer) clearTimeout(typingTimer);
       typingTimer = setTimeout(flushTyping, 650);
     }
@@ -7932,24 +9752,34 @@ window.App = window.App || {};
       savedRange = null;
     }
     function undoEditor() {
+      const curCaret = caretPath();
+      editor.focus();
       flushTyping();
       if (!histPast.length) return;
-      histFuture.push(editor.innerHTML);
-      setEditorHtml(histPast.pop());
+      histFuture.push({ html: editor.innerHTML, caret: curCaret });
+      const prev = histPast.pop();
+      setEditorHtml(prev.html);
+      restoreCaret(prev.caret);
       syncText();
       updateToolbarState();
     }
     function redoEditor() {
+      const curCaret = caretPath();
+      editor.focus();
       flushTyping();
       if (!histFuture.length) return;
-      histPast.push(editor.innerHTML);
-      setEditorHtml(histFuture.pop());
+      const next = histFuture.pop();
+      histPast.push({ html: editor.innerHTML, caret: curCaret });
+      if (histPast.length > 80) histPast.shift();
+      setEditorHtml(next.html);
+      restoreCaret(next.caret);
       syncText();
       updateToolbarState();
     }
     function resetHistory() {
       if (typingTimer) clearTimeout(typingTimer);
       typingBase = null;
+      typingCaret = null;
       typingTimer = 0;
       histPast = [];
       histFuture = [];
@@ -7967,16 +9797,92 @@ window.App = window.App || {};
       const sel = window.getSelection();
       const cur = sel && sel.rangeCount ? sel.getRangeAt(0) : null;
       // живое выделение в редакторе важнее сохранённого снимка
-      if (cur && !cur.collapsed && editor.contains(cur.commonAncestorContainer)) return;
-      if (!savedRange) return;
+      if (cur && !cur.collapsed && editor.contains(cur.commonAncestorContainer)) return true;
+      if (!savedRange) return false;
       // после перестройки DOM (чекбокс, цитата) старый Range может указывать
       // на удалённый узел — тогда команды молча ничего не делали
       if (!editor.contains(savedRange.startContainer) || !editor.contains(savedRange.endContainer)) {
         savedRange = null;
-        return;
+        return false;
       }
       sel.removeAllRanges();
       sel.addRange(savedRange);
+      return true;
+    }
+    function nodePath(node, offset) {
+      const path = [];
+      let n = node;
+      while (n && n !== editor) {
+        const parent = n.parentNode;
+        if (!parent) return null;
+        path.unshift(Array.prototype.indexOf.call(parent.childNodes, n));
+        n = parent;
+      }
+      if (n !== editor) return null;
+      return { path: path, offset: offset };
+    }
+    function caretPathFromRange(range) {
+      if (!range || !editor.contains(range.startContainer) || !editor.contains(range.endContainer)) return null;
+      const start = nodePath(range.startContainer, range.startOffset);
+      const end = nodePath(range.endContainer, range.endOffset);
+      return start && end ? { start: start, end: end } : null;
+    }
+    function caretPath() {
+      const sel = window.getSelection();
+      if (!sel || !sel.rangeCount) return null;
+      return caretPathFromRange(sel.getRangeAt(0));
+    }
+    function pathNode(pos) {
+      if (!pos) return null;
+      let n = editor;
+      for (let i = 0; i < pos.path.length; i++) {
+        n = n && n.childNodes[pos.path[i]];
+        if (!n) return null;
+      }
+      return n;
+    }
+    function caretRange(snap) {
+      if (!snap) return null;
+      const a = pathNode(snap.start), b = pathNode(snap.end);
+      if (!a || !b) return null;
+      const max = function (n) { return n.nodeType === 3 ? n.nodeValue.length : n.childNodes.length; };
+      const r = document.createRange();
+      try {
+        r.setStart(a, Math.min(snap.start.offset, max(a)));
+        r.setEnd(b, Math.min(snap.end.offset, max(b)));
+      } catch (e) { return null; }
+      return r;
+    }
+    function placeCaretEnd() {
+      const sel = window.getSelection();
+      if (!sel) return;
+      const r = document.createRange();
+      r.selectNodeContents(editor);
+      r.collapse(false);
+      sel.removeAllRanges();
+      sel.addRange(r);
+      savedRange = r.cloneRange();
+    }
+    function restoreCaret(snap) {
+      const r = caretRange(snap);
+      const sel = window.getSelection();
+      if (!r || !sel) { placeCaretEnd(); return; }
+      sel.removeAllRanges();
+      sel.addRange(r);
+      savedRange = r.cloneRange();
+    }
+    function activeSelectionInEditor() {
+      const sel = window.getSelection();
+      return !!(sel && sel.rangeCount &&
+        editor.contains(sel.getRangeAt(0).startContainer) &&
+        editor.contains(sel.getRangeAt(0).endContainer));
+    }
+    function ensureEditorCaret() {
+      if (document.activeElement === editor && activeSelectionInEditor()) return;
+      editor.focus();
+      if (restoreRange()) return;
+      if (activeSelectionInEditor()) return;
+      placeCaretEnd();
     }
     function closestAncestor(name) {
       const sel = window.getSelection();
@@ -8645,7 +10551,6 @@ window.App = window.App || {};
       syncText();
     }
     function openListMenu(anchor) {
-      saveRange();
       const menu = document.createElement('div');
       menu.className = 'ctxmenu note-list-menu';
       menu.innerHTML =
@@ -8673,6 +10578,7 @@ window.App = window.App || {};
           editor.focus();
           flushTyping();
           const before = editor.innerHTML;
+          const beforeCaret = caretPathFromRange(linkRange);
           if (linkRange && !linkRange.collapsed) {
             const a = document.createElement('a');
             a.setAttribute('href', url);
@@ -8693,7 +10599,7 @@ window.App = window.App || {};
             if (linkRange) linkRange.insertNode(a);
             else document.execCommand('insertHTML', false, '<a href="' + esc(url) + '">' + esc(url) + '</a>');
           }
-          remember(before);
+          remember(before, beforeCaret);
           saveRange();
           syncText();
           return true;
@@ -8791,18 +10697,144 @@ window.App = window.App || {};
       saveRange();
       syncText();
     }
+    function blockForNode(node) {
+      let n = node && node.nodeType === 3 ? node.parentNode : node;
+      while (n && n !== editor) {
+        if (n.nodeType === 1 && /^(p|div|h[1-4]|li|blockquote)$/.test(n.tagName.toLowerCase())) return n;
+        n = n.parentNode;
+      }
+      return null;
+    }
+    function textOffsetIn(el, node, offset) {
+      const r = document.createRange();
+      try {
+        r.setStart(el, 0);
+        r.setEnd(node, offset);
+      } catch (e) { return 0; }
+      return r.toString().length;
+    }
+    function caretInElement(el, offset) {
+      if (!el) return;
+      const range = document.createRange();
+      let left = Math.max(0, offset || 0);
+      let placed = false;
+      const walker = document.createTreeWalker(el, NodeFilter.SHOW_TEXT, null);
+      let t;
+      while ((t = walker.nextNode())) {
+        const len = t.nodeValue.length;
+        if (left <= len) {
+          range.setStart(t, left);
+          placed = true;
+          break;
+        }
+        left -= len;
+      }
+      if (placed) range.collapse(true);
+      else {
+        if (!left) {
+          range.setStart(el, 0);
+          range.collapse(true);
+        } else {
+          range.selectNodeContents(el);
+          range.collapse(false);
+        }
+      }
+      const sel = window.getSelection();
+      sel.removeAllRanges();
+      sel.addRange(range);
+      savedRange = range.cloneRange();
+    }
+    // Списки делаем вручную: Chrome при insertUnorderedList в нашем редакторе
+    // вставляет <ul> внутрь <p> и бросает каретку в начало пункта — отсюда
+    // текст «до списка». Здесь блоки превращаются в <li>, а каретка остаётся
+    // на том же текстовом смещении.
+    function toggleList(kind) {
+      const sel = window.getSelection();
+      if (!sel || !sel.rangeCount) return;
+      const range = sel.getRangeAt(0);
+      const tag = kind === 'ol' ? 'ol' : 'ul';
+      const start = blockForNode(range.startContainer);
+      if (!start) {
+        if (!editor.contains(range.startContainer)) return;
+        const list = document.createElement(tag);
+        const item = document.createElement('li');
+        item.appendChild(document.createElement('br'));
+        list.appendChild(item);
+        const at = range.startContainer.nodeType === 3 ? range.startContainer.parentNode : range.startContainer;
+        if (at === editor) editor.insertBefore(list, editor.childNodes[range.startOffset] || null);
+        else editor.appendChild(list);
+        caretInElement(item, 0);
+        return;
+      }
+      const li = start.closest ? start.closest('li') : null;
+      if (li) {
+        const list = li.closest('ul,ol');
+        if (!list || list.getAttribute('data-task') === '1') return;
+        const lis = Array.prototype.slice.call(list.children).filter(function (n) {
+          return n.tagName && n.tagName.toLowerCase() === 'li';
+        });
+        const idx = Math.max(0, lis.indexOf(li));
+        const offset = textOffsetIn(li, range.startContainer, range.startOffset);
+        if (list.tagName.toLowerCase() === tag) {
+          const out = lis.map(function (item) {
+            const p = document.createElement('p');
+            while (item.firstChild) p.appendChild(item.firstChild);
+            if (!p.firstChild) p.appendChild(document.createElement('br'));
+            return p;
+          });
+          list.replaceWith.apply(list, out);
+          caretInElement(out[idx] || out[0], offset);
+          return;
+        }
+        while (list.firstChild) list.removeChild(list.firstChild);
+        // пересобрать список с другим тегом, сохранив пункты
+        const newList = document.createElement(tag);
+        lis.forEach(function (item) { newList.appendChild(item); });
+        list.replaceWith(newList);
+        caretInElement(newList.children[idx] || newList.firstChild, offset);
+        return;
+      }
+      const end = blockForNode(range.endContainer) || start;
+      const blocks = [];
+      if (start.parentNode === end.parentNode) {
+        let n = start;
+        while (n) {
+          blocks.push(n);
+          if (n === end) break;
+          n = n.nextElementSibling;
+        }
+      } else {
+        blocks.push(start);
+      }
+      const usable = blocks.filter(function (b) {
+        return b.parentNode && !(b.closest && b.closest('li'));
+      });
+      if (!usable.length) return;
+      const first = usable[0];
+      const offset = textOffsetIn(start, range.startContainer, range.startOffset);
+      const list = document.createElement(tag);
+      const items = usable.map(function (b) {
+        const item = document.createElement('li');
+        while (b.firstChild) item.appendChild(b.firstChild);
+        if (!item.firstChild) item.appendChild(document.createElement('br'));
+        list.appendChild(item);
+        return item;
+      });
+      first.parentNode.insertBefore(list, first);
+      usable.forEach(function (b) { b.remove(); });
+      caretInElement(items[0], offset);
+    }
     function applyCommand(cmd, val) {
       if (cmd === 'undo') { undoEditor(); return; }
       if (cmd === 'redo') { redoEditor(); return; }
-      editor.focus();
-      restoreRange();
+      ensureEditorCaret();
       flushTyping();
       const before = editor.innerHTML;
+      const beforeCaret = caretPath();
       if (INLINE_TAGS[cmd]) {
         toggleInlineTag(cmd);
       } else if (cmd === 'insertUnorderedList' || cmd === 'insertOrderedList') {
-        savedRange = null;
-        document.execCommand(cmd);
+        toggleList(cmd === 'insertOrderedList' ? 'ol' : 'ul');
       } else if (cmd === 'heading') {
         savedRange = null;
         document.execCommand('formatBlock', false, val || 'p');
@@ -8814,7 +10846,7 @@ window.App = window.App || {};
         toggleTaskList();
       } else if (cmd === 'link') { openLinkModal(); return; }
       else if (cmd === 'clear') clearFormatting();
-      remember(before);
+      remember(before, beforeCaret);
       saveRange();
       syncText();
       updateToolbarState();
@@ -8983,13 +11015,14 @@ window.App = window.App || {};
       if (e.key === 'Enter' && !e.shiftKey) {
         flushTyping();
         const before = editor.innerHTML;
+        const beforeCaret = caretPath();
         const selNow = window.getSelection();
         const enterFormats = !e.isComposing && selNow && selNow.rangeCount &&
           selNow.getRangeAt(0).collapsed ? caretFormats() : null;
         taskEnter(e);
         if (!e.defaultPrevented) listEnter(e);
         if (!e.defaultPrevented) quoteEnter(e);
-        if (e.defaultPrevented) remember(before);
+        if (e.defaultPrevented) remember(before, beforeCaret);
         // новая строка наследует выбранный формат: после Enter браузер
         // создаёт новый блок, туда переносим якорь форматов
         if (enterFormats) setTimeout(function () { applyTypingFormats(enterFormats); }, 0);
@@ -9012,8 +11045,9 @@ window.App = window.App || {};
       if (!txt) return;
       flushTyping();
       const before = editor.innerHTML;
+      const beforeCaret = caretPath();
       document.execCommand('insertText', false, txt);
-      remember(before);
+      remember(before, beforeCaret);
       syncText();
     });
     // Чекбокс — наш span, а не нативный input: клик переключает data-checked.
@@ -9026,8 +11060,9 @@ window.App = window.App || {};
       const li = box.closest('li[data-checked]');
       if (!li) return;
       const before = editor.innerHTML;
+      const beforeCaret = caretPath();
       li.setAttribute('data-checked', li.getAttribute('data-checked') === '1' ? '0' : '1');
-      remember(before);
+      remember(before, beforeCaret);
       syncText();
     });
     buildToolbar();
@@ -9248,6 +11283,17 @@ window.App = window.App || {};
       if (panel && panel._noteRefresh) panel._noteRefresh();
       return;
     }
+    // v180: отряд — либо лист игрока (перестраиваем целиком), либо таблица
+    if (card.type === 'party') {
+      const ov = document.getElementById('labelLayer');
+      if (partyMemberView && partyMemberView.cardId === card.id) {
+        openPartyMember(card.id, partyMemberView.sheetId, partyMemberView.opts || {});
+        return;
+      }
+      const panel = ov.querySelector('.party-panel');
+      if (panel && panel._partyRefresh) panel._partyRefresh();
+      return;
+    }
     // v65: слой состояния перестраиваем целиком — список и кнопки зависят от данных
     if (card.type === 'condition') {
       const ov = document.getElementById('labelLayer');
@@ -9274,6 +11320,7 @@ window.App = window.App || {};
     const np = ov.querySelector('.note-pages-panel');
     if (np && np._noteFlush && layerCardId && findCard(layerCardId)) np._noteFlush();
     layerCardId = null;
+    partyMemberView = null;
     ov.classList.add('hidden');
     ov.innerHTML = '';
     ov.removeAttribute('aria-label');
@@ -10236,6 +12283,8 @@ window.App = window.App || {};
     if (!card) return;
     // v102: у инвентаря нет редактора карточки — всё живёт в строках предметов
     if (card.type === 'inventory') return;
+    // v181: правка отряда — это его настройки, а не пустое поле имени
+    if (card.type === 'party') { openPartySettings(card); return; }
     editScratch.editCard = card;   // для живого предпросмотра в полях-выражениях
     if (card._new) pendingNewCardId = card.id;
     let body = '<div class="field"><label>' + esc(App.t('name')) + '</label><input id="f-name" type="text" value="' + esc(card.name) + '" placeholder="' + esc(nameExample(card.type)) + '"></div>';
@@ -10328,6 +12377,22 @@ window.App = window.App || {};
   function addCardFromMenu(type, name, extra) {
     const ch = activeChar();
     if (!ch) { closeModal(); return; }
+    // v180: отряд один на лист; создаём и сразу открываем настройки с листами
+    if (type === 'party') {
+      const ex = ch.cards.find(function (c) { return c.type === 'party'; });
+      closeModal();
+      if (ex) { toast(App.t('partyAlready')); return; }
+      let id = null;
+      mutate(function () {
+        const c = createCard('party', uniqueCardNameIn(ch, App.t('partyTitle')));
+        c.page = curPageId(ch);
+        ch.cards.push(c);
+        autoPlace(ch, c);
+        id = c.id;
+      });
+      // v181: не открываем настройки — пустая карточка сама предложит добавить листы
+      return;
+    }
     if (isMaster(ch) && type === 'initiative') {
       const ex = ch.cards.find(function (c) { return c.type === 'initiative'; });
       if (ex) {
@@ -11569,14 +13634,16 @@ window.App = window.App || {};
     ensureStateEntryIds();
     const ch = activeChar();
     const lang = state.settings.language;
-    const charOpts = state.characters.map(function (c) {
-      const dupRole = isMaster(c) && c.name.trim().toLowerCase() === App.t('masterBadge').toLowerCase();
-      return '<option value="' + c.id + '"' + (c.id === state.activeCharacterId ? ' selected' : '') + '>' + esc(c.name) + (isMaster(c) && !dupRole ? ' · ' + esc(App.t('masterBadge')) : '') + '</option>';
-    }).join('');
+    // v192: лист игрока и мир мастера — два независимых списка. В одном поле
+    // они больше не смешиваются, поэтому мастер не дублируется в двух селектах.
+    const players = state.characters.filter(function (c) { return !isMaster(c); });
     const masters = masterSheets();
-    const activeMasterId = (ch && isMaster(ch)) ? ch.id : (state.lastMasterId || (masters[0] && masters[0].id) || '');
+    const mode = (ch && isMaster(ch)) ? 'master' : 'player';
+    const charOpts = players.map(function (c) {
+      return '<option value="' + c.id + '"' + (c.id === state.activeCharacterId ? ' selected' : '') + '>' + esc(c.name) + '</option>';
+    }).join('');
     const masterOpts = masters.map(function (c) {
-      return '<option value="' + c.id + '"' + (c.id === activeMasterId ? ' selected' : '') + '>' + esc(c.name) + '</option>';
+      return '<option value="' + c.id + '"' + (c.id === state.activeCharacterId ? ' selected' : '') + '>' + esc(c.name) + '</option>';
     }).join('');
     const setOpts = function (kind) {
       return libSets(kind).map(function (s) {
@@ -11591,43 +13658,86 @@ window.App = window.App || {};
         '<button type="button" class="s-tab" data-tab="data">' + esc(App.t('tabData')) + '</button>' +
       '</div>';
 
+    // v192: переключатель режима — два больших «входа», а не поле выбора роли.
+    // Активный режим подсвечивается своим цветом, а ниже виден только его лист:
+    // у игрока — персонажи, у мастера — миры. Общих селектов больше нет.
+    const modeSwitch =
+      '<div class="mode-switch" role="radiogroup" aria-label="' + esc(App.t('modeLabel')) + '">' +
+        '<button type="button" class="mode-card' + (mode === 'player' ? ' active' : '') + '" data-mode="player" role="radio" aria-checked="' + (mode === 'player') + '">' +
+          '<span class="mode-glyph" aria-hidden="true">⚔</span>' +
+          '<span class="mode-card-txt">' +
+            '<span class="mode-card-name">' + esc(App.t('modePlayer')) + '</span>' +
+            '<span class="mode-card-sub">' + esc(App.t('modePlayerSub')) + '</span>' +
+          '</span>' +
+          '<span class="mode-check" aria-hidden="true">✓</span>' +
+        '</button>' +
+        '<button type="button" class="mode-card' + (mode === 'master' ? ' active' : '') + '" data-mode="master" role="radio" aria-checked="' + (mode === 'master') + '">' +
+          '<span class="mode-glyph" aria-hidden="true">🗺</span>' +
+          '<span class="mode-card-txt">' +
+            '<span class="mode-card-name">' + esc(App.t('modeMaster')) + '</span>' +
+            '<span class="mode-card-sub">' + esc(App.t('modeMasterSub')) + '</span>' +
+          '</span>' +
+          '<span class="mode-check" aria-hidden="true">✓</span>' +
+        '</button>' +
+      '</div>';
+
+    const playerBody =
+      '<div class="mode-body player">' +
+        '<div class="mode-body-head"><span class="mode-body-name">' + esc(App.t('modePlayerTitle')) + '</span>' +
+          '<span class="mode-body-sub">' + esc(App.t('modePlayerLead')) + '</span></div>' +
+        (players.length
+          ? '<div class="field"><select id="s-char" aria-label="' + esc(App.t('modePlayerTitle')) + '">' + charOpts + '</select>' +
+            '<div class="f-buttons">' +
+              '<button type="button" id="s-newchar">+ ' + esc(App.t('modeNew')) + '</button>' +
+              '<button type="button" id="s-renchar">✎ ' + esc(App.t('renameCharacter')) + '</button>' +
+              '<button type="button" class="danger" id="s-delchar">' + esc(App.t('delete')) + '</button>' +
+            '</div></div>'
+          : '<div class="field"><div class="formula-help">' + esc(App.t('modeNoPlayers')) + '</div>' +
+            '<div class="f-buttons"><button type="button" id="s-newchar">+ ' + esc(App.t('modeNew')) + '</button></div></div>') +
+      '</div>';
+
+    const masterBody =
+      '<div class="mode-body master">' +
+        '<div class="mode-body-head"><span class="mode-body-name">' + esc(App.t('modeMasterTitle')) + '</span>' +
+          '<span class="mode-body-sub">' + esc(App.t('modeMasterLead')) + '</span></div>' +
+        '<div class="field"><select id="s-master" aria-label="' + esc(App.t('modeMasterTitle')) + '">' + masterOpts + '</select>' +
+          '<div class="f-buttons">' +
+            '<button type="button" id="s-newmaster">+ ' + esc(App.t('modeNew')) + '</button>' +
+            '<button type="button" id="s-renmaster">✎ ' + esc(App.t('renameCharacter')) + '</button>' +
+            '<button type="button" class="danger" id="s-delmaster">' + esc(App.t('delete')) + '</button>' +
+          '</div></div>' +
+      '</div>';
+
     const general =
       '<div class="s-panel" data-panel="general">' +
-        '<div class="field"><label>' + esc(App.t('languageLabel')) + '</label>' +
-        '<select id="s-lang"><option value="ru"' + (lang === 'ru' ? ' selected' : '') + '>Русский</option>' +
-        '<option value="en"' + (lang === 'en' ? ' selected' : '') + '>English</option></select></div>' +
-        '<div class="field check"><input id="s-anim" type="checkbox"' + (state.settings.diceAnimation !== false ? ' checked' : '') + '><label for="s-anim">' + esc(App.t('diceAnimation')) + '</label></div>' +
-        '<div class="field check"><input id="s-fillmax" type="checkbox"' + (state.settings.fillMaxCurrent ? ' checked' : '') + '><label for="s-fillmax">' + esc(App.t('fillMaxCurrent')) + '</label></div>' +
-        '<div class="field"><label>' + esc(App.t('critValues')) + '</label>' +
-          '<div class="f-row">' +
-            '<span class="f-lbl">' + esc(App.t('critOk')) + '</span>' +
-            '<input id="s-crit" class="f-ndice f-crit" type="text" value="' + esc(state.settings.critSuccess == null ? '20' : state.settings.critSuccess) + '" placeholder="20">' +
-            '<span class="f-lbl">' + esc(App.t('critFailShort')) + '</span>' +
-            '<input id="s-critfail" class="f-ndice f-crit" type="text" value="' + esc(state.settings.critFail == null ? '1' : state.settings.critFail) + '" placeholder="1">' +
-          '</div>' +
-          '<div class="formula-help">' + esc(App.t('critValuesHint')) + '</div></div>' +
-        '<div class="field"><label>' + esc(App.t('characters')) + '</label>' +
-        '<select id="s-char">' + charOpts + '</select>' +
-        '<div class="f-buttons">' +
-          '<button type="button" id="s-newchar">+ ' + esc(App.t('newCharacter')) + '</button>' +
-          (ch ? '<button type="button" id="s-renchar">✎ ' + esc(App.t('renameCharacter')) + '</button>' : '') +
-          (ch ? '<button type="button" class="danger" id="s-delchar">' + esc(App.t('deleteCharacter')) + '</button>' : '') +
-        '</div></div>' +
-        '<div class="field"><label>' + esc(App.t('masterMode')) + '</label>' +
-          (masters.length
-            ? '<select id="s-master">' + masterOpts + '</select>'
-            : '<div class="formula-help">' + esc(App.t('masterNoSheet')) + '</div>') +
-          '<div class="f-buttons">' +
-            (masters.length ? '<button type="button" id="s-openmaster">' + esc(App.t('masterOpen')) + '</button>' : '') +
-            '<button type="button" id="s-newmaster">+ ' + esc(App.t('masterCreate')) + '</button>' +
-            (ch && isMaster(ch) ? '<button type="button" id="s-leavemaster">' + esc(App.t('masterLeave')) + '</button>' : '') +
-          '</div>' +
-          '<div class="formula-help">' + esc(App.t('masterHint')) + '</div>' +
+        (mode === 'master' ? masterBody : playerBody) +
+        '<div class="mode-common">' +
+          '<div class="mode-common-title">' + esc(App.t('appSettings')) + '</div>' +
+          '<div class="field"><label>' + esc(App.t('languageLabel')) + '</label>' +
+          '<select id="s-lang"><option value="ru"' + (lang === 'ru' ? ' selected' : '') + '>Русский</option>' +
+          '<option value="en"' + (lang === 'en' ? ' selected' : '') + '>English</option></select></div>' +
+          '<div class="field check"><input id="s-anim" type="checkbox"' + (state.settings.diceAnimation !== false ? ' checked' : '') + '><label for="s-anim">' + esc(App.t('diceAnimation')) + '</label></div>' +
+          '<div class="field check"><input id="s-fillmax" type="checkbox"' + (state.settings.fillMaxCurrent ? ' checked' : '') + '><label for="s-fillmax">' + esc(App.t('fillMaxCurrent')) + '</label></div>' +
+          '<div class="field"><label>' + esc(App.t('critValues')) + '</label>' +
+            '<div class="f-row">' +
+              '<span class="f-lbl">' + esc(App.t('critOk')) + '</span>' +
+              '<input id="s-crit" class="f-ndice f-crit" type="text" value="' + esc(state.settings.critSuccess == null ? '20' : state.settings.critSuccess) + '" placeholder="20">' +
+              '<span class="f-lbl">' + esc(App.t('critFailShort')) + '</span>' +
+              '<input id="s-critfail" class="f-ndice f-crit" type="text" value="' + esc(state.settings.critFail == null ? '1' : state.settings.critFail) + '" placeholder="1">' +
+            '</div>' +
+            '<div class="formula-help">' + esc(App.t('critValuesHint')) + '</div></div>' +
         '</div>' +
       '</div>';
 
+    // v180: карточки отряда хранят листы игроков — показываем их объём
+    const pstats = partyStorageStats();
     const dataPanel =
       '<div class="s-panel hidden" data-panel="data">' +
+        (pstats.count
+          ? '<div class="field"><div class="formula-help">' +
+            esc(App.tf('partyCardStats', { n: pstats.count, kb: pstats.kb })) +
+            '</div></div>'
+          : '') +
         '<div class="field"><label>' + esc(App.t('dataTitle')) + '</label>' +
         '<div class="btn-col">' +
           '<button type="button" id="s-expchar">' + esc(App.t('exportCurrent')) + '</button>' +
@@ -11638,11 +13748,15 @@ window.App = window.App || {};
         '<div class="field"><button type="button" class="danger" id="s-reset">' + esc(App.t('resetData')) + '</button></div>' +
       '</div>';
 
-    openModal(App.t('settings'), tabs + general + settingsSetPanel('states', ch) + settingsPacksPanel(ch) + dataPanel,
+    openModal(mode === 'master' ? App.t('settingsMaster') : App.t('settingsPlayer'),
+      modeSwitch + tabs + general + settingsSetPanel('states', ch) + settingsPacksPanel(ch) + dataPanel,
       [{ label: App.t('close'), cls: 'primary' }]);
-    document.getElementById('modal').classList.add('settings-modal');
+    const modal = document.getElementById('modal');
+    modal.classList.add('settings-modal');
+    // у режима мастера свой акцент — заголовок и активная вкладка становятся фиолетовыми
+    modal.classList.toggle('master-mode', mode === 'master');
 
-    const m = document.getElementById('modal');
+    const m = modal;
     m.querySelectorAll('.s-tab').forEach(function (b) {
       b.addEventListener('click', function () {
         m.querySelectorAll('.s-tab').forEach(function (x) { x.classList.toggle('active', x === b); });
@@ -11663,39 +13777,67 @@ window.App = window.App || {};
     document.getElementById('s-fillmax').addEventListener('change', function (e) { state.settings.fillMaxCurrent = e.target.checked; save(); });
     document.getElementById('s-crit').addEventListener('change', function (e) { state.settings.critSuccess = e.target.value.trim(); save(); });
     document.getElementById('s-critfail').addEventListener('change', function (e) { state.settings.critFail = e.target.value.trim(); save(); });
-    document.getElementById('s-char').addEventListener('change', function (e) {
+    // v192: смена режима — это не выбор роли, а вход в другой «кабинет»:
+    // переключаем активный лист, пересобираем окно и меняем его акцент.
+    m.querySelectorAll('.mode-card').forEach(function (b) {
+      b.addEventListener('click', function () {
+        const want = b.dataset.mode;
+        if (want === mode) return;
+        const activeTab = m.querySelector('.s-tab.active');
+        const tab = activeTab ? activeTab.dataset.tab : 'general';
+        if (want === 'master') {
+          if (!masterSheets().length) { closeModal(); openNewCharModal('master'); return; }
+          switchToMaster();
+        } else {
+          leaveMasterMode();
+        }
+        openSettings(tab);
+      });
+    });
+    const charSel = document.getElementById('s-char');
+    if (charSel) charSel.addEventListener('change', function (e) {
       state.activeCharacterId = e.target.value;
+      state.lastPlayerId = e.target.value;
+      resetSpoilerView();
       commit();
       // v84: пересобрать настройки, иначе вкладка «Состояния» и выбор набора
       // остаются от предыдущего персонажа до повторного открытия меню.
       openSettings('general');
     });
-    document.getElementById('s-newchar').addEventListener('click', function () {
+    const masterSel = document.getElementById('s-master');
+    if (masterSel) masterSel.addEventListener('change', function (e) {
+      switchToMaster(e.target.value);
+      openSettings('general');
+    });
+    const newCharBtn = document.getElementById('s-newchar');
+    if (newCharBtn) newCharBtn.addEventListener('click', function () {
       closeModal();
       openNewCharModal();
     });
-    document.getElementById('s-newmaster').addEventListener('click', function () {
+    const newMasterBtn = document.getElementById('s-newmaster');
+    if (newMasterBtn) newMasterBtn.addEventListener('click', function () {
       closeModal();
       openNewCharModal('master');
     });
-    const openMasterBtn = document.getElementById('s-openmaster');
-    if (openMasterBtn) openMasterBtn.addEventListener('click', function () {
-      const sel = document.getElementById('s-master');
-      closeModal();
-      switchToMaster(sel ? sel.value : null);
-    });
-    const leaveMasterBtn = document.getElementById('s-leavemaster');
-    if (leaveMasterBtn) leaveMasterBtn.addEventListener('click', function () {
-      closeModal();
-      leaveMasterMode();
-    });
-    if (ch) document.getElementById('s-delchar').addEventListener('click', function () {
-      closeModal();
-      askDelete({ text: App.tf('confirmDeleteChar', { name: ch.name }), onYes: deleteActiveCharacter, title: App.t('deleteCharacter') });
-    });
-    if (ch) document.getElementById('s-renchar').addEventListener('click', function () {
+    const renCharBtn = document.getElementById('s-renchar');
+    if (renCharBtn && ch && !isMaster(ch)) renCharBtn.addEventListener('click', function () {
       closeModal();
       openRenameCharModal(ch);
+    });
+    const delCharBtn = document.getElementById('s-delchar');
+    if (delCharBtn && ch && !isMaster(ch)) delCharBtn.addEventListener('click', function () {
+      closeModal();
+      askDelete({ text: App.tf('confirmDeleteAny', { name: ch.name }), onYes: deleteActiveCharacter, title: App.t('delete') });
+    });
+    const renMasterBtn = document.getElementById('s-renmaster');
+    if (renMasterBtn && ch && isMaster(ch)) renMasterBtn.addEventListener('click', function () {
+      closeModal();
+      openRenameCharModal(ch);
+    });
+    const delMasterBtn = document.getElementById('s-delmaster');
+    if (delMasterBtn && ch && isMaster(ch)) delMasterBtn.addEventListener('click', function () {
+      closeModal();
+      askDelete({ text: App.tf('confirmDeleteAny', { name: ch.name }), onYes: deleteActiveCharacter, title: App.t('delete') });
     });
     document.getElementById('s-expchar').addEventListener('click', exportCharacter);
     document.getElementById('s-impchar').addEventListener('click', function () { pickFile(importCharacter); });
@@ -12021,8 +14163,9 @@ window.App = window.App || {};
   // v18.2: переименование персонажа из настроек (кнопка «✎ Переименовать»);
   // пустое имя или без изменений — молча закрываем, иначе mutate (работает Ctrl+Z) + тост
   function openRenameCharModal(ch) {
+    // v192: в обоих режимах одни и те же действия — «Переименовать» без уточнений
     openModal(App.t('renameCharacter'),
-      '<div class="field"><label>' + esc(App.t('charName')) + '</label><input id="charNameInput" type="text" value="' + esc(ch.name) + '"></div>',
+      '<div class="field"><label>' + esc(App.t('modeName')) + '</label><input id="charNameInput" type="text" value="' + esc(ch.name) + '"></div>',
       [
         { label: App.t('cancel') },
         { label: App.t('save'), cls: 'primary', onClick: function () {
@@ -12030,7 +14173,7 @@ window.App = window.App || {};
             const name = inp.value.trim();
             if (!name || name === ch.name) { closeModal(); return; }
             mutate(function () { ch.name = name; });
-            toast(App.t('charRenamed'));
+            toast(App.tf('renamedGeneric', { name: name }));
           } }
       ]
     );
@@ -12040,9 +14183,10 @@ window.App = window.App || {};
 
   function openNewCharModal(role) {
     const isM = role === 'master';
-    const defName = isM ? App.t('masterDefaultName') : App.t('newCharName');
-    openModal(isM ? App.t('masterCreate') : App.t('newCharacter'),
-      '<div class="field"><label>' + esc(isM ? App.t('masterName') : App.t('charName')) + '</label><input id="charNameInput" type="text" value="' + esc(defName) + '" placeholder="' + esc(defName) + '"></div>',
+    // в обоих режимах одинаковый старт: «Новый» и поле «Название»
+    const defName = App.t('modeNew');
+    openModal(App.t('modeNew'),
+      '<div class="field"><label>' + esc(App.t('modeName')) + '</label><input id="charNameInput" type="text" value="' + esc(defName) + '" placeholder="' + esc(defName) + '"></div>',
       [
         { label: App.t('cancel') },
         { label: App.t('save'), cls: 'primary', onClick: function () {
@@ -12059,6 +14203,7 @@ window.App = window.App || {};
   function deleteActiveCharacter() {
     const ch = activeChar();
     if (!ch) return;
+    const name = ch.name;
     const wasMaster = isMaster(ch);
     mutate(function () {
       state.characters = state.characters.filter(function (c) { return c.id !== ch.id; });
@@ -12075,7 +14220,7 @@ window.App = window.App || {};
         if (fallback && isMaster(fallback)) state.lastMasterId = fallback.id;
       }
     });
-    toast(App.t('charDeleted'));
+    toast(App.tf('deletedGeneric', { name: name }));
   }
 
   // ===== Export / import =====
@@ -12104,6 +14249,34 @@ window.App = window.App || {};
       r.onload = function () { try { cb(r.result); } catch (e) { toast(App.t('importError')); } };
       r.readAsText(f);
     };
+    input.click();
+  }
+
+  // v181: несколько файлов за один выбор (листы отряда).
+  function pickFiles(cb) {
+    const input = document.createElement('input');
+    input.type = 'file';
+    input.accept = '.json,application/json';
+    input.multiple = true;
+    input.style.display = 'none';
+    document.body.appendChild(input);
+    input.addEventListener('change', function () {
+      const files = Array.prototype.slice.call(input.files || []);
+      input.remove();
+      if (!files.length) return;
+      const texts = new Array(files.length);
+      let left = files.length;
+      const done = function () {
+        left--;
+        if (left === 0) cb(texts.filter(function (t) { return typeof t === 'string'; }));
+      };
+      files.forEach(function (f, i) {
+        const r = new FileReader();
+        r.onload = function () { texts[i] = r.result; done(); };
+        r.onerror = done;
+        r.readAsText(f);
+      });
+    });
     input.click();
   }
 
@@ -12532,11 +14705,153 @@ window.App = window.App || {};
   // Версия приложения для окна обновлений. При выпуске новой версии подними
   // APP_VERSION, добавь запись в NEWS (только новые пункты) и не забудь
   // style.css?v= в index.html и CACHE_NAME в sw.js.
-  const APP_VERSION = 178;
+  const APP_VERSION = 192;
   const NEWS_SEEN_KEY = 'custplay-news-seen';   // отдельно от state: не попадает в undo и экспорт
   const NEWS = {
     // 140–141 — хотфиксы, 142–145 — заметки со страницами, 146 — режим максимума,
     // 147 — полоса закладок заметки, 148–151 — состояния, 152 — щит баффов.
+    192: {
+      ru: [
+        'Настройки: вместо двух полей выбора — два режима. Сверху «Игрок» и «Мастер», ниже виден только лист выбранного режима.',
+        'У каждого режима свои действия и заголовок окна: у игрока — персонажи, у мастера — миры.'
+      ],
+      en: [
+        'Settings: instead of two duplicate fields there are two modes. “Player” and “Master” on top, and only the selected mode’s sheet below.',
+        'Each mode has its own actions and window title: characters for the player, worlds for the master.'
+      ]
+    },
+    191: {
+      ru: [
+        'Заметки: списки вставляются в текущий абзац, каретка остаётся на месте — текст не уходит до списка.',
+        'Заметки: Ctrl+Z больше не бросает курсор в начало карточки — позиция сохраняется.'
+      ],
+      en: [
+        'Notes: lists are inserted at the current paragraph and the caret stays in place — typing no longer lands before the list.',
+        'Notes: Ctrl+Z no longer jumps the caret to the top of the card — the position is preserved.'
+      ]
+    },
+    190: {
+      ru: [
+        'Спойлер — переключатель на каждой карточке: скрытая показывает большую зону «Показать».',
+        'Кнопка «Скрыть все карточки» прячет всё; повторное нажатие показывает всё и снимает индивидуальные спойлеры.',
+        'Названия карточек больше не заменяются на «…»; чекбоксы спойлера из настроек убраны.',
+        'У скрытой карточки кнопка спойлера в шапке скрыта, фиолетовой подсветки нет.',
+        'Спойлеры по-прежнему только у мастера.'
+      ],
+      en: [
+        'Spoiler is a per-card toggle; a hidden card shows a large “Show” area.',
+        '“Hide all cards” hides everything; pressing it again shows all and clears individual spoilers.',
+        'Card names are no longer replaced with “…”; spoiler checkboxes are gone from settings.',
+        'A hidden card has no spoiler button in its header and no purple glow.',
+        'Spoilers remain master-only.'
+      ]
+    },
+    189: {
+      ru: [
+        'Отряд: заголовок «Параметр» оформлен как шапка — фон, верхняя граница и заметная линия под ним.'
+      ],
+      en: [
+        'Party: the “Parameter” header now looks like a header — background, top border and a visible line below.'
+      ]
+    },
+    188: {
+      ru: [
+        'Отряд: колонка параметров 150 px — после «…» остаётся небольшой запас, но не пустота.'
+      ],
+      en: [
+        'Party: the parameter column is 150 px — a small margin after the ellipsis, not empty space.'
+      ]
+    },
+    187: {
+      ru: [
+        'Отряд: значения снова по центру ячеек.',
+        'Отряд: колонка параметров уже, длинные названия сокращаются до 14 символов и «…».'
+      ],
+      en: [
+        'Party: values are centered in their cells again.',
+        'Party: the parameter column is narrower; long names are cut to 14 characters plus “…” .'
+      ]
+    },
+    186: {
+      ru: [
+        'Отряд: колонки игроков оформлены как карточки — цвета, рамки, зазоры, рейка; равные 160 px и 14 px.',
+        'Отряд: валюты идут отдельными строками.',
+        'Отряд: аккордеоны запоминают состояние; «Сопоставить вручную» открыт по умолчанию.',
+        'Спойлеры теперь только у мастера: у игроков нет кнопки в шапке и в карточках.'
+      ],
+      en: [
+        'Party: player columns look like cards — colors, borders, gaps, rail; equal 160 px and 14 px.',
+        'Party: currencies are shown on separate lines.',
+        'Party: accordions remember their state; “Merge manually” is open by default.',
+        'Spoilers are master-only: players have no header button or card spoilers.'
+      ]
+    },
+    185: {
+      ru: [
+        'Спойлер работает и в режиме правки: карточка действительно скрывается.',
+        'У карточки отряда появился спойлер; скрытая карточка выглядит одинаково у заметки, отряда и инициативы.',
+        'Кнопка спойлера в шапке листа рядом с отдыхом скрывает все карточки; иконка везде одна.',
+        'Снять спойлер можно в редакторе заметки и в настройках отряда.'
+      ],
+      en: [
+        'Spoiler now works in edit mode too: the card is actually hidden.',
+        'The party card has a spoiler; hidden cards look the same for notes, party and initiative.',
+        'A spoiler button in the sheet header next to rest hides all cards; one icon everywhere.',
+        'A spoiler can be removed in the note editor and party settings.'
+      ]
+    },
+    184: {
+      ru: [
+        'Отряд: частичные совпадения ищутся и по словам — «Физика» и «Физические возможности».',
+        'Отряд: можно вручную сопоставить любые два параметра.',
+        'Отряд: секции вкладки «Таблица» сворачиваются.',
+        'Отряд: поиск параметров оформлен как остальные поля ввода.'
+      ],
+      en: [
+        'Party: partial matches also compare words — “Physics” and “Physical capabilities”.',
+        'Party: any two parameters can be merged manually.',
+        'Party: sections on the Table tab can be collapsed.',
+        'Party: the parameter search looks like the other form fields.'
+      ]
+    },
+    183: {
+      ru: [
+        'Заметка: глаз спойлера показывает текущее состояние — после раскрытия гаснет, нажатие снова скрывает.'
+      ],
+      en: [
+        'Note: the spoiler eye reflects the current state — it turns off after revealing and hides the note again on click.'
+      ]
+    },
+    182: {
+      ru: [
+        'Отряд: «Импорт с приложения» — выбор конкретных листов, а не все подряд.',
+        'Отряд: «Импорт с устройства» — файлы; старые названия кнопок убраны.',
+        'Отряд: имя меняется двойным кликом по заголовку, поле из настроек убрано.',
+        'Отряд: поиск параметров — в тёмном стиле меню, без белого поля.'
+      ],
+      en: [
+        'Party: “Import from app” lets you choose specific sheets, not all of them.',
+        'Party: “Import from device” is for files; the old button names are gone.',
+        'Party: double-click the title to rename; the name field is removed from settings.',
+        'Party: the parameter search uses the dark menu style, no white field.'
+      ]
+    },
+    181: {
+      ru: [
+        'Отряд: создаётся пустым и сразу предлагает добавить листы — без настроек на входе.',
+        'Листы добавляются все сразу или несколькими файлами.',
+        'Настройки отряда: две вкладки, имя, перетаскивание порядка без ручки.',
+        'Заметка: ручка сверху закрывает свайпом вниз.'
+      ],
+      en: [
+        'Party: created empty and offers to add sheets first — no settings on creation.',
+        'Sheets can be added all at once or as several files.',
+        'Party settings: two tabs, the name, and drag-to-reorder without a handle.',
+        'Notes: drag the top handle down to close.'
+      ]
+    },
+    180: { ru: [], en: [] },
+    179: { ru: [], en: [] },
     178: { ru: [], en: [] },
     177: { ru: [], en: [] },
     176: { ru: [], en: [] },
