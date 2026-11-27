@@ -1976,6 +1976,10 @@ window.App = window.App || {};
       iniDamageRow(card, iniRowByName(card, ds.row), act === 'ini-row-heal');
       return;
     }
+    if (act === 'ini-row-stat-dec' || act === 'ini-row-stat-inc' || act === 'ini-row-stat-reset') {
+      iniAdjustRowStat(card, iniRowByName(card, ds.row), act);
+      return;
+    }
     if (act === 'ini-row-out') { iniToggleRowOut(card, iniRowByName(card, ds.row)); return; }
     if (act === 'ini-row-del') { iniDeleteRow(card, iniRowByName(card, ds.row)); return; }
     if (act === 'ini-row-props') { iniOpenRowEditor(card, iniRowByName(card, ds.row)); return; }
@@ -3145,6 +3149,43 @@ window.App = window.App || {};
   function iniClearReveal(card) {
     Object.keys(iniRevealed).forEach(function (k) { if (k.indexOf(card.id + '/') === 0) delete iniRevealed[k]; });
   }
+  // v193: КД и бонус ушли в список статов. Старый лист мигрирует один раз:
+  // КД становится статом «КБ», бонус — скрытым статом «Бонус».
+  function iniNormStats(r) {
+    const needMigrate = !Array.isArray(r.stats) ||
+      (!r.stats.length && (num(r.ac) > 0 || num(r.bonus) > 0));
+    if (needMigrate) {
+      r.stats = [];
+      const ac = num(r.ac);
+      if (ac > 0) r.stats.push({ id: uid(), name: App.t('iniStatAc'), value: ac, start: ac, shown: true });
+      const bonus = num(r.bonus);
+      if (bonus !== 0) r.stats.push({ id: uid(), name: App.t('iniBonus'), value: bonus, start: bonus, shown: false });
+      r.ac = 0;
+      r.bonus = 0;
+    }
+    r.stats = r.stats.filter(function (s) { return s && typeof s === 'object'; });
+    r.stats.forEach(function (s) {
+      if (!s.id) s.id = uid();
+      s.name = String(s.name || '').trim() || App.t('iniStatFallback');
+      s.value = num(s.value);
+      s.start = num(s.start);
+      s.shown = !!s.shown;
+    });
+    if (!r.stats.some(function (s) { return s.id === r.quickStatId; })) {
+      const firstShown = r.stats.find(function (s) { return s.shown; });
+      r.quickStatId = (firstShown || r.stats[0] || {}).id || null;
+    }
+    const quick = r.stats.find(function (s) { return s.id === r.quickStatId; });
+    if (quick) quick.shown = true;
+    let shown = r.stats.filter(function (s) { return s.shown; });
+    while (shown.length > 3) {
+      const victim = shown.slice().reverse().find(function (s) { return s.id !== r.quickStatId; });
+      if (!victim) break;
+      victim.shown = false;
+      shown = r.stats.filter(function (s) { return s.shown; });
+    }
+    if (!r.stats.some(function (s) { return s.shown; }) && quick) quick.shown = true;
+  }
   function iniNormRow(r) {
     if (!r || typeof r !== 'object') return;
     if (!r.hp || typeof r.hp !== 'object') r.hp = { current: 0, max: 0, shield: 0 };
@@ -3153,6 +3194,7 @@ window.App = window.App || {};
     r.hp.shield = num(r.hp.shield);
     if (r.ac == null) r.ac = 0;
     if (r.bonus == null) r.bonus = 0;
+    iniNormStats(r);
     if (!Array.isArray(r.attacks)) r.attacks = [];
     r.attacks.forEach(function (a) { if (!a.id) a.id = uid(); });
     if (typeof r.notes !== 'string') r.notes = '';
@@ -3162,6 +3204,123 @@ window.App = window.App || {};
   function iniNormRows(holder) {
     if (!Array.isArray(holder.rows)) holder.rows = [];
     holder.rows.forEach(iniNormRow);
+  }
+  // v193: быстрый стат — единственный, который меняют кнопки на карточке;
+  // у имени показываются до трёх отмеченных статов.
+  function iniQuickStat(r) {
+    const list = (r && r.stats) || [];
+    return list.find(function (s) { return s.id === r.quickStatId; }) ||
+      list.find(function (s) { return s.shown; }) || list[0] || null;
+  }
+  function iniShownStats(r) {
+    return ((r && r.stats) || []).filter(function (s) { return s.shown; }).slice(0, 3);
+  }
+  function iniStatChipsHTML(r) {
+    return iniShownStats(r).map(function (s) {
+      const name = String(s.name || '').trim();
+      const text = (name ? '<span class="mx-stat-name">' + esc(name) + '</span> ' : '') +
+        '<b>' + fmt(s.value) + '</b>';
+      const title = (name || App.t('iniStatFallback')) + ' ' + fmt(s.value) +
+        ' · ' + App.t('iniStatStart') + ' ' + fmt(s.start);
+      return '<span class="mx-stat-chip" title="' + esc(title) + '">' + text + '</span>';
+    }).join('');
+  }
+  function iniStatInlineHTML(r) {
+    const st = iniQuickStat(r);
+    if (!st) {
+      return '<button type="button" class="mx-stat-add-inline" data-act="ini-row-props" data-row="' + r.id + '">＋ ' + esc(App.t('iniStatFallback')) + '</button>';
+    }
+    const name = String(st.name || '').trim() || App.t('iniStatFallback');
+    return '<div class="mx-stat-inline">' +
+      '<button type="button" class="mx-stat-btn" data-act="ini-row-stat-dec" data-row="' + r.id + '" title="' + esc(App.t('iniStatDec')) + '" aria-label="' + esc(App.t('iniStatDec')) + '">−</button>' +
+      '<span class="mx-stat-name" title="' + esc(name) + '">' + esc(name) + '</span>' +
+      '<span class="mx-stat-val">' + fmt(st.value) + '</span>' +
+      '<button type="button" class="mx-stat-btn" data-act="ini-row-stat-inc" data-row="' + r.id + '" title="' + esc(App.t('iniStatInc')) + '" aria-label="' + esc(App.t('iniStatInc')) + '">+</button>' +
+      '<button type="button" class="mx-stat-reset-inline" data-act="ini-row-stat-reset" data-row="' + r.id + '" title="' + esc(App.t('iniStatToStart')) + '" aria-label="' + esc(App.t('iniStatToStart')) + '">↺</button>' +
+    '</div>';
+  }
+  // v195: строка инициативы может быть привязана к счётчику HP в карточке
+  // отряда. Тогда HP меняются одновременно в обеих карточках; max берём из
+  // карточки отряда, current — в обе стороны.
+  function iniFindPartyCounter(link) {
+    if (!link || !link.party || !link.sheet) return null;
+    const party = findCard(link.party);
+    if (!party || party.type !== 'party') return null;
+    const sh = partySheets(party).find(function (s) { return s.id === link.sheet; });
+    if (!sh || !sh.data || !Array.isArray(sh.data.cards)) return null;
+    let c = sh.data.cards.find(function (x) { return x.type === 'counter' && x.id === link.counter; });
+    if (!c && link.counterName) {
+      c = sh.data.cards.find(function (x) {
+        return x.type === 'counter' && partyNorm(x.name) === partyNorm(link.counterName);
+      });
+    }
+    return c ? { party: party, sh: sh, c: c } : null;
+  }
+  function iniSyncPartyFromRow(row) {
+    const link = row && row.link;
+    if (!link || !link.party || !link.sheet) return;
+    const found = iniFindPartyCounter(link);
+    if (!found) return;
+    const party = found.party, sh = found.sh, c = found.c;
+    link.counter = c.id;
+    link.counterName = String(c.name || '');
+    if (!party.live || typeof party.live !== 'object') party.live = {};
+    const key = partyLiveKey(sh, c);
+    let val = num(row.hp && row.hp.current);
+    invalidateMods();
+    const mx = withHostChar(sh.data, function () { return counterMaxNum(c); });
+    invalidateMods();
+    if (mx != null && mx > 0) val = Math.max(0, Math.min(mx, val));
+    if (val === num(c.current)) delete party.live[key];
+    else party.live[key] = val;
+  }
+  function partySyncToInitiative(card, sh, c, value, max) {
+    const ch = activeChar();
+    if (!ch) return;
+    (ch.cards || []).forEach(function (enc) {
+      if (enc.type !== 'initiative') return;
+      iniRows(enc).forEach(function (row) {
+        const link = row.link;
+        if (!link || link.party !== card.id || link.sheet !== sh.id) return;
+        const same = link.counter === c.id ||
+          (link.counterName && partyNorm(link.counterName) === partyNorm(c.name));
+        if (!same) return;
+        link.counter = c.id;
+        link.counterName = String(c.name || '');
+        if (!row.hp) row.hp = { current: 0, max: 0, shield: 0 };
+        if (max != null && max > 0) row.hp.max = max;
+        const top = max != null && max > 0 ? max : num(row.hp.max);
+        row.hp.current = Math.max(0, Math.min(top, num(value)));
+      });
+    });
+  }
+  function partySyncLinkedFromSheet(card, sh) {
+    if (!sh || !sh.data) return;
+    const ch = activeChar();
+    if (!ch) return;
+    (ch.cards || []).forEach(function (enc) {
+      if (enc.type !== 'initiative') return;
+      iniRows(enc).forEach(function (row) {
+        const link = row.link;
+        if (!link || link.party !== card.id || link.sheet !== sh.id) return;
+        let c = (sh.data.cards || []).find(function (x) { return x.type === 'counter' && x.id === link.counter; });
+        if (!c && link.counterName) {
+          c = (sh.data.cards || []).find(function (x) {
+            return x.type === 'counter' && partyNorm(x.name) === partyNorm(link.counterName);
+          });
+        }
+        if (!c) return;
+        link.counter = c.id;
+        link.counterName = String(c.name || '');
+        invalidateMods();
+        const mx = withHostChar(sh.data, function () { return counterMaxNum(c); });
+        invalidateMods();
+        if (!row.hp) row.hp = { current: 0, max: 0, shield: 0 };
+        if (mx != null && mx > 0) row.hp.max = mx;
+        const top = mx != null && mx > 0 ? mx : num(row.hp.max);
+        row.hp.current = Math.max(0, Math.min(top, num(c.current)));
+      });
+    });
   }
   function iniEnsureEnc(card) {
     if (!Array.isArray(card.encounters)) card.encounters = [];
@@ -3228,6 +3387,7 @@ window.App = window.App || {};
     card.mini = false;
     card.h = Math.max(num(card.h) || 0, 420);
     iniClearReveal(card);
+    iniRows(card).forEach(iniSyncPartyFromRow);
     commit();
   }
   function iniUniqueEncName(card, base) {
@@ -3281,6 +3441,7 @@ window.App = window.App || {};
         r.open = false;
         if (r.hp) { r.hp.current = r.hp.max; r.hp.shield = 0; }
       });
+      card.rows.forEach(iniSyncPartyFromRow);
       card.phase = 'prep';
       card.round = 1;
       card.turnId = null;
@@ -3399,7 +3560,8 @@ window.App = window.App || {};
   function iniNewRow(card, src) {
     const row = src ? JSON.parse(JSON.stringify(src)) : {
       name: App.t('iniNewFighter'), value: null, bonus: 0, hp: { current: 10, max: 10, shield: 0 },
-      ac: 0, attacks: [], notes: '', boss: false, out: false, open: false, seq: iniRows(card).length + 1
+      ac: 0, stats: [], quickStatId: null, attacks: [], notes: '', boss: false, out: false, open: false,
+      seq: iniRows(card).length + 1
     };
     row.id = uid();
     (row.attacks || []).forEach(function (a) { a.id = uid(); });
@@ -3409,6 +3571,14 @@ window.App = window.App || {};
       row.out = false;
       row.open = false;
       row.value = null;
+      // копия начинает бой со стартовых значений статов
+      row.stats = (row.stats || []).map(function (s) {
+        return { id: s.id || uid(), name: s.name, value: num(s.start), start: num(s.start), shown: !!s.shown };
+      });
+      row.quickStatId = src.quickStatId || ((row.stats[0] || {}).id) || null;
+      row.link = null;   // копия бойца не должна управлять HP игрока
+      row.ac = 0;
+      row.bonus = 0;
     } else {
       row.name = iniUniqueRowName(card, row.name);
       row.seq = iniRows(card).length + 1;
@@ -3444,6 +3614,16 @@ window.App = window.App || {};
         }
         row.hp.current = Math.max(0, row.hp.current - left);
       }
+      iniSyncPartyFromRow(row);
+    });
+  }
+  function iniAdjustRowStat(card, row, act) {
+    if (!row) return;
+    const st = iniQuickStat(row);
+    if (!st) return;
+    mutate(function () {
+      if (act === 'ini-row-stat-reset') st.value = num(st.start);
+      else st.value = num(st.value) + (act === 'ini-row-stat-inc' ? 1 : -1);
     });
   }
   function iniAdvanceAfterOut(card, row) {
@@ -3494,6 +3674,8 @@ window.App = window.App || {};
         mutate(function () {
           iniRows(card).forEach(function (r) {
             if (r.hp) { r.hp.current = r.hp.max; r.hp.shield = 0; }
+            (r.stats || []).forEach(function (s) { s.value = num(s.start); });
+            iniSyncPartyFromRow(r);
             r.out = false;
             r.value = null;
             r.open = false;
@@ -3596,10 +3778,8 @@ window.App = window.App || {};
     const hpCls = pct <= 25 ? ' low' : pct <= 50 ? ' mid' : '';
     const prep = card.phase !== 'battle';
     const step = iniRowSteps[card.id + '/' + r.id];
-    const bonus = num(r.bonus) || 0;
     const initCtl = prep
       ? '<input class="mx-init" data-mx-init="' + r.id + '" type="number" value="' + (iniFilled(r) ? esc(r.value) : '') + '" placeholder="—" title="' + esc(App.t('iniInitValue')) + '" aria-label="' + esc(App.t('iniInitValue')) + '">' +
-        (bonus ? '<span class="mx-bonus">' + (bonus > 0 ? '+' : '−') + Math.abs(bonus) + '</span>' : '') +
         '<button type="button" class="mx-dice" data-act="ini-roll" data-row="' + r.id + '" title="' + esc(App.tf('iniRollOneDie', { die: 'd' + iniDie(card) })) + '" aria-label="' + esc(App.t('roll')) + '">⚄</button>'
       : '';
     return '<div class="mx-row' + (cur ? ' cur' : '') + (r.boss ? ' boss' : '') + (r.out ? ' out' : '') + (r.open ? ' open' : '') + '" data-mx-row="' + r.id + '">' +
@@ -3607,7 +3787,7 @@ window.App = window.App || {};
         '<span class="mx-rank">' + rank + '</span>' +
         (r.boss ? CROWN_SVG : '') +
         '<span class="mx-name" title="' + esc(r.name) + '">' + esc(r.name) + '</span>' +
-        (num(r.ac) ? '<span class="mx-ac">' + esc(App.t('iniAc')) + ' ' + num(r.ac) + '</span>' : '') +
+        iniStatChipsHTML(r) +
         initCtl +
       '</div>' +
       '<div class="mx-sub">' +
@@ -3635,11 +3815,14 @@ window.App = window.App || {};
     return '<div class="mx-panel">' +
       '<div class="mx-panel-label">' + esc(App.t('iniAttacks')) + '</div>' + attacks +
       (r.notes ? '<div class="mx-note">' + esc(r.notes) + '</div>' : '') +
-      '<div class="mx-actions">' +
-        '<button type="button" data-act="ini-row-props" data-row="' + r.id + '" title="' + esc(App.t('iniRowProps')) + '" aria-label="' + esc(App.t('iniRowProps')) + '">' + SEARCH_SVG + '</button>' +
-        '<button type="button" data-act="ini-row-copy" data-row="' + r.id + '" title="' + esc(App.t('iniRowCopy')) + '" aria-label="' + esc(App.t('iniRowCopy')) + '">' + DUP_SVG + '</button>' +
-        '<button type="button" data-act="ini-row-out" data-row="' + r.id + '" title="' + esc(outLabel) + '" aria-label="' + esc(outLabel) + '">' + OUT_SVG + '</button>' +
-        '<button type="button" class="danger" data-act="ini-row-del" data-row="' + r.id + '" title="' + esc(App.t('delete')) + '" aria-label="' + esc(App.t('delete')) + '">' + TRASH_SVG + '</button>' +
+      '<div class="mx-footer">' +
+        iniStatInlineHTML(r) +
+        '<div class="mx-actions">' +
+          '<button type="button" class="mx-props" data-act="ini-row-props" data-row="' + r.id + '" title="' + esc(App.t('iniRowProps')) + '" aria-label="' + esc(App.t('iniRowProps')) + '">' + SEARCH_SVG + '</button>' +
+          '<button type="button" data-act="ini-row-copy" data-row="' + r.id + '" title="' + esc(App.t('iniRowCopy')) + '" aria-label="' + esc(App.t('iniRowCopy')) + '">' + DUP_SVG + '</button>' +
+          '<button type="button" data-act="ini-row-out" data-row="' + r.id + '" title="' + esc(outLabel) + '" aria-label="' + esc(outLabel) + '">' + OUT_SVG + '</button>' +
+          '<button type="button" class="danger" data-act="ini-row-del" data-row="' + r.id + '" title="' + esc(App.t('delete')) + '" aria-label="' + esc(App.t('delete')) + '">' + TRASH_SVG + '</button>' +
+        '</div>' +
       '</div></div>';
   }
 
@@ -3764,8 +3947,10 @@ window.App = window.App || {};
     let html = '<div class="mx-from-list">' + sources.map(function (e) {
       return '<div class="mx-from-enc"><div class="mx-from-title">' + esc(e.name) + '</div>' +
         e.rows.map(function (r) {
+          const st = iniQuickStat(r);
           return '<button type="button" class="mx-from-row" data-enc="' + e.id + '" data-row="' + r.id + '">' +
-            '<span>' + esc(r.name) + '</span><span class="mx-from-meta">HP ' + (num(r.hp && r.hp.max) || 0) + (num(r.ac) ? ' · ' + esc(App.t('iniAc')) + ' ' + num(r.ac) : '') + '</span></button>';
+            '<span>' + esc(r.name) + '</span><span class="mx-from-meta">HP ' + (num(r.hp && r.hp.max) || 0) +
+            (st ? ' · ' + esc(st.name) + ' ' + fmt(st.value) : '') + '</span></button>';
         }).join('') + '</div>';
     }).join('') + '</div>';
     openModal(App.t('iniFromEncounter'), html, [{ label: App.t('cancel') }]);
@@ -3785,8 +3970,25 @@ window.App = window.App || {};
 
   function iniOpenRowEditor(card, row) {
     if (!row) return;
+    const ri = function (v) { return Math.round(num(v)); };
     const draft = JSON.parse(JSON.stringify(row.attacks || []));
-    function attacksHTML() {
+    let draftStats = (row.stats || []).map(function (s) {
+      return { id: s.id || uid(), name: s.name, value: ri(s.value), start: ri(s.start), shown: !!s.shown };
+    });
+    let draftQuick = row.quickStatId || null;
+
+    function normalizeDraft() {
+      const holder = { stats: draftStats, quickStatId: draftQuick };
+      iniNormStats(holder);
+      draftStats = holder.stats;
+      draftQuick = holder.quickStatId;
+    }
+    function shownCount() { return draftStats.filter(function (s) { return s.shown; }).length; }
+    function updateCount() {
+      const el = m.querySelector('#mx-stats-count');
+      if (el) el.textContent = shownCount() + '/3';
+    }
+    function attackRowsHTML() {
       return draft.map(function (a, i) {
         return '<div class="mx-atk-edit" data-i="' + i + '">' +
           '<input type="text" data-k="name" value="' + esc(a.name) + '" placeholder="' + esc(App.t('iniAttackName')) + '">' +
@@ -3796,20 +3998,55 @@ window.App = window.App || {};
         '</div>';
       }).join('') || '<div class="mx-empty-note">' + esc(App.t('iniNoAttacks')) + '</div>';
     }
-    const html = '<div class="mx-edit-grid">' +
-      '<label class="mx-edit-field"><span>' + esc(App.t('name')) + '</span><input id="mx-r-name" type="text" value="' + esc(row.name) + '"></label>' +
-      '<label class="mx-edit-field"><span>' + esc(App.t('iniInitValue')) + '</span><input id="mx-r-init" type="number" value="' + (row.value == null ? '' : esc(row.value)) + '"></label>' +
-      '<label class="mx-edit-field"><span>' + esc(App.t('iniHpMax')) + '</span><input id="mx-r-max" type="number" min="0" value="' + (num(row.hp && row.hp.max) || 0) + '"></label>' +
-      '<label class="mx-edit-field"><span>' + esc(App.t('iniAc')) + '</span><input id="mx-r-ac" type="number" min="0" value="' + (num(row.ac) || 0) + '"></label>' +
-      '<label class="mx-edit-field"><span>' + esc(App.t('iniHpCur')) + '</span><input id="mx-r-cur" type="number" value="' + (num(row.hp && row.hp.current) || 0) + '"></label>' +
-      '<label class="mx-edit-field"><span>' + esc(App.t('iniShield')) + '</span><input id="mx-r-shield" type="number" min="0" value="' + (num(row.hp && row.hp.shield) || 0) + '"></label>' +
-      '<label class="mx-edit-field"><span>' + esc(App.t('iniBonus')) + '</span><input id="mx-r-bonus" type="number" value="' + (num(row.bonus) || 0) + '"></label>' +
+    function statRowHTML(st, i) {
+      const isQuick = st.id === draftQuick;
+      const cannotShow = !st.shown && shownCount() >= 3;
+      const viewDisabled = (isQuick && st.shown) || cannotShow;
+      const viewTitle = isQuick && st.shown ? App.t('iniStatQuickAlways')
+        : cannotShow ? App.t('iniStatMax') : App.t('iniStatShow');
+      return '<div class="stat-row" data-i="' + i + '">' +
+        '<div class="stat-row-top">' +
+          '<button type="button" class="stat-view' + (st.shown ? ' on' : '') + '" data-view="' + i + '"' + (viewDisabled ? ' disabled' : '') +
+            ' title="' + esc(viewTitle) + '" aria-pressed="' + (st.shown ? 'true' : 'false') + '">' + (st.shown ? '☑' : '☐') + '</button>' +
+          '<input class="stat-name" data-k="name" type="text" value="' + esc(st.name) + '" placeholder="' + esc(App.t('iniStatName')) + '">' +
+          '<button type="button" class="stat-quick' + (isQuick ? ' on' : '') + '" data-quick="' + i + '"' +
+            ' title="' + esc(App.t('iniStatQuick')) + '" aria-pressed="' + (isQuick ? 'true' : 'false') + '">' + (isQuick ? '★' : '☆') + '</button>' +
+          '<button type="button" class="stat-del" data-del="' + i + '" title="' + esc(App.t('delete')) + '" aria-label="' + esc(App.t('delete')) + '">' + TRASH_SVG + '</button>' +
+        '</div>' +
+        '<div class="stat-row-bottom">' +
+          '<button type="button" class="stat-step" data-step="dec" data-i="' + i + '" title="' + esc(App.t('iniStatDec')) + '">−</button>' +
+          '<input class="stat-val-input" data-k="value" type="number" value="' + ri(st.value) + '" aria-label="' + esc(App.t('iniStatValue')) + '">' +
+          '<button type="button" class="stat-step" data-step="inc" data-i="' + i + '" title="' + esc(App.t('iniStatInc')) + '">+</button>' +
+          '<span class="stat-start-lbl">' + esc(App.t('iniStatStart')) + '</span>' +
+          '<input class="stat-start-input" data-k="start" type="number" value="' + ri(st.start) + '" aria-label="' + esc(App.t('iniStatStart')) + '">' +
+        '</div>' +
+      '</div>';
+    }
+    function statsHTML() {
+      if (!draftStats.length) return '<div class="stat-empty">' + esc(App.t('iniStatEmpty')) + '</div>';
+      return draftStats.map(statRowHTML).join('');
+    }
+    const html = '<div class="fc-card">' +
+      '<div class="fc-name-row">' +
+        '<label class="fc-field"><span>' + esc(App.t('iniFighterName')) + '</span><input id="mx-r-name" type="text" value="' + esc(row.name) + '"></label>' +
+        '<label class="fc-check"><input id="mx-r-boss" type="checkbox"' + (row.boss ? ' checked' : '') + '> ' + esc(App.t('iniBoss')) + '</label>' +
       '</div>' +
-      '<label class="mx-edit-check"><input id="mx-r-boss" type="checkbox"' + (row.boss ? ' checked' : '') + '> ' + esc(App.t('iniBoss')) + '</label>' +
-      '<label class="mx-edit-field"><span>' + esc(App.t('iniRowNotes')) + '</span><textarea id="mx-r-notes">' + esc(row.notes || '') + '</textarea></label>' +
-      '<div class="mx-edit-sub">' + esc(App.t('iniAttacks')) + '</div>' +
-      '<div id="mx-r-attacks">' + attacksHTML() + '</div>' +
-      '<button type="button" class="mx-add-attack" id="mx-r-addattack">+ ' + esc(App.t('iniAttackAdd')) + '</button>';
+      '<div class="fc-mini-grid">' +
+        '<label class="fc-mini init"><span>' + esc(App.t('iniInitValue')) + '</span><input id="mx-r-init" type="number" value="' + (row.value == null ? '' : esc(row.value)) + '"></label>' +
+        '<label class="fc-mini hp"><span>' + esc(App.t('iniHpShort')) + '</span><span class="fc-hp"><input id="mx-r-cur" type="number" value="' + (num(row.hp && row.hp.current) || 0) + '"><span class="fc-sep">/</span><input id="mx-r-max" type="number" min="0" value="' + (num(row.hp && row.hp.max) || 0) + '"></span></label>' +
+        '<label class="fc-mini shield"><span>' + esc(App.t('iniShield')) + '</span><input id="mx-r-shield" type="number" min="0" value="' + (num(row.hp && row.hp.shield) || 0) + '"></label>' +
+      '</div>' +
+      '<label class="fc-field"><span>' + esc(App.t('iniRowNotes')) + '</span><textarea id="mx-r-notes">' + esc(row.notes || '') + '</textarea></label>' +
+    '</div>' +
+    '<div class="fc-section"><span>' + esc(App.t('iniStats')) + ' <b id="mx-stats-count">' + shownCount() + '/3</b></span><div class="fc-section-actions">' +
+      '<button type="button" class="fc-add" id="mx-stats-reset">↺ ' + esc(App.t('iniStatToStart')) + '</button>' +
+      '<button type="button" class="fc-add purple" id="mx-stats-add">＋ ' + esc(App.t('iniStatAdd')) + '</button>' +
+    '</div></div>' +
+    '<div id="mx-stats" class="stat-list">' + statsHTML() + '</div>' +
+    '<div class="stat-hint">' + esc(App.t('iniStatHint')) + '</div>' +
+    '<div class="fc-section"><span>' + esc(App.t('iniAttacks')) + '</span><button type="button" class="fc-add" id="mx-r-addattack">＋ ' + esc(App.t('iniStatAdd')) + '</button></div>' +
+    '<div id="mx-r-attacks">' + attackRowsHTML() + '</div>';
+
     openModal(App.t('iniRowProps'), html, [
       { label: App.t('cancel') },
       { label: App.t('save'), cls: 'primary', onClick: function () {
@@ -3817,27 +4054,112 @@ window.App = window.App || {};
         const name = m.querySelector('#mx-r-name').value.trim();
         if (!name) { toast(App.t('uniqueNameError')); return false; }
         const max = Math.max(0, Math.round(Number(m.querySelector('#mx-r-max').value) || 0));
-        const wasFull = row.hp && row.hp.current === row.hp.max;
+        const prevCur = num(row.hp && row.hp.current);
+        const prevMax = num(row.hp && row.hp.max);
         let cur = Math.round(Number(m.querySelector('#mx-r-cur').value) || 0);
-        if (wasFull) cur = max;
-        if (cur > max) cur = max;
-        if (cur < 0) cur = 0;
+        if (prevCur === prevMax && max !== prevMax && cur === prevCur) cur = max;
+        cur = Math.max(0, Math.min(max, cur));
+
+        draftStats = draftStats
+          .map(function (s) {
+            return { id: s.id, name: String(s.name || '').trim(), value: ri(s.value), start: ri(s.start), shown: !!s.shown };
+          })
+          .filter(function (s) { return s.name; });
+        normalizeDraft();
+
         mutate(function () {
           row.name = name;
           row.value = m.querySelector('#mx-r-init').value === '' ? null : Math.round(Number(m.querySelector('#mx-r-init').value));
           row.hp = { current: cur, max: max, shield: Math.max(0, Math.round(Number(m.querySelector('#mx-r-shield').value) || 0)) };
-          row.ac = Math.max(0, Math.round(Number(m.querySelector('#mx-r-ac').value) || 0));
-          row.bonus = Math.round(Number(m.querySelector('#mx-r-bonus').value) || 0);
+          row.stats = draftStats;
+          row.quickStatId = draftQuick;
+          row.ac = 0;
+          row.bonus = 0;
           row.boss = m.querySelector('#mx-r-boss').checked;
           row.notes = m.querySelector('#mx-r-notes').value;
           row.attacks = draft.filter(function (a) { return (a.name || '').trim() || (a.hit || '').trim() || (a.damage || '').trim(); }).map(function (a) {
             return { id: a.id || uid(), name: String(a.name || '').trim() || App.t('iniAttackName'), hit: String(a.hit || '').trim(), damage: String(a.damage || '').trim(), note: String(a.note || '') };
           });
+          iniSyncPartyFromRow(row);
         });
         return true;
       } }
     ]);
     const m = document.getElementById('modal');
+
+    function bindStats() {
+      const box = m.querySelector('#mx-stats');
+      box.querySelectorAll('.stat-name').forEach(function (inp) {
+        inp.addEventListener('input', function () {
+          const i = Number(inp.closest('.stat-row').dataset.i);
+          if (draftStats[i]) draftStats[i].name = inp.value;
+        });
+      });
+      box.querySelectorAll('.stat-val-input').forEach(function (inp) {
+        inp.addEventListener('input', function () {
+          const i = Number(inp.closest('.stat-row').dataset.i);
+          if (draftStats[i]) draftStats[i].value = ri(inp.value);
+        });
+      });
+      box.querySelectorAll('.stat-start-input').forEach(function (inp) {
+        inp.addEventListener('input', function () {
+          const i = Number(inp.closest('.stat-row').dataset.i);
+          if (draftStats[i]) draftStats[i].start = ri(inp.value);
+        });
+      });
+      box.querySelectorAll('[data-view]').forEach(function (b) {
+        b.addEventListener('click', function () {
+          const i = Number(b.dataset.view);
+          const st = draftStats[i];
+          if (!st || b.disabled) return;
+          if (st.shown) {
+            if (st.id === draftQuick) return;
+            st.shown = false;
+          } else {
+            if (shownCount() >= 3) return;
+            st.shown = true;
+          }
+          box.innerHTML = statsHTML();
+          bindStats();
+          updateCount();
+        });
+      });
+      box.querySelectorAll('[data-quick]').forEach(function (b) {
+        b.addEventListener('click', function () {
+          const i = Number(b.dataset.quick);
+          const st = draftStats[i];
+          if (!st) return;
+          draftQuick = st.id;
+          st.shown = true;
+          normalizeDraft();
+          box.innerHTML = statsHTML();
+          bindStats();
+          updateCount();
+        });
+      });
+      box.querySelectorAll('[data-step]').forEach(function (b) {
+        b.addEventListener('click', function () {
+          const i = Number(b.dataset.i);
+          if (!draftStats[i]) return;
+          draftStats[i].value += b.dataset.step === 'inc' ? 1 : -1;
+          box.innerHTML = statsHTML();
+          bindStats();
+        });
+      });
+      box.querySelectorAll('[data-del]').forEach(function (b) {
+        b.addEventListener('click', function () {
+          const i = Number(b.dataset.del);
+          const removed = draftStats[i];
+          if (!removed) return;
+          draftStats.splice(i, 1);
+          if (draftQuick === removed.id) draftQuick = null;
+          normalizeDraft();
+          box.innerHTML = statsHTML();
+          bindStats();
+          updateCount();
+        });
+      });
+    }
     function bindAttacks() {
       m.querySelectorAll('.mx-atk-edit input').forEach(function (inp) {
         inp.addEventListener('input', function () {
@@ -3848,15 +4170,35 @@ window.App = window.App || {};
       m.querySelectorAll('.mx-atk-edit [data-del]').forEach(function (b) {
         b.addEventListener('click', function () {
           draft.splice(Number(b.dataset.del), 1);
-          m.querySelector('#mx-r-attacks').innerHTML = attacksHTML();
+          m.querySelector('#mx-r-attacks').innerHTML = attackRowsHTML();
           bindAttacks();
         });
       });
     }
+    bindStats();
     bindAttacks();
+    m.querySelector('#mx-stats-add').addEventListener('click', function () {
+      const st = { id: uid(), name: App.t('iniStatNew'), value: 0, start: 0, shown: draftStats.length === 0 };
+      draftStats.push(st);
+      if (!draftQuick) draftQuick = st.id;
+      normalizeDraft();
+      const box = m.querySelector('#mx-stats');
+      box.innerHTML = statsHTML();
+      bindStats();
+      updateCount();
+      const last = box.querySelector('.stat-row:last-child .stat-name');
+      if (last) { last.focus(); last.select(); }
+    });
+    m.querySelector('#mx-stats-reset').addEventListener('click', function () {
+      draftStats.forEach(function (s) { s.value = ri(s.start); });
+      const box = m.querySelector('#mx-stats');
+      box.innerHTML = statsHTML();
+      bindStats();
+      updateCount();
+    });
     m.querySelector('#mx-r-addattack').addEventListener('click', function () {
       draft.push({ id: uid(), name: '', hit: '', damage: '', note: '' });
-      m.querySelector('#mx-r-attacks').innerHTML = attacksHTML();
+      m.querySelector('#mx-r-attacks').innerHTML = attackRowsHTML();
       bindAttacks();
     });
   }
@@ -8204,6 +8546,7 @@ window.App = window.App || {};
       sh.data = data;
       sh.ownerName = String(data.name || sh.ownerName);
       sh.savedAt = partyToday();
+      partySyncLinkedFromSheet(card, sh);
     });
     toast(App.tf('partySheetUpdated', { name: partyOwnerName(sh) }));
     if (after) after();
@@ -8862,6 +9205,7 @@ window.App = window.App || {};
         const mx = counterMaxNum(c);
         if (mx == null || !Number.isFinite(mx) || mx <= 0) return;
         list.push({
+          cardId: c.id,
           name: String(c.name || App.t('typeCounter')),
           current: Math.max(0, Math.min(partyLiveValue(card, sh, c), mx)),
           max: mx,
@@ -8898,6 +9242,7 @@ window.App = window.App || {};
     const ch = activeChar();
     if (!ch) return;
     let rowName = '';
+    let reused = false;
     mutate(function () {
       let enc = ch.cards.find(function (c) { return c.type === 'initiative'; });
       if (!enc) {
@@ -8906,9 +9251,34 @@ window.App = window.App || {};
         ch.cards.push(enc);
         autoPlace(ch, enc);
       }
-      const row = iniNewRow(enc, null);
-      row.name = iniUniqueRowName(enc, partyOwnerName(sh));
+      iniEnsureEnc(enc);
+      const owner = partyOwnerName(sh);
+      const link = { party: card.id, sheet: sh.id, counter: hp.cardId, counterName: hp.name };
+      // уже привязанная строка этого игрока — просто обновляем HP
+      let row = iniRows(enc).find(function (r) {
+        const l = r.link;
+        return l && l.party === card.id && l.sheet === sh.id &&
+          (l.counter === hp.cardId || (l.counterName && partyNorm(l.counterName) === partyNorm(hp.name)));
+      });
+      // старая строка без привязки: имя владельца и тот же максимум HP
+      if (!row) {
+        row = iniRows(enc).find(function (r) {
+          const rn = String(r.name || '');
+          return !r.link && num(r.hp && r.hp.max) === hp.max &&
+            (rn === owner || rn.replace(/\s+\d+$/, '') === owner);
+        });
+      }
+      if (row) {
+        reused = true;
+        row.link = link;
+        row.hp = { current: hp.current, max: hp.max, shield: 0 };
+        rowName = row.name;
+        return;
+      }
+      row = iniNewRow(enc, null);
+      row.name = iniUniqueRowName(enc, owner);
       row.hp = { current: hp.current, max: hp.max, shield: 0 };
+      row.link = link;
       row.ac = 0;
       row.attacks = [];
       row.notes = '';
@@ -8916,7 +9286,7 @@ window.App = window.App || {};
       row.out = false;
       rowName = row.name;
     });
-    toast(App.tf('sheetFighterAdded', { name: rowName }));
+    toast(App.tf(reused ? 'sheetFighterLinked' : 'sheetFighterAdded', { name: rowName }));
   }
 
   // ----- Второй слой: полная таблица (телефон) -----
@@ -9174,6 +9544,7 @@ window.App = window.App || {};
           if (!card.live || typeof card.live !== 'object') card.live = {};
           if (draft === num(c.current)) delete card.live[key];
           else card.live[key] = draft;
+          partySyncToInitiative(card, sh, c, draft, max);
         });
       } else {
         render();
@@ -14705,11 +15076,45 @@ window.App = window.App || {};
   // Версия приложения для окна обновлений. При выпуске новой версии подними
   // APP_VERSION, добавь запись в NEWS (только новые пункты) и не забудь
   // style.css?v= в index.html и CACHE_NAME в sw.js.
-  const APP_VERSION = 192;
+  const APP_VERSION = 195;
   const NEWS_SEEN_KEY = 'custplay-news-seen';   // отдельно от state: не попадает в undo и экспорт
   const NEWS = {
     // 140–141 — хотфиксы, 142–145 — заметки со страницами, 146 — режим максимума,
     // 147 — полоса закладок заметки, 148–151 — состояния, 152 — щит баффов.
+    195: {
+      ru: [
+        'Инициатива мастера: HP игрока синхронизируется с карточкой отряда. Урон в инициативе сразу уменьшает HP в отряде, правка HP в отряде меняет строку инициативы.',
+        'Привязка создаётся кнопкой «В текущую встречу» (⚔) у листа игрока; старые строки с тем же именем и максимумом HP привязываются при повторном нажатии.',
+        'Смена встречи и «Новый бой» обновляют HP в карточке отряда; отмена Ctrl+Z возвращает обе карточки.'
+      ],
+      en: [
+        'Master initiative: a player’s HP is synced with the party card. Damage in initiative immediately lowers HP in the party card, and editing HP there changes the initiative row.',
+        'The link is created by “Send to current encounter” (⚔) on a player sheet; old rows with the same name and max HP are linked when you press it again.',
+        'Switching encounters and “New fight” update HP in the party card; Ctrl+Z restores both cards.'
+      ]
+    },
+    194: {
+      ru: [
+        'Инициатива: у лупы «Свойства» больше нет постоянной фиолетовой подсветки — как у остальных кнопок.',
+        'Свойства бойца: поля атак получили обычный тёмный фон, а строка атаки больше не вылезает за край — мусорка помещается.'
+      ],
+      en: [
+        'Initiative: the magnifier “Properties” button no longer has a permanent purple highlight — same as the other buttons.',
+        'Combatant properties: attack inputs now use the normal dark background, and the attack row no longer overflows — the trash button fits.'
+      ]
+    },
+    193: {
+      ru: [
+        'Инициатива мастера: вместо отдельных КД и бонуса — статы. Можно добавить сколько угодно, у имени видно до трёх, а −/+ на карточке меняют только быстрый (★).',
+        'Свойства бойца стали компактнее: имя и босс, инициатива/HP/щит одной строкой, заметка, статы и атаки. Без формул.',
+        'Старые КД и бонус переносятся в статы: КД становится «КБ», бонус — скрытым статом «Бонус».'
+      ],
+      en: [
+        'Master initiative: separate AC and bonus are replaced by stats. Add as many as you like, up to three are shown by the name, and −/+ on the card change only the quick stat (★).',
+        'Combatant properties are more compact: name and boss, initiative/HP/shield in one row, notes, stats and attacks. No formulas.',
+        'Old AC and bonus move into stats: AC becomes “AC”, bonus becomes a hidden “Bonus” stat.'
+      ]
+    },
     192: {
       ru: [
         'Настройки: вместо двух полей выбора — два режима. Сверху «Игрок» и «Мастер», ниже виден только лист выбранного режима.',
