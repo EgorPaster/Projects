@@ -1266,6 +1266,13 @@ window.App = window.App || {};
   function effectTargetCards(field) {
     const ch = activeChar();
     if (!ch) return [];
+    // без поля — все карточки, которые вообще принимают эффекты предмета:
+    // так в редакторе можно сначала выбрать счётчик, а потом «текущее»
+    if (!field) {
+      return (ch.cards || []).filter(function (c) {
+        return c.type === 'counter' || (MOD_FIELDS[c.type] || []).length > 0;
+      });
+    }
     return (ch.cards || []).filter(function (c) {
       if (field === 'current' || field === 'shield') return c.type === 'counter';
       return (MOD_FIELDS[c.type] || []).indexOf(field) !== -1;
@@ -1293,7 +1300,7 @@ window.App = window.App || {};
   function activeRowEffects(row) {
     const e = effectiveInventoryRow(row);
     return (e.effects || []).filter(function (ef) {
-      return effectField(ef) !== 'current' && effectWorks(ef);
+      return itemEffectField(ef) !== 'current' && effectWorks(ef);
     });
   }
 
@@ -1440,7 +1447,7 @@ window.App = window.App || {};
       if (effectField(ef) !== 'shield') return;
       const t = ef.target && findCard(ef.target);
       if (!t || t.type !== 'counter') return;
-      const r = rollItemExpr(ef.value);
+      const r = rollItemValue(buff, ef.value);
       if (!r) return;
       byTarget[t.id] = (byTarget[t.id] || 0) + r.total;
     });
@@ -4560,7 +4567,7 @@ window.App = window.App || {};
         actions.push('<button type="button" class="inv-act dmg" data-act="item-damage" data-item="' + esc(it.id) + '">' + esc(e.damage) + '</button>');
       }
       if (e.category === 'consumable') {
-        const cur = (e.effects || []).find(function (ef) { return ef.field === 'current'; });
+        const cur = (e.effects || []).find(function (ef) { return itemEffectField(ef) === 'current'; });
         actions.push('<button type="button" class="inv-act use" data-act="item-use" data-item="' + esc(it.id) + '">' +
           esc(cur ? (cur.label || cur.value) : App.t('itemUse')) + '</button>');
       }
@@ -4676,6 +4683,20 @@ window.App = window.App || {};
     for (let i = 0; i < count; i++) { const v = 1 + Math.floor(Math.random() * sides); total += v; parts.push(v); }
     return { total: sign * total, text: (sign < 0 ? '−' : '') + parts.join(' + ') + (m[4] ? ' ' + m[4] : '') };
   }
+  // v196: разовое значение предмета может быть формулой со ссылками —
+  // «{Значение} − {Счётчик}». Редактор эффекта такую формулу уже принимает,
+  // значит и применение не должно молча отбрасывать её: сначала число/кубик,
+  // иначе считаем выражение по листу (card — владелец предмета, чтобы ссылка
+  // на саму цель не считалась циклом).
+  function rollItemValue(card, expr) {
+    const r = rollItemExpr(expr);
+    if (r) return r;
+    const s = String(expr == null ? '' : expr).trim();
+    if (!s) return null;
+    const n = exprNumber(card, s);
+    if (n == null || !Number.isFinite(n)) return null;
+    return { total: n, text: fmt(n) };
+  }
 
   function closeInvMenu() { closeMenuById('invMenu'); }
   function openInvMenu(anchor, html, onClick, opts) {
@@ -4702,7 +4723,8 @@ window.App = window.App || {};
     // v114: временные/тикающие эффекты тоже считаются готовыми к применению.
     // v115: выдача щита — тоже применение.
     const instant = (e.effects || []).filter(function (ef) {
-      return (ef.field === 'current' || ef.field === 'shield') && ef.mode !== 'tick' && effectReady(ef);
+      const f = itemEffectField(ef);
+      return (f === 'current' || f === 'shield') && ef.mode !== 'tick' && effectReady(ef);
     });
     const timed = (e.effects || []).filter(function (ef) {
       return timedItemEffect(ef);
@@ -4741,7 +4763,7 @@ window.App = window.App || {};
     if (ef.mode === 'tick' || ef.mode === 'adv' || ef.mode === 'dis') return true;
     // v162: модификатор без ходов («заменить значение на 0») тоже применяется:
     // он живёт в полосе активных эффектов, пока его не снимут
-    return effectField(ef) !== 'current';
+    return itemEffectField(ef) !== 'current';
   }
 
   // v124: временные эффекты предмета живут на карточке инвентаря, в полосе
@@ -4772,7 +4794,7 @@ window.App = window.App || {};
     (e.effects || []).forEach(function (ef) {
       if (!ef.target || !findCard(ef.target)) return;
       if (ef.field === 'shield') {
-        const r = rollItemExpr(ef.value);
+        const r = rollItemValue(card, ef.value);
         if (!r) return;
         const slot = shieldBy[ef.target] || (shieldBy[ef.target] = { sum: 0, left: 0 });
         slot.sum += r.total;
@@ -4782,8 +4804,8 @@ window.App = window.App || {};
         slot.from = card.id;
         return;
       }
-      if (ef.field !== 'current' || ef.mode === 'tick') return;
-      const r = rollItemExpr(ef.value);
+      if (itemEffectField(ef) !== 'current' || ef.mode === 'tick') return;
+      const r = rollItemValue(card, ef.value);
       if (!r) return;
       const list = instantBy[ef.target] || (instantBy[ef.target] = []);
       list.push({ mode: ef.mode || 'add', value: r.total });
@@ -7217,6 +7239,15 @@ window.App = window.App || {};
   // v79: block относится к зарядам, а не к бонусу. Старые записи (v78) читаем
   // как charges, иначе при первой правке режим молча превратился бы в «прибавить».
   function effectField(ef) { return ef.mode === 'block' ? 'charges' : (ef.field || 'bonus'); }
+  // v196: у счётчика нет отдельного «значения» — это его текущее. Старые
+  // предметы могли сохранить пару «значение → счётчик»; считаем её текущим,
+  // иначе эффект молча не применялся.
+  function itemEffectField(ef) {
+    const f = effectField(ef);
+    if (f !== 'value' || !ef || !ef.target) return f;
+    const t = findCard(ef.target);
+    return (t && t.type === 'counter') ? 'current' : f;
+  }
   function cloneEffect(ef) {
     return { mode: ef.mode, field: effectField(ef), value: ef.value, label: ef.label || '', target: ef.target || null, custom: !!ef.custom,
              timing: ef.mode === 'tick' ? (ef.timing || 'start') : null };
@@ -7275,10 +7306,18 @@ window.App = window.App || {};
   function fxHasMode(cfg, field, mode, target) {
     return (cfg.modesFor(field, target) || []).indexOf(mode) !== -1;
   }
-  // поля для «Числа»: текущее и щит — отдельные виды эффекта, не поле числа
+  // поля для «Числа»: щит — отдельный вид эффекта; «текущее» — только
+  // у предмета (разовое применение к счётчику), у баффа/состояния это тик.
   function fxNumberFields(cfg, target) {
     return (cfg.fieldsFor(target) || []).filter(function (f) {
-      if (f === 'shield' || f === 'current') return false;
+      if (f === 'shield') return false;
+      if (f === 'current') {
+        if (!cfg.allowInstantCurrent) return false;
+        // у шаблона предмета цели ещё нет — поле нужно; у своей вещи
+        // «текущее» имеет смысл только для счётчика
+        const t = target ? findCard(target) : null;
+        if (t && t.type !== 'counter') return false;
+      }
       return FX_MATH_MODES.some(function (m) { return fxHasMode(cfg, f, m, target); });
     });
   }
@@ -7417,10 +7456,17 @@ window.App = window.App || {};
       ef.duration = num(d.duration) > 0 ? Math.round(num(d.duration)) : null;
     }
     // битую формулу ловим сразу, но только когда есть цель: в шаблоне
-    // ссылки на карточки ещё не к чему привязать
+    // ссылки на карточки ещё не к чему привязать.
+    // v196: у разового «текущего»/щита формула может ссылаться на саму цель
+    // («{Здоровье} − 1»); при применении она считается от владельца предмета,
+    // поэтому проверяем от нейтрального контекста, а не от цели.
     if (cfg.targetsFor && d.target && (d.kind === 'number' || d.kind === 'tick')) {
       const t = findCard(d.target);
-      if (t && exprNumber(t, ef.value) == null) {
+      // только разовое «текущее» считается от владельца предмета; тик
+      // по-прежнему считается от цели, иначе ссылка на себя — цикл
+      const ctx = (d.kind === 'number' && ef.field === 'current')
+        ? { id: '__fx_check__', type: 'skill' } : t;
+      if (t && exprNumber(ctx, ef.value) == null) {
         return { error: { where: 'value', key: 'fxBadFormula' } };
       }
     }
@@ -13330,6 +13376,11 @@ window.App = window.App || {};
     const n = normalizeEffect(ef);
     if (n.mode === 'block') n.field = 'charges';
     if (n.mode === 'tick') n.field = 'current';
+    // старые/ошибочные «значение → счётчик» — это текущее счётчика
+    if (n.field === 'value' && n.target) {
+      const t = findCard(n.target);
+      if (t && t.type === 'counter') n.field = 'current';
+    }
     return n;
   }
 
@@ -13591,9 +13642,20 @@ window.App = window.App || {};
       openFxEditor({
         effect: index == null ? null : arr[index],
         kinds: ['number', 'roll', 'die', 'tick', 'block', 'shield'],
-        fieldsFor: function () { return fieldIdsFor(); },
+        fieldsFor: function (targetId) {
+          const t = targetId ? findCard(targetId) : null;
+          if (!t) return fieldIdsFor();
+          const out = (MOD_FIELDS[t.type] || []).slice();
+          if (t.type === 'counter') out.push('current');
+          if (t.type === 'counter' && draft.category === 'consumable') out.push('shield');
+          return out;
+        },
         modesFor: function (field) { return effectModesFor(field); },
-        targetsFor: own ? function (kind, field) { return effectTargetCards(field || 'bonus'); } : null,
+        // разовое «текущее» имеет смысл только у расходника
+        allowInstantCurrent: draft.category === 'consumable',
+        // цель не фильтруем по полю: сначала выбирают карточку, потом
+        // «что меняем»; иначе из навыка нельзя перейти на счётчик
+        targetsFor: own ? function () { return effectTargetCards(''); } : null,
         targetOptional: true,
         allowDuration: draft.category === 'consumable',
         anchor: anchor,
@@ -15076,11 +15138,12 @@ window.App = window.App || {};
   // Версия приложения для окна обновлений. При выпуске новой версии подними
   // APP_VERSION, добавь запись в NEWS (только новые пункты) и не забудь
   // style.css?v= в index.html и CACHE_NAME в sw.js.
-  const APP_VERSION = 195;
+  const APP_VERSION = 196;
   const NEWS_SEEN_KEY = 'custplay-news-seen';   // отдельно от state: не попадает в undo и экспорт
   const NEWS = {
     // 140–141 — хотфиксы, 142–145 — заметки со страницами, 146 — режим максимума,
     // 147 — полоса закладок заметки, 148–151 — состояния, 152 — щит баффов.
+    196: { ru: [], en: [] },
     195: {
       ru: [
         'Инициатива мастера: HP игрока синхронизируется с карточкой отряда. Урон в инициативе сразу уменьшает HP в отряде, правка HP в отряде меняет строку инициативы.',
